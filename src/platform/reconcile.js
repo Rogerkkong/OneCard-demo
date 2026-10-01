@@ -63,15 +63,21 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
    * `writes` are the kiosk top-ups the card itself records (the read-back's `writes`). A write
    * whose order is still PAID or PARKED reached the card but was never confirmed (a power cut
    * after the write): the money is on the card but not yet in the books, and the kiosk confirms
-   * it right after the read-back. Those amounts are left out of the comparison, so a power cut
-   * does not raise a false BALANCE_MISMATCH. Refunded or unknown orders are never left out.
-   * Codes: SNAPSHOT_INVALID (400) for a malformed digest, balance, counter or writes list.
+   * it right after the read-back. Those amounts (`unconfirmedSen`) are left out of the card's
+   * side, so a power cut does not raise a false BALANCE_MISMATCH. Refunded or unknown orders are
+   * never left out.
+   * `readAt` is when the card was read (the read-back's time, ms). The kiosk writes and confirms
+   * this tap's top-ups right after the read-back, and the confirm can reach the books before the
+   * read-back does (the broker acknowledges a message before delivering it). Top-ups confirmed
+   * as written to this card at or after `readAt`, and not among its writes, were not on the card
+   * when it was read: their amounts (`laterSen`) are left out of the books' side.
+   * Codes: SNAPSHOT_INVALID (400) for a malformed digest, balance, counter, writes list or time.
    * @param {{ schoolId: string, cardDigest: string, balanceSen: number, cardSeq: number,
-   *   writes?: Array<{ orderId: string, amountSen: number }> }} args
-   * @returns {{ match: boolean, mirrorSen: number|null, cardSen: number, unconfirmedSen: number }}
+   *   writes?: Array<{ orderId: string, amountSen: number }>, readAt?: number }} args
+   * @returns {{ match: boolean, mirrorSen: number|null, cardSen: number, unconfirmedSen: number, laterSen: number }}
    */
   function checkCardSnapshot(args) {
-    const { schoolId, cardDigest, balanceSen, cardSeq, writes = [] } = args ?? {};
+    const { schoolId, cardDigest, balanceSen, cardSeq, writes = [], readAt } = args ?? {};
     if (typeof cardDigest !== 'string' || !DIGEST_RE.test(cardDigest)) throw snapshotInvalid('cardDigest must be a 64-character card digest');
     if (!isSen(balanceSen)) throw snapshotInvalid('balanceSen must be whole sen, 0 or more');
     // a new card that was never written has counter 0
@@ -82,11 +88,15 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
         throw snapshotInvalid('each write needs an orderId and amountSen in whole sen');
       }
     }
+    if (readAt !== undefined && (!Number.isSafeInteger(readAt) || readAt < 0)) throw snapshotInvalid('readAt must be a time in ms');
     const card = schools.getCardByDigest(schoolId, cardDigest);
-    if (!card || !card.memberId) return { match: false, mirrorSen: null, cardSen: balanceSen, unconfirmedSen: 0 };
+    if (!card || !card.memberId) return { match: false, mirrorSen: null, cardSen: balanceSen, unconfirmedSen: 0, laterSen: 0 };
     const unconfirmedSen = unconfirmedWritesSen(schoolId, card.memberId, writes);
+    const laterSen = readAt === undefined ? 0 : laterWritesSen(schoolId, card, writes, readAt);
     const mirrorSen = ledger.balance(schoolId, 'STUDENT_WALLET', card.memberId);
-    const match = mirrorSen === balanceSen - unconfirmedSen;
+    const cardSide = balanceSen - unconfirmedSen;
+    const booksSide = mirrorSen - laterSen;
+    const match = cardSide === booksSide;
     if (!match) {
       differences.open({
         schoolId,
@@ -99,12 +109,13 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
           cardSen: balanceSen,
           unconfirmedSen,
           mirrorSen,
-          differenceSen: balanceSen - unconfirmedSen - mirrorSen,
-          hint: mismatchHint(balanceSen - unconfirmedSen, mirrorSen),
+          laterSen,
+          differenceSen: cardSide - booksSide,
+          hint: mismatchHint(cardSide, booksSide),
         },
       });
     }
-    return { match, mirrorSen, cardSen: balanceSen, unconfirmedSen };
+    return { match, mirrorSen, cardSen: balanceSen, unconfirmedSen, laterSen };
   }
 
   /**
@@ -123,6 +134,23 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
         asId(schoolId), w.orderId, memberId,
       );
       if (order && order.amount_sen === w.amountSen) total += order.amount_sen;
+    }
+    return total;
+  }
+
+  /**
+   * Sum of the top-ups a kiosk confirmed as written to this very card at or after `readAt`
+   * that the card did not list among its writes: written after the card was read. Orders a
+   * person marked ADDED have no card, so they are never left out.
+   */
+  function laterWritesSen(schoolId, card, writes, readAt) {
+    const listed = new Set(writes.map((w) => w.orderId));
+    let total = 0;
+    for (const order of db.all(
+      "SELECT id, amount_sen FROM topup_order WHERE school_id = ? AND member_id = ? AND card_id = ? AND status = 'ADDED' AND added_at >= ?",
+      asId(schoolId), card.memberId, card.id, readAt,
+    )) {
+      if (!listed.has(order.id)) total += order.amount_sen;
     }
     return total;
   }

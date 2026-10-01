@@ -136,8 +136,8 @@ const receive = (record, { school = t.a, via = 'MQTT' } = {}) =>
   t.settlement.receive({ schoolId: school.id, uploaderDeviceId: school.devices[record.origin]?.id ?? null, via, record });
 
 /** What a kiosk read-back of the card reports (`writes`: the kiosk top-ups the card keeps). */
-const snapshot = (card, school = t.a, writes = undefined) =>
-  t.reconcile.checkCardSnapshot({ schoolId: school.id, cardDigest: card.digest, balanceSen: card.balanceSen, cardSeq: card.cardSeq, writes });
+const snapshot = (card, school = t.a, writes = undefined, readAt = undefined) =>
+  t.reconcile.checkCardSnapshot({ schoolId: school.id, cardDigest: card.digest, balanceSen: card.balanceSen, cardSeq: card.cardSeq, writes, readAt });
 
 /** A parent's top-up order for a member, in the state the top-ups service left it. */
 function order(school, key, amountSen, status = 'PAID') {
@@ -178,10 +178,10 @@ describe('checkCardSnapshot', () => {
   test('a card holding exactly its mirror balance matches', () => {
     const card = funded(t.a, 'aina', 2000);
     receive(sale(card, { n: 1 }));
-    assert.deepEqual(snapshot(card), { match: true, mirrorSen: 1650, cardSen: 1650, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card), { match: true, mirrorSen: 1650, cardSen: 1650, unconfirmedSen: 0, laterSen: 0 });
     assert.equal(t.differences.list(t.a.id).length, 0);
     // a new card that was never written: counter 0, nothing on it, nothing in the books
-    assert.deepEqual(snapshot(chip(t.a, t.a.members.badrul.uid)), { match: true, mirrorSen: 0, cardSen: 0, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(chip(t.a, t.a.members.badrul.uid)), { match: true, mirrorSen: 0, cardSen: 0, unconfirmedSen: 0, laterSen: 0 });
     assertBalanced();
   });
 
@@ -189,19 +189,19 @@ describe('checkCardSnapshot', () => {
     const card = funded(t.a, 'aina', 2000);
     receive(sale(card, { n: 1 }));
     const waiting = sale(card, { origin: 'CANTEEN-02', n: 1 }); // still in an offline reader's journal
-    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 1650, cardSen: 1300, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 1650, cardSen: 1300, unconfirmedSen: 0, laterSen: 0 });
     const [d] = diffsOf('BALANCE_MISMATCH');
     assert.equal(d.ref, `${card.digest}:2`);
     const { hint, ...amounts } = d.detail;
-    assert.deepEqual(amounts, { memberId: t.a.members.aina.id, last4: 'E5F6', cardSeq: 2, cardSen: 1300, unconfirmedSen: 0, mirrorSen: 1650, differenceSen: -350 });
+    assert.deepEqual(amounts, { memberId: t.a.members.aina.id, last4: 'E5F6', cardSeq: 2, cardSen: 1300, unconfirmedSen: 0, mirrorSen: 1650, laterSen: 0, differenceSen: -350 });
     assert.match(hint, /holds less than the books/);
     assert.match(hint, /journal/);
     // the same read-back again is the same difference
-    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 1650, cardSen: 1300, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 1650, cardSen: 1300, unconfirmedSen: 0, laterSen: 0 });
     assert.equal(diffsOf('BALANCE_MISMATCH').length, 1);
     // once the record arrives, the card and the books agree again
     receive(waiting, { via: 'KIOSK_READBACK' });
-    assert.deepEqual(snapshot(card), { match: true, mirrorSen: 1300, cardSen: 1300, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card), { match: true, mirrorSen: 1300, cardSen: 1300, unconfirmedSen: 0, laterSen: 0 });
     // a later mismatch at another card counter is a new difference
     sale(card, { origin: 'CANTEEN-02', n: 2 });
     assert.equal(snapshot(card).match, false);
@@ -214,7 +214,7 @@ describe('checkCardSnapshot', () => {
     // a kiosk wrote RM 10.00 to the card, then lost power before confirming it
     card.balanceSen += 1000;
     card.cardSeq += 1;
-    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card), { match: false, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 0, laterSen: 0 });
     const [d] = diffsOf('BALANCE_MISMATCH');
     assert.equal(d.detail.differenceSen, 1000);
     assert.match(d.detail.hint, /holds more than the books/);
@@ -223,10 +223,10 @@ describe('checkCardSnapshot', () => {
 
   test('a card the school does not know has no mirror to compare with', () => {
     const stranger = chip(t.a, '04FFEEDDCCBBAA', 500);
-    assert.deepEqual(snapshot(stranger), { match: false, mirrorSen: null, cardSen: 500, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(stranger), { match: false, mirrorSen: null, cardSen: 500, unconfirmedSen: 0, laterSen: 0 });
     // nor does another school's card, even with a UID this school also issued
     const visitor = funded(t.b, 'chong', 700);
-    assert.deepEqual(snapshot(visitor, t.a), { match: false, mirrorSen: null, cardSen: 700, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(visitor, t.a), { match: false, mirrorSen: null, cardSen: 700, unconfirmedSen: 0, laterSen: 0 });
     assert.equal(t.differences.list(t.a.id).length, 0);
     assert.equal(t.differences.list(t.b.id).length, 0);
   });
@@ -234,8 +234,8 @@ describe('checkCardSnapshot', () => {
   test('each school compares its own cards with its own books', () => {
     const aina = funded(t.a, 'aina', 2000);
     const chong = funded(t.b, 'chong', 700); // the same UID, another school
-    assert.deepEqual(snapshot(aina, t.a), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0 });
-    assert.deepEqual(snapshot(chong, t.b), { match: true, mirrorSen: 700, cardSen: 700, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(aina, t.a), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0, laterSen: 0 });
+    assert.deepEqual(snapshot(chong, t.b), { match: true, mirrorSen: 700, cardSen: 700, unconfirmedSen: 0, laterSen: 0 });
     chong.balanceSen = 100;
     assert.equal(snapshot(chong, t.b).match, false);
     assert.equal(diffsOf('BALANCE_MISMATCH', t.b).length, 1);
@@ -266,7 +266,7 @@ describe('checkCardSnapshot', () => {
     assert.throws(() => t.reconcile.checkCardSnapshot(), code('SNAPSHOT_INVALID', 400));
     assert.throws(() => t.reconcile.checkCardSnapshot(null), code('SNAPSHOT_INVALID', 400));
     assert.equal(t.differences.list(t.a.id).length, 0);
-    assert.deepEqual(t.reconcile.checkCardSnapshot(good), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0 });
+    assert.deepEqual(t.reconcile.checkCardSnapshot(good), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0, laterSen: 0 });
   });
 });
 
@@ -276,7 +276,7 @@ describe('checkCardSnapshot with the top-ups the card keeps', () => {
     const orderId = order(t.a, 'aina', 1000); // paid: the books hold it as waiting to be added
     // the kiosk lost power right after writing the card, before it could confirm
     const writes = [written(card, orderId, 1000)];
-    assert.deepEqual(snapshot(card, t.a, writes), { match: true, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 1000 });
+    assert.deepEqual(snapshot(card, t.a, writes), { match: true, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 1000, laterSen: 0 });
     assert.equal(t.differences.list(t.a.id).length, 0);
     // a PARKED order (add window over, waiting for a person) is still money on its way to the books
     t.ctx.db.run("UPDATE topup_order SET status = 'PARKED' WHERE id = ?", orderId);
@@ -291,14 +291,14 @@ describe('checkCardSnapshot with the top-ups the card keeps', () => {
     const card = funded(t.a, 'aina', 2000);
     const orderId = order(t.a, 'aina', 2000, 'ADDED');
     const writes = [{ orderId, amountSen: 2000, kioskTxn: deviceTxnNo('KIOSK-01', 1), at: t.ctx.clock.iso() }];
-    assert.deepEqual(snapshot(card, t.a, writes), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0 });
+    assert.deepEqual(snapshot(card, t.a, writes), { match: true, mirrorSen: 2000, cardSen: 2000, unconfirmedSen: 0, laterSen: 0 });
   });
 
   test('only orders the platform still holds as paid are left out', () => {
     const card = funded(t.a, 'aina', 2000);
     for (const status of ['CREATED', 'CANCELLED', 'FAILED', 'EXPIRED', 'REFUNDED']) {
       const writes = [written(card, order(t.a, 'aina', 1000, status), 1000)];
-      assert.deepEqual(snapshot(card, t.a, writes), { match: false, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 0 }, status);
+      assert.deepEqual(snapshot(card, t.a, writes), { match: false, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 0, laterSen: 0 }, status);
       card.balanceSen -= 1000; // undo, so each case is the only extra money on the card
     }
   });
@@ -326,17 +326,17 @@ describe('checkCardSnapshot with the top-ups the card keeps', () => {
   test('the same write listed twice counts once', () => {
     const card = funded(t.a, 'aina', 2000);
     const write = written(card, order(t.a, 'aina', 1000), 1000);
-    assert.deepEqual(snapshot(card, t.a, [write, { ...write }]), { match: true, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 1000 });
+    assert.deepEqual(snapshot(card, t.a, [write, { ...write }]), { match: true, mirrorSen: 2000, cardSen: 3000, unconfirmedSen: 1000, laterSen: 0 });
   });
 
   test('a mismatch says how much was left out', () => {
     const card = funded(t.a, 'aina', 2000);
     const writes = [written(card, order(t.a, 'aina', 1000), 1000)];
     sale(card, { origin: 'CANTEEN-02', n: 1 }); // still in an offline reader's journal
-    assert.deepEqual(snapshot(card, t.a, writes), { match: false, mirrorSen: 2000, cardSen: 2650, unconfirmedSen: 1000 });
+    assert.deepEqual(snapshot(card, t.a, writes), { match: false, mirrorSen: 2000, cardSen: 2650, unconfirmedSen: 1000, laterSen: 0 });
     const [d] = diffsOf('BALANCE_MISMATCH');
     const { hint, ...amounts } = d.detail;
-    assert.deepEqual(amounts, { memberId: t.a.members.aina.id, last4: 'E5F6', cardSeq: 2, cardSen: 2650, unconfirmedSen: 1000, mirrorSen: 2000, differenceSen: -350 });
+    assert.deepEqual(amounts, { memberId: t.a.members.aina.id, last4: 'E5F6', cardSeq: 2, cardSen: 2650, unconfirmedSen: 1000, mirrorSen: 2000, laterSen: 0, differenceSen: -350 });
     assert.match(hint, /holds less than the books/);
   });
 
@@ -369,6 +369,111 @@ describe('checkCardSnapshot with the top-ups the card keeps', () => {
     // fifty writes (the most a read-back may carry) and an empty list are fine
     assert.equal(t.reconcile.checkCardSnapshot({ ...good, writes: Array.from({ length: 50 }, () => w) }).match, true);
     assert.equal(t.reconcile.checkCardSnapshot({ ...good, writes: [] }).match, true);
+  });
+});
+
+describe('checkCardSnapshot and top-ups written after the card was read', () => {
+  /**
+   * A top-up a kiosk confirmed as written to `cardId` at the lab's current time, booked into
+   * the member's wallet the way kioskConfirm books it.
+   */
+  function confirmed(school, key, amountSen, { cardId = school.members[key].cardId } = {}) {
+    const orderId = order(school, key, amountSen, 'ADDED');
+    t.ctx.db.run('UPDATE topup_order SET card_id = ?, added_at = ?, added_by_device = ? WHERE id = ?', cardId, t.ctx.clock.now(), 'KIOSK-01', orderId);
+    const memberId = school.members[key].id;
+    t.ledger.post({
+      schoolId: school.id,
+      idemKey: `TOPUP:${orderId}:ADDED`,
+      kind: 'TOPUP',
+      lines: [{ kind: 'CASH_RECEIVED', side: 'DR', amountSen }, { kind: 'STUDENT_WALLET', memberId, side: 'CR', amountSen }],
+    });
+    return orderId;
+  }
+
+  test('a top-up confirmed before the read-back arrives, but written after it was taken, is left out', () => {
+    const card = funded(t.a, 'aina', 2000);
+    const readAt = t.ctx.clock.now(); // the kiosk reads the card: RM 20.00
+    const taken = { ...card };
+    t.ctx.clock.advance(800);
+    // then writes this tap's RM 10.00 and confirms it; the confirm beats the read-back to the books
+    confirmed(t.a, 'aina', 1000);
+    assert.deepEqual(snapshot(taken, t.a, [], readAt), { match: true, mirrorSen: 3000, cardSen: 2000, unconfirmedSen: 0, laterSen: 1000 });
+    assert.equal(t.differences.list(t.a.id).length, 0);
+    // without the read-back's time the same check is the false mismatch it used to be
+    assert.equal(snapshot(taken).match, false);
+  });
+
+  test('a top-up confirmed at the very moment the card was read counts as later', () => {
+    const card = funded(t.a, 'aina', 2000);
+    const readAt = t.ctx.clock.now();
+    confirmed(t.a, 'aina', 500); // same millisecond (a manual lab clock stands still)
+    assert.equal(snapshot(card, t.a, [], readAt).laterSen, 500);
+  });
+
+  test('top-ups confirmed before the card was read are on it: never left out', () => {
+    // an older top-up the card no longer lists (it keeps its last ten writes)
+    const card = funded(t.a, 'aina', 2000);
+    confirmed(t.a, 'aina', 1000);
+    card.balanceSen += 1000;
+    t.ctx.clock.advance(HOUR);
+    assert.deepEqual(snapshot(card, t.a, [], t.ctx.clock.now()), { match: true, mirrorSen: 3000, cardSen: 3000, unconfirmedSen: 0, laterSen: 0 });
+  });
+
+  test('a write the card lists is on it, even when its confirm came after the read', () => {
+    const card = funded(t.a, 'aina', 2000);
+    const readAt = t.ctx.clock.now();
+    t.ctx.clock.advance(500);
+    // a power-cut write the kiosk re-confirmed right after this read-back
+    const orderId = confirmed(t.a, 'aina', 1000);
+    card.balanceSen += 1000;
+    const writes = [{ orderId, amountSen: 1000, kioskTxn: deviceTxnNo('KIOSK-01', 7), at: t.ctx.clock.iso() }];
+    assert.deepEqual(snapshot(card, t.a, writes, readAt), { match: true, mirrorSen: 3000, cardSen: 3000, unconfirmedSen: 0, laterSen: 0 });
+  });
+
+  test('only kiosk writes to this very card are left out', () => {
+    // Aina lost her first card; the new one holds what her wallet held
+    funded(t.a, 'aina', 2000);
+    const first = t.a.members.aina.cardId;
+    t.schools.markCardLost({ schoolId: t.a.id, uid: t.a.members.aina.uid, actor: 'test' });
+    t.schools.issueCard({ schoolId: t.a.id, memberId: t.a.members.aina.id, uid: '04C0FFEE123456', actor: 'test' });
+    const card = chip(t.a, '04C0FFEE123456', 2000);
+    const readAt = t.ctx.clock.now();
+    t.ctx.clock.advance(500);
+    // the late confirm of a write to her first card, and an order a person marked ADDED (no card)
+    confirmed(t.a, 'aina', 700, { cardId: first });
+    confirmed(t.a, 'aina', 300, { cardId: null });
+    // and another member's top-up, on his own card
+    confirmed(t.a, 'badrul', 900);
+    const result = snapshot(card, t.a, [], readAt);
+    assert.equal(result.laterSen, 0);
+    assert.equal(result.match, false);
+    const [d] = diffsOf('BALANCE_MISMATCH');
+    assert.equal(d.detail.laterSen, 0);
+    assert.equal(d.detail.differenceSen, -1000);
+  });
+
+  test('a mismatch shows what was left out on both sides', () => {
+    const card = funded(t.a, 'aina', 2000);
+    const writes = [written(card, order(t.a, 'aina', 1000), 1000)]; // unconfirmed: on the card, not in the books
+    sale(card, { origin: 'CANTEEN-02', n: 1 }); // still in an offline reader's journal
+    const readAt = t.ctx.clock.now(); // the kiosk reads the card: RM 26.50
+    t.ctx.clock.advance(300);
+    confirmed(t.a, 'aina', 500); // written after the read
+    assert.deepEqual(snapshot(card, t.a, writes, readAt), { match: false, mirrorSen: 2500, cardSen: 2650, unconfirmedSen: 1000, laterSen: 500 });
+    const { hint, ...amounts } = diffsOf('BALANCE_MISMATCH')[0].detail;
+    assert.deepEqual(amounts, {
+      memberId: t.a.members.aina.id, last4: 'E5F6', cardSeq: 2, cardSen: 2650, unconfirmedSen: 1000, mirrorSen: 2500, laterSen: 500, differenceSen: -350,
+    });
+    assert.match(hint, /holds less than the books/);
+  });
+
+  test('a read time that is not whole milliseconds is SNAPSHOT_INVALID', () => {
+    const card = funded(t.a, 'aina', 2000);
+    const good = { schoolId: t.a.id, cardDigest: card.digest, balanceSen: 2000, cardSeq: 0 };
+    for (const readAt of [-1, 1.5, '2026-10-05T02:00:00.000Z', Number.NaN, null, Infinity]) {
+      assert.throws(() => t.reconcile.checkCardSnapshot({ ...good, readAt }), code('SNAPSHOT_INVALID', 400), String(readAt));
+    }
+    assert.equal(t.reconcile.checkCardSnapshot({ ...good, readAt: 0 }).match, true);
   });
 });
 
