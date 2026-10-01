@@ -8,6 +8,8 @@
 //   LAB_MQTT_PORT   MQTT broker (default 1883)
 //   LAB_HOST        address to listen on (default 127.0.0.1, this computer only; --lan means 0.0.0.0)
 //   LAB_CONSOLE_PORT  machine and server consoles for PuTTY/telnet (default 2323, 0 = off)
+//   LAB_ALLOWED_HOSTS host names the web apps answer to besides localhost and IP addresses
+//                   (comma-separated, e.g. mylaptop.local; * turns the check off)
 //   LAB_MQTT_TLS_CERT, LAB_MQTT_TLS_KEY, LAB_MQTT_TLS_PORT (default 8883)
 //                   optional TLS listener; make lab certificates with scripts/make-lab-certs.sh
 import { readFileSync } from 'node:fs';

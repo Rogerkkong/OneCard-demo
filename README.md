@@ -129,6 +129,16 @@ more schools (SaaS tenants) and switching the whole cloud server off.
 | MQTT broker accounts, per-machine topics, retained settings, TLS (optional) | The school's real Wi-Fi or 4G coverage |
 | Platform: double-entry books, top-ups, refunds, lost cards, reconciliation | A real payment provider (the lab has a mock bank) |
 
+## Safety notes
+
+The lab is for your own computer or a network you trust. It has **no passwords**: the sign-in
+pages list every demo person, and the lab console can switch anything off or reset everything.
+
+- By default it listens on `127.0.0.1` only. `npm run start:lan` opens it to your network.
+- It answers only to `localhost` and IP addresses, so a website you visit cannot point its own
+  name at your computer and drive the lab (DNS rebinding). Use `LAB_ALLOWED_HOSTS` for other names.
+- Never put it on the public internet, and never put real names, cards, money or keys into it.
+
 ## Optional: TLS like a real device
 
 ```sh
@@ -153,6 +163,7 @@ that the broker's name is in the certificate — the same checks a real terminal
 | `LAB_HTTP_PORT` | 8080 | web apps and APIs |
 | `LAB_MQTT_PORT` | 1883 | MQTT broker |
 | `LAB_CONSOLE_PORT` | 2323 | machine and server consoles for PuTTY / telnet (`0` turns them off) |
+| `LAB_ALLOWED_HOSTS` | — | host names the web apps answer to besides `localhost` and IP addresses, comma-separated (e.g. `mylaptop.local`); `*` turns the check off (only behind a forwarding service you control) |
 | `LAB_HOST` | 127.0.0.1 | listen address; anything else exposes the lab (which has no passwords) to your network (`npm run start:lan` = `0.0.0.0`) |
 | `LAB_MQTT_TLS_CERT`, `LAB_MQTT_TLS_KEY`, `LAB_MQTT_TLS_PORT` | — , — , 8883 | optional TLS listener |
 
@@ -215,5 +226,7 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 
 **练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 15 个带预期结果的练习，从在线、离线消费，到挂失窗口、
 充值机断电、复制卡、对账、新增学校（多租户）和整台云端服务器停机。
+
+**安全须知：** 实验室只适合在你自己的电脑或信任的网络里用：它**没有密码**，登录页会列出所有示范人物，实验室控制台可以关掉任何东西或整个重置。默认只听 `127.0.0.1`；`npm run start:lan` 才开放给局域网。它只回应 `localhost` 和 IP 地址，所以你浏览的网站没法把自己的域名指到你的电脑来操控实验室（DNS rebinding）；要用别的名字就设 `LAB_ALLOWED_HOSTS`。不要放到公网上。
 
 **注意：** 实验室里的学校、人名、钱和密钥都是虚构的。这个 repo 是公开的，不要放真资料、真密钥或保密的对接文件。

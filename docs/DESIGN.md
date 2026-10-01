@@ -457,7 +457,7 @@ Order DTO: `{ id, schoolId, kind, parentId, memberId, memberName, amountSen, sta
 - `paymentCallback(payload)` where `payload = { orderId, provider, providerTxnId, result:'SUCCESS'|'FAILED', paidAmountSen, paidAt, signature }`
   and `signature = signPayload(ctx.settings.providerSecret, payload without signature)` → order.
   `PAYMENT_SIGNATURE_INVALID` (401); `ORDER_NOT_FOUND` (404). FAILED: CREATED → FAILED. SUCCESS: `PAYMENT_AMOUNT_MISMATCH` if amounts differ;
-  CREATED or CANCELLED → PAID (`paidAt`, `addBy = paidAt + addWindowDays`) and post `TOPUP:<id>:PAID`. A repeat callback for a PAID/ADDED order with the same providerTxnId returns the order unchanged.
+  CREATED, CANCELLED or FAILED → PAID (`paidAt`, `addBy = paidAt + addWindowDays`) and post `TOPUP:<id>:PAID`: when the provider says the money was taken, it must land (or be refunded later by the jobs), even after a cancel or a decline. The mock bank itself never sends SUCCESS for a FAILED order (a decline is final there), so a parent cannot use declined orders to pass the daily or monthly limits. A repeat callback for a PAID/ADDED order with the same providerTxnId returns the order unchanged.
 - `kioskPending({ schoolId, kioskDeviceId, cardDigest, max = 10 })` → `{ member:{ id, name }, orders:[{ orderId, kind, amountSen }], mirrorBalanceSen, waitingSen }`.
   `CARD_NOT_FOUND` (404); `CARD_NOT_ACTIVE` (409) for LOST/RETIRED cards. Orders: the member's PAID orders not past `addBy`, oldest first, at most `max` (1–50).
   Marks them `writeAttemptAt = now, writeResult = 'UNCONFIRMED'`.
@@ -599,6 +599,11 @@ kiosk signature checks, error mapping, static files under `web/` and the SSE str
 Errors: `{ error: { code, message, detail? } }` with the LabError status (500 + code `INTERNAL` for bugs).
 Sessions: in-memory, HTTP-only cookies `lab_operator`, `lab_staff` and `lab_parent`. **Lab only: there are no
 passwords; you pick who you are.** The admin API takes the school from the staff session, never from the request.
+
+Every response carries the security headers (CSP `default-src 'self'`, nosniff, no-referrer, DENY framing, no-store).
+A POST that a browser marks as coming from another page is refused 403 `CROSS_ORIGIN`. Requests whose Host is not
+`localhost`, `*.localhost`, an IP address or a name in `LAB_ALLOWED_HOSTS` get 421 `HOST_NOT_ALLOWED` (against DNS
+rebinding: the lab has no passwords).
 
 While the lab's cloud server is switched off, every route except `/api/lab/*` and static files answers 503
 `SERVER_DOWN`. Staff of a SUSPENDED school get 403 `SCHOOL_SUSPENDED` from the admin API; parents get the same for

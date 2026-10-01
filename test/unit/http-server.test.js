@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { createTestCtx, waitFor } from '../helpers.js';
 import { createPlatform } from '../../src/platform/platform.js';
 import { seedDemo } from '../../src/lab/seed.js';
-import { createHttpServer, importOptionalModule, MAX_BODY_BYTES } from '../../src/http/server.js';
+import { createHttpServer, importOptionalModule, MAX_BODY_BYTES, parseAllowedHosts } from '../../src/http/server.js';
 
 // The server's own mechanics: static files, security headers, errors, body rules, sessions, the
 // switched-off cloud server and the lab's event stream. Every school and person comes from the
@@ -651,7 +651,7 @@ describe('http server: the lab event stream (server-sent events)', () => {
     const socket = net.connect(Number(port), hostname);
     t.after(() => socket.destroy());
     await once(socket, 'connect');
-    socket.write('GET /api/lab/events HTTP/1.1\r\nHost: lab\r\n\r\n');
+    socket.write('GET /api/lab/events HTTP/1.1\r\nHost: localhost\r\n\r\n');
     socket.pause(); // never reads a byte
     await waitFor(() => live === 1, { message: 'the stream to start' });
     const big = 'x'.repeat(100_000);
@@ -681,5 +681,47 @@ describe('http server: the lab event stream (server-sent events)', () => {
     const { url } = await startLab(t);
     const res = await fetch(`${url}/api/lab/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     assert.equal(res.status, 405);
+  });
+});
+
+describe('host names (DNS rebinding)', () => {
+  test('answers localhost, *.localhost and any IP address typed directly', async (t) => {
+    const { url, port } = await startLab(t, { allowedHosts: [] });
+    for (const host of [`localhost:${port}`, 'localhost', `127.0.0.1:${port}`, `[::1]:${port}`, '192.168.1.20:8080', 'onecard.localhost', 'LOCALHOST.']) {
+      const res = await raw(url, { path: '/api/lab/state', headers: { host } });
+      assert.notEqual(res.status, 421, host);
+    }
+    // not from a browser: no Host header at all (HTTP/1.0)
+    const { hostname } = new URL(url);
+    const socket = net.connect(Number(port), hostname);
+    t.after(() => socket.destroy());
+    await once(socket, 'connect');
+    socket.write('GET /api/operator/health HTTP/1.0\r\n\r\n');
+    const [first] = await once(socket, 'data');
+    assert.doesNotMatch(first.toString('utf8').split('\r\n')[0], /421/);
+  });
+
+  test('refuses any other name, for the API and the pages, with the security headers', async (t) => {
+    const { url } = await startLab(t, { allowedHosts: [] });
+    for (const host of ['evil.example', 'evil.example:8080', 'localhost.evil.example', '127.0.0.1.nip.io', 'lab']) {
+      const api = await raw(url, { path: '/api/lab/state', headers: { host } });
+      assert.equal(api.status, 421, host);
+      assert.equal(JSON.parse(api.text).error.code, 'HOST_NOT_ALLOWED');
+      assert.match(api.headers['content-security-policy'], /default-src 'self'/);
+      const page = await raw(url, { path: '/lab/', headers: { host } });
+      assert.equal(page.status, 421, host);
+      assert.match(page.headers['content-type'], /text\/html/);
+    }
+  });
+
+  test('LAB_ALLOWED_HOSTS names are answered too, and * turns the check off', async (t) => {
+    assert.deepEqual(parseAllowedHosts(' MyLaptop.local, lab.example.org ,,'), ['mylaptop.local', 'lab.example.org']);
+    assert.deepEqual(parseAllowedHosts(undefined), []);
+    const named = await startLab(t, { allowedHosts: parseAllowedHosts('mylaptop.local') });
+    assert.notEqual((await raw(named.url, { path: '/api/lab/state', headers: { host: 'mylaptop.local:8080' } })).status, 421);
+    assert.equal((await raw(named.url, { path: '/api/lab/state', headers: { host: 'other.local' } })).status, 421);
+    const open = await startLab(t, { allowedHosts: ['*'] });
+    assert.notEqual((await raw(open.url, { path: '/api/lab/state', headers: { host: 'anything.example' } })).status, 421);
+    assert.throws(() => createHttpServer({ lab: named.lab, allowedHosts: 'mylaptop.local' }), TypeError);
   });
 });

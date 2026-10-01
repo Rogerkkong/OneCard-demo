@@ -2,7 +2,7 @@ import { createServer, STATUS_CODES } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
-import { isIPv6 } from 'node:net';
+import { isIP, isIPv6 } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LabError, isLabError } from '../shared/errors.js';
@@ -310,6 +310,7 @@ const PAGE_TITLES = {
   409: 'Conflict',
   413: 'Too large',
   415: 'Unsupported content',
+  421: 'Wrong address',
   500: 'Something went wrong',
   502: 'Bad gateway',
   503: 'Server unavailable',
@@ -368,9 +369,42 @@ function errorPage(status, code, message) {
  *   close(): Promise<void>, readonly url: string|null }}
  *   `url` is the address the server can reach itself on (the mock bank posts its callbacks there)
  */
-export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs = DEFAULT_HEARTBEAT_MS } = {}) {
+/**
+ * The names this lab answers to, against DNS rebinding: a web page the lab's user visits could
+ * point its own host name at 127.0.0.1 and drive the lab, which has no passwords. Browsers send
+ * that name in the Host header, so only these pass: localhost (and *.localhost), any IP address
+ * typed directly (a phone on the Wi-Fi opening http://192.168.1.20:8080), and the names in
+ * LAB_ALLOWED_HOSTS (comma-separated; `*` turns the check off, e.g. behind a forwarding service).
+ * A request without a Host header is not from a browser and passes.
+ */
+export function parseAllowedHosts(text) {
+  if (typeof text !== 'string' || text.trim() === '') return [];
+  return text.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+}
+
+function hostAllowed(hostHeader, allowedHosts) {
+  if (hostHeader === undefined) return true;
+  if (allowedHosts.includes('*')) return true;
+  const host = String(hostHeader).trim().toLowerCase();
+  // [v6]:port, [v6], name:port, v4:port, name
+  const m = /^\[([0-9a-f:.]+)\](?::\d{1,5})?$/.exec(host) ?? /^([^:\[\]]+)(?::\d{1,5})?$/.exec(host);
+  if (!m) return false;
+  const name = m[1].replace(/\.$/, '');
+  if (isIP(name)) return true;
+  if (name === 'localhost' || name.endsWith('.localhost')) return true;
+  return allowedHosts.includes(name);
+}
+
+export function createHttpServer({
+  lab,
+  webRoot = DEFAULT_WEB_ROOT,
+  heartbeatMs = DEFAULT_HEARTBEAT_MS,
+  allowedHosts = parseAllowedHosts(process.env.LAB_ALLOWED_HOSTS),
+} = {}) {
   if (!lab || typeof lab !== 'object') throw new TypeError('createHttpServer needs { lab }');
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('heartbeatMs must be a whole number of ms');
+  if (!Array.isArray(allowedHosts)) throw new TypeError('allowedHosts must be a list of host names');
+  const hostNames = allowedHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean);
   const root = resolve(webRoot);
   const sessions = createSessions();
   const streams = new Set(); // open event streams: each has end()
@@ -872,6 +906,14 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
   async function handle(req, res) {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const rawPath = req.url ?? '';
+    if (!hostAllowed(req.headers.host, hostNames)) {
+      const asPage = !(rawPath === '/api' || rawPath.startsWith('/api/') || rawPath.startsWith('/api?'));
+      return fail(req, res, asPage, new LabError(
+        'HOST_NOT_ALLOWED',
+        'this lab answers only to localhost or an IP address; to use a host name, start it with LAB_ALLOWED_HOSTS=<name>',
+        421,
+      ));
+    }
     let url;
     if (!rawPath.startsWith('/') || rawPath.startsWith('//')) {
       return fail(req, res, false, new LabError('BAD_PATH', 'the request path must start with a single /', 400));
