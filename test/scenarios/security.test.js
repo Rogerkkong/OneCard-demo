@@ -285,14 +285,17 @@ test('13. Reconciliation', NET, async () => {
   assert.equal((await tap('CANTEEN-02', LEE, { items: items('BUAH') })).ok, true);
   // Lee's card at the kiosk: refused (lost), but its read-back brings its two window sales home first
   assert.equal((await tap('KIOSK-01', LEE)).screen, UNAVAILABLE);
-  const kinds = async () => ok(await finance.get('/api/admin/differences?status=OPEN')).map((d) => d.kind);
-  await waitFor(async () => (await kinds()).length === 2, { message: 'the two window sales' });
-  // moving the clock runs the jobs: Ahmad's sale between them is missing
-  const step = await lab.advanceClock(60_000);
-  assert.deepEqual([step.jobs.gaps, step.jobs.lag], [1, 0]);
+  const openRefs = async () => ok(await finance.get('/api/admin/differences?status=OPEN')).map((d) => `${d.kind} ${d.ref}`).sort();
+  await waitFor(async () => (await openRefs()).length === 2, { message: 'the two window sales' });
+  // moving the clock runs the jobs: Ahmad's sale between the two is missing, no list is old yet
+  await lab.advanceClock(60_000);
+  assert.deepEqual(await openRefs(), [
+    'MISSING_RECORDS CANTEEN-02:2-2',
+    'SPENT_AFTER_LOST_REPORT CANTEEN-02:CANTEEN-02-000001',
+    'SPENT_AFTER_LOST_REPORT CANTEEN-02:CANTEEN-02-000003',
+  ]);
   // a day later: the machines still on the old block list are flagged
-  const day = await lab.advanceClock(DAY_MS);
-  assert.deepEqual([day.jobs.gaps, day.jobs.lag], [0, 2]);
+  await lab.advanceClock(DAY_MS);
   const open = ok(await finance.get('/api/admin/differences?status=OPEN'));
   assert.deepEqual(open.map((d) => `${d.kind} ${d.ref}`).sort(), [
     'MISSING_RECORDS CANTEEN-02:2-2',

@@ -848,8 +848,11 @@ export function createLab(options = {}) {
     const s = machine.state;
     const school = services().schools.getSchoolByCode(machine.schoolCode);
     const d = school ? devices.getDeviceByCode(school.id, machine.deviceCode) : null;
+    const prices = machine.config.prices;
     return {
       ...s,
+      // the machine's own price list (an offline one may run an old version): what a tap can choose from
+      prices: prices.content ? { version: prices.version, items: prices.content.items, water: prices.content.water } : null,
       location: d?.location ?? '',
       deviceStatus: d?.status ?? null,
       online: d?.online ?? false,

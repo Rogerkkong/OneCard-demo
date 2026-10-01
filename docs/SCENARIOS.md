@@ -47,7 +47,8 @@ platform's books follow when the record arrives.
 ## 3. Water by the litre
 
 1. Tap Arjun's card on `WATER-01` and pour 650 ml → **RM 0.13** (650 ml × RM 0.20/L, rounded).
-2. Pour 10 ml → **RM 0.05**, the minimum charge.
+2. Pour 10 ml → **RM 0.05**, the minimum charge. (Give it a few seconds: a machine refuses the same
+   card twice within 3 s with *Please wait … and tap again*.)
 3. Try Muhammad Irfan's empty card → refused, *Not enough balance*.
 4. Bring the records back (exercise 2) and check the amounts in the school office.
 
@@ -107,11 +108,14 @@ platform's books follow when the record arrives.
 
 Use the fault panel in the lab console:
 - **Forged message** → refused with `SIGNATURE_INVALID` (school office → device log).
-- **Publish to another machine's topic** → the broker refuses it.
+- **Publish to another machine's topic** → the broker refuses it and closes that connection; nothing
+  reaches the platform. (The fault logs in with the machine's own login, so the real machine is knocked
+  off the broker for about a second and reconnects by itself.)
 - **Sequence rollback** → refused with `SEQUENCE_ROLLBACK`.
 - School office: switch a machine off → the broker disconnects it at once.
-- School office (ADMIN): suspend the school → uploads are refused and machines are
-  disconnected; reactivate it and the machines send their records again.
+- Operator console: suspend the school (suspending a school is the SaaS operator's action, not the
+  school's) → uploads are refused and machines are disconnected; reactivate it and the machines send
+  their records again.
 
 ## 11. Kiosk power cuts and lost confirmations
 
@@ -129,14 +133,16 @@ Use the fault panel in the lab console:
 
 1. Fault panel: **copy a card**, then spend on both the original and the copy.
    Reconciliation flags **two purchases with the same card counter** and the card balance no
-   longer matches the platform's books. This is why cards holding money must be uncopyable.
+   longer matches the platform's books (tap the original at the kiosk: its read-back shows the
+   mismatch). This is why cards holding money must be uncopyable.
 2. **Tamper with a card** (change its balance by hand) → every machine refuses it, because
    the card's security code no longer matches.
 
 ## 13. Reconciliation
 
 1. School office → reconciliation shows every open difference with an explanation.
-2. Move the clock forward a day: machines still on an old block list are flagged.
+2. Move the clock forward a day: machines still on an old block list are flagged (there is one once
+   a card has been reported lost, as in exercise 7, and an offline machine has not had the new list).
 3. Resolve each difference with a note; it stays in the history.
 
 ## 14. One system, many schools (SaaS tenants)
@@ -146,7 +152,9 @@ Use the fault panel in the lab console:
 2. **Onboard a third school**: give it a code and name, its first staff, a canteen reader, a
    water machine and a kiosk, and a few demo students. It gets the default prices and settings.
 3. Lab console: the new school's site appears with its machines and cards straight away.
-   Tap a card there — it works like the other schools, on the same server.
+   Tap a card there — it works like the other schools, on the same server. Its demo cards start
+   empty, so the reader answers *Not enough balance* until money is added: grant a subsidy in that
+   school's office (as its ADMIN or FINANCE staff) and tap the card at its kiosk.
 4. Try to cross the line:
    - Sign in to the school office as SMK Seri Contoh staff: nothing from the other schools
      is visible, not even by guessing an id in the URL.

@@ -316,6 +316,27 @@ test('14. One system, many schools (SaaS tenants)', NET, async () => {
   await booksBalance();
 });
 
+test('a machine registered and a card issued in a school office come alive in the lab at once', NET, async () => {
+  const office = await staff(SMK, 'OFFICE');
+  const created = ok(await office.post('/api/admin/devices', { code: 'canteen-03', type: 'CANTEEN', location: 'Kantin guru' }), 201);
+  assert.equal(created.device.code, 'CANTEEN-03');
+  assert.match(created.secret, /^[0-9a-f]{64}$/);
+  await waitFor(() => machine(SMK, 'CANTEEN-03')?.connected, { message: 'the new reader on the broker' });
+  assert.deepEqual(machine(SMK, 'CANTEEN-03').state.versions, { prices: 1, settings: 1, blocklist: 1 }, 'installed with the current settings');
+  const row = lab.state().schools.find((x) => x.code === SMK).devices.find((d) => d.code === 'CANTEEN-03');
+  assert.deepEqual([row.location, row.cablePlugged, row.deviceStatus], ['Kantin guru', true, 'ACTIVE']);
+  // a new member with a card: the blank card is in the tray, and the new reader knows the school's cards
+  const { member, card } = ok(await office.post('/api/admin/members', { memberNo: 'S1099', name: 'Nadia binti Contoh', className: '2 Dinamik', cardUid: '04ABCDEF012345' }), 201);
+  assert.equal(card.uid, '04ABCDEF012345');
+  const tray = lab.state().schools.find((x) => x.code === SMK).cards.find((c) => c.uid === '04ABCDEF012345');
+  assert.deepEqual([tray.member, tray.balanceSen, tray.platformStatus], [member.name, 0, 'ACTIVE']);
+  const empty = await lab.tap({ schoolCode: SMK, deviceCode: 'CANTEEN-03', uid: '04ABCDEF012345', items: items('BUAH') });
+  assert.match(empty.screen, /^Not enough balance/);
+  const paid = await lab.tap({ schoolCode: SMK, deviceCode: 'CANTEEN-03', uid: AHMAD, items: items('BUAH') });
+  assert.deepEqual([paid.ok, paid.sent], [true, true]);
+  await booksBalance();
+});
+
 test('15. The cloud server goes down (from a telnet console session)', NET, async () => {
   await lab.reset();
   assert.match(started.consoleAddress, /^127\.0\.0\.1:\d+$/);

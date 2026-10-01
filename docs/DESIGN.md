@@ -626,7 +626,7 @@ Suspending or reactivating a school is an **operator** action, not a school acti
 | Parent | `POST /api/parent/invites/redeem {code}`, `GET /api/parent/children` (+ pending links), `GET /api/parent/children/:schoolId/:memberId/balance` → `{ mirrorBalanceSen, waitingSen, asOf }`, `GET …/history` → `{ topups, purchases }`, `POST …/topups {amountSen}` (header `Idempotency-Key`) → `{ order, payUrl }`, `GET /api/parent/topups` |
 | Mock payment provider | `GET /pay/:orderId` (bank page), `POST /api/pay/:orderId/complete {result}` → provider sends a signed callback to `POST /api/payments/callback` |
 | Kiosk | §3 |
-| Lab | `GET /api/lab/state`, `GET /api/lab/events` (server-sent events; `?since=`), `POST /api/lab/tap`, `POST /api/lab/cable`, `POST /api/lab/admin-card/load|tap|upload`, `POST /api/lab/usb/export`, `POST /api/lab/fault`, `POST /api/lab/clock/advance {ms}`, `POST /api/lab/reset` |
+| Lab | `GET /api/lab/state`, `GET /api/lab/events` (server-sent events; `?since=`, `?school=`), `POST /api/lab/tap`, `POST /api/lab/cable`, `POST /api/lab/admin-card/load|tap|upload`, `POST /api/lab/usb/export`, `POST /api/lab/fault`, `POST /api/lab/clock/advance {ms}`, `POST /api/lab/jobs/run`, `POST /api/lab/server {up}`, `POST /api/lab/broker/restart`, `POST /api/lab/console {line, target}`, `POST /api/lab/reset` |
 
 ---
 
