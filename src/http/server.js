@@ -466,10 +466,12 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
 
   /**
    * Check a kiosk request (DESIGN §3 "Kiosk HTTP (signed)"): the signature over the exact
-   * method, path with query, timestamp, nonce and body text under that kiosk's own secret, a
+   * method, path with query, timestamp, nonce and body bytes under that kiosk's own secret, a
    * timestamp within 5 minutes of the lab clock, a nonce not used in the last 10 minutes, and
    * an ACTIVE kiosk of an ACTIVE school. The signature is checked before anything is said about
-   * the machine, so an unsigned caller learns nothing about its status.
+   * the machine, so an unsigned caller learns nothing about it: not its status, and not even
+   * whether its school and machine codes exist (an unknown one is a bad signature too).
+   * @param {Buffer} rawBody  the body exactly as received (hashed as bytes, never re-decoded)
    * @returns {{ school: object, device: object }} never the secret
    */
   function verifyKiosk(req, rawPath, rawBody) {
@@ -485,9 +487,10 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     }
     if (!TIMESTAMP_RE.test(timestamp)) throw unsigned('x-lab-timestamp must be lab-clock milliseconds');
     if (!NONCE_RE.test(nonce)) throw unsigned('x-lab-nonce must be 16 to 64 printable characters');
+    const badSignature = () => unsigned('the request signature does not match');
     const { devices } = platform().services;
     const found = devices.resolveByCodes(schoolCode, deviceCode);
-    if (!found) throw new LabError('UNKNOWN_DEVICE', 'no such school or device', 401);
+    if (!found) throw badSignature(); // no machine, no secret: nothing can verify, nothing to tell
     const refuse = (err) => {
       try {
         devices.log({
@@ -504,7 +507,7 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
       return err;
     };
     const expected = signRequest({ secretHex: found.secret, method: req.method, path: rawPath, timestamp, nonce, body: rawBody });
-    if (!safeEqual(signature, expected)) throw refuse(unsigned('the request signature does not match'));
+    if (!safeEqual(signature, expected)) throw refuse(badSignature());
     if (Math.abs(Number(timestamp) - ctx().clock.now()) > KIOSK_CLOCK_SKEW_MS) {
       throw refuse(unsigned('the request timestamp is more than 5 minutes from the lab clock'));
     }
@@ -520,7 +523,7 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
    * Routes with auth 'none' get whoever is signed in, looked up only if the handler reads it:
    * the lab's own routes never do, and must not depend on the product's database to answer.
    */
-  function identify(route, req, rawPath, rawBody, who) {
+  function identify(route, req, rawPath, rawBytes, who) {
     switch (route.auth) {
       case 'operator':
         who.operator = operatorOf(req.headers);
@@ -545,7 +548,7 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
         if (!who.parent) throw new LabError('NOT_SIGNED_IN', NOT_SIGNED_IN.parent, 401);
         break;
       case 'kiosk': {
-        const kiosk = verifyKiosk(req, rawPath, rawBody);
+        const kiosk = verifyKiosk(req, rawPath, rawBytes);
         who.kiosk = kiosk;
         who.school = kiosk.school;
         break;
@@ -645,9 +648,12 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
    * them off cross-site requests, but another port of the same host is the same "site", and a
    * POST without a body needs no content type. Browsers say where a request comes from in
    * Sec-Fetch-Site; without it, a real Origin must be ours. `Origin: null` alone proves nothing:
-   * our own Referrer-Policy (no-referrer) makes browsers send it on same-origin form posts.
+   * a browser without Sec-Fetch-Site sends it for our own HTML form posts (our Referrer-Policy
+   * is no-referrer), but also for a page of another origin that asks for no referrer. Our pages
+   * call the JSON routes with fetch(), which always names its origin, so only a form route
+   * (the bank's Pay and Decline) accepts it.
    */
-  function checkOrigin(req) {
+  function checkOrigin(req, route) {
     if (SAFE_METHODS.has(req.method)) return;
     const refuse = () => new LabError('CROSS_ORIGIN', 'requests from another web site are not accepted', 403);
     const site = req.headers['sec-fetch-site'];
@@ -657,7 +663,11 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
       throw refuse();
     }
     const origin = req.headers.origin;
-    if (origin === undefined || origin === 'null') return; // not a browser (the kiosk, the bank's callback, tests), or no origin to judge
+    if (origin === undefined) return; // not a browser (the kiosk, the bank's callback, tests)
+    if (origin === 'null') {
+      if (route.body === 'form') return;
+      throw refuse();
+    }
     let ok = false;
     try {
       const u = new URL(origin);
@@ -902,7 +912,7 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
 
       const { route, params } = found;
       if (!isLab && !serverUp()) throw serverDown();
-      checkOrigin(req);
+      checkOrigin(req, route);
       if (route.body !== 'none' && req.method !== 'GET') {
         // the media type is known before a single byte is read
         const { type } = contentTypeOf(req.headers['content-type']);
@@ -925,7 +935,8 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
         parent: null,
         kiosk: null,
       };
-      identify(route, req, rawPath, rawBody, request);
+      // the kiosk's signature covers the body's bytes as they arrived, not their decoded text
+      identify(route, req, rawPath, raw, request);
       return sendResult(res, await route.handler(request));
     } catch (err) {
       return fail(req, res, asPage, err);
@@ -958,6 +969,12 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
       `HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\n${head}content-type: application/json; charset=utf-8\r\n` +
         `content-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`,
     );
+  });
+
+  // An Expect header other than 100-continue would get Node's own bare 417, without our headers.
+  server.on('checkExpectation', (req, res) => {
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    fail(req, res, false, new LabError('EXPECTATION_FAILED', 'only Expect: 100-continue is understood', 417), { connection: 'close' });
   });
 
   let ready = null;

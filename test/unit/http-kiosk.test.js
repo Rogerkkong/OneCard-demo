@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import http from 'node:http';
 import { createTestCtx } from '../helpers.js';
 import { createPlatform } from '../../src/platform/platform.js';
 import { seedDemo } from '../../src/lab/seed.js';
@@ -96,6 +97,37 @@ describe('kiosk API: request checks', () => {
     check(await signed({ body, nonce: 'has spaces in it but is long enough' }));
   });
 
+  test('the signature covers the body bytes as sent, not their decoded text', async (t) => {
+    const { url, ctx, device } = await startLab(t);
+    const secret = device('smk-contoh', 'KIOSK-01').secret;
+    // a GET with a body (nothing reads it, but it is signed like any other): send raw bytes
+    const send = (signedBody, sentBytes) =>
+      new Promise((resolve, reject) => {
+        const timestamp = String(ctx.clock.now());
+        const nonce = randomBytes(16).toString('hex');
+        const u = new URL(url);
+        const headers = {
+          'x-lab-school': 'smk-contoh',
+          'x-lab-device': 'KIOSK-01',
+          'x-lab-timestamp': timestamp,
+          'x-lab-nonce': nonce,
+          'x-lab-signature': signRequest({ secretHex: secret, method: 'GET', path: '/api/kiosk/packs', timestamp, nonce, body: signedBody }),
+          'content-length': sentBytes.length,
+        };
+        const req = http.request({ host: u.hostname, port: u.port, method: 'GET', path: '/api/kiosk/packs', headers, agent: false }, (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+        });
+        req.on('error', reject);
+        req.end(sentBytes);
+      });
+    // 0xFE is not UTF-8: read as text it becomes U+FFFD, the same text as 0xFF or the bytes EF BF BD
+    refusedWith(401, 'SIGNATURE_INVALID')(await send('\uFFFD', Buffer.from([0xfe])));
+    refusedWith(401, 'SIGNATURE_INVALID')(await send(Buffer.from([0xff]), Buffer.from([0xfe])));
+    assert.equal((await send(Buffer.from([0xfe]), Buffer.from([0xfe]))).status, 200, 'the bytes that were signed pass');
+  });
+
   test('a timestamp more than 5 minutes from the lab clock is refused, either way', async (t) => {
     const { signed, ctx } = await startLab(t);
     const body = { card: 'ab'.repeat(32) };
@@ -118,11 +150,17 @@ describe('kiosk API: request checks', () => {
     assert.equal((await signed({ body, nonce: first.nonce })).status, 404);
   });
 
-  test('unknown school or machine 401; a machine that is not a kiosk 403; a switched-off kiosk or suspended school 403', async (t) => {
+  test('unknown school or machine 401 like a bad signature; a machine that is not a kiosk 403; a switched-off kiosk or suspended school 403', async (t) => {
     const { signed, lab, school, device } = await startLab(t);
     const body = { card: 'ab'.repeat(32) };
-    refusedWith(401, 'UNKNOWN_DEVICE')(await signed({ body, deviceCode: 'KIOSK-09', secret: 'ab'.repeat(32) }));
-    refusedWith(401, 'UNKNOWN_DEVICE')(await signed({ body, code: 'no-such-school', secret: 'ab'.repeat(32) }));
+    // an unsigned caller cannot tell a real school and machine from made-up ones
+    const real = await signed({ body, secret: 'ab'.repeat(32) });
+    refusedWith(401, 'SIGNATURE_INVALID')(real);
+    for (const made of [{ deviceCode: 'KIOSK-09' }, { code: 'no-such-school' }, { code: 'no-such-school', deviceCode: 'KIOSK-09' }]) {
+      const res = await signed({ body, ...made, secret: 'ab'.repeat(32) });
+      refusedWith(401, 'SIGNATURE_INVALID')(res);
+      assert.deepEqual(res.data, real.data, JSON.stringify(made));
+    }
     // CANTEEN-01 signs with its own secret, but only a kiosk may use the kiosk API
     refusedWith(403, 'WRONG_DEVICE_TYPE')(await signed({ body, deviceCode: 'CANTEEN-01' }));
 

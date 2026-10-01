@@ -15,9 +15,12 @@ const PROVIDER = 'MOCKBANK';
 const CALLBACK_PATH = '/api/payments/callback';
 const PARENT_APP = '/parent/';
 const CALLBACK_TIMEOUT_MS = 5000;
-// Statuses in which each answer still changes the order (topups.paymentCallback): a successful
-// payment also lands on an order the platform gave up on; a decline only on one still waiting.
-const PAYABLE = new Set(['CREATED', 'CANCELLED', 'FAILED']);
+// Statuses in which the bank still takes each answer (DESIGN §4.5): a payment for an order
+// still waiting, or one the platform gave up on when its pay window closed (a late payment
+// lands); a decline only for one still waiting. The bank's own decline is final, like a real
+// bank's: paying a declined order afterwards would let a parent decline, top up again and then
+// pay both, past the school's daily and monthly limits (a declined order no longer counts).
+const PAYABLE = new Set(['CREATED', 'CANCELLED']);
 const DECLINABLE = new Set(['CREATED']);
 
 function escapeHtml(text) {
@@ -129,8 +132,8 @@ export function routes(deps) {
 
   /**
    * Tell the platform the bank's answer, as the provider does: a signed callback over HTTP.
-   * Skipped when it would change nothing (a second click on Pay), so the parent never sees a
-   * refusal for an order that is already settled.
+   * Skipped when the bank no longer takes it (a second click on Pay, Pay after Decline), so the
+   * parent never sees a refusal for an order that is already settled.
    * @returns {Promise<{ orderId: string, status: string }>}
    */
   async function deliver(order, result) {

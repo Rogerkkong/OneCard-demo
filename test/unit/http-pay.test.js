@@ -5,6 +5,7 @@ import { createPlatform } from '../../src/platform/platform.js';
 import { seedDemo } from '../../src/lab/seed.js';
 import { createHttpServer } from '../../src/http/server.js';
 import { signPayload } from '../../src/shared/crypto.js';
+import { MINUTE } from '../../src/shared/time.js';
 
 // The mock bank and the platform's payment callback, end to end over real HTTP: a parent tops
 // up, opens the bank page, pays or declines, and the bank's signed callback reaches the platform
@@ -139,8 +140,9 @@ describe('mock bank: paying', () => {
     const balance = await b.get(`/api/parent/children/${smk}/${member('smk-contoh', 'S1001').id}/balance`);
     assert.deepEqual([balance.data.mirrorBalanceSen, balance.data.waitingSen], [0, 1500]);
 
-    // a second click changes nothing and still goes back to the app
-    const again = await b.post(payUrl, { form: { result: 'SUCCESS' } });
+    // a second click changes nothing and still goes back to the app; a browser without
+    // Sec-Fetch-Site posts the bank's form with Origin: null alone, and the form takes it
+    const again = await b.post(payUrl, { form: { result: 'SUCCESS' }, headers: { origin: 'null' } });
     assert.equal(again.status, 303);
     assert.equal(lab.platform.services.ledger.postings(smk, { limit: 1000 }).filter((p) => p.ref === order.id).length, 1);
     const after = await b.get(payUrl);
@@ -163,6 +165,39 @@ describe('mock bank: paying', () => {
     assert.doesNotMatch(page.text, /<form/);
     const list = await b.get('/api/parent/topups');
     assert.equal(list.data[0].status, 'FAILED');
+  });
+
+  test('a decline is final: paying the declined order later changes nothing, so the daily limit holds', async (t) => {
+    const { signIn, topUp, lab, school } = await startLab(t);
+    const b = await signIn('Rahman bin Yusof');
+    const smk = school('smk-contoh').id;
+    const { topups, ledger } = lab.platform.services;
+    // RM 200 twice in a day: the second fits under the RM 300 daily limit only because the first was declined
+    const first = await topUp(b, { amountSen: 20000, key: 'final-1' });
+    assert.equal((await b.post(first.payUrl, { form: { result: 'FAILED' } })).status, 303);
+    const second = await topUp(b, { amountSen: 20000, key: 'final-2' });
+    assert.equal((await b.post(second.payUrl, { form: { result: 'SUCCESS' } })).status, 303);
+    // the declined order's bank page is still open in another tab: Pay there, then by script
+    const late = await b.post(first.payUrl, { form: { result: 'SUCCESS' } });
+    assert.equal(late.status, 303);
+    assert.equal(late.headers.get('location'), '/parent/');
+    const api = await b.post(`/api/pay/${first.order.id}/complete`, { json: { result: 'SUCCESS' } });
+    assert.deepEqual(api.data, { redirect: '/parent/', orderId: first.order.id, status: 'FAILED' });
+    assert.equal(topups.getOrder(smk, first.order.id).status, 'FAILED');
+    assert.equal(ledger.findByIdemKey(smk, `TOPUP:${first.order.id}:PAID`), null);
+    assert.equal(topups.getOrder(smk, second.order.id).status, 'PAID');
+  });
+
+  test('a late payment still lands: Pay on a page left open past the pay window', async (t) => {
+    const { signIn, topUp, lab, school } = await startLab(t);
+    const b = await signIn('Rahman bin Yusof');
+    const { order, payUrl } = await topUp(b, { amountSen: 1500 });
+    lab.ctx.clock.advance(31 * MINUTE);
+    lab.platform.runJobs();
+    const smk = school('smk-contoh').id;
+    assert.equal(lab.platform.services.topups.getOrder(smk, order.id).status, 'CANCELLED');
+    assert.equal((await b.post(payUrl, { form: { result: 'SUCCESS' } })).status, 303);
+    assert.equal(lab.platform.services.topups.getOrder(smk, order.id).status, 'PAID', 'the bank took the money, so it must land');
   });
 
   test('POST /api/pay/:orderId/complete does the same for a script and answers { redirect }', async (t) => {

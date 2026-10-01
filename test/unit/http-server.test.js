@@ -311,6 +311,14 @@ describe('http server: errors and bodies', () => {
     assert.equal(typeof body.error.message, 'string');
   });
 
+  test('answers Node would give by itself carry our headers too: an Expect header it does not know', async (t) => {
+    const { url } = await startLab(t);
+    const res = await raw(url, { path: '/api/admin/staff-options', headers: { expect: 'something-else' } });
+    assert.equal(res.status, 417);
+    assertSecurityHeaders(res.headers, '417');
+    assert.equal(JSON.parse(res.text).error.code, 'EXPECTATION_FAILED');
+  });
+
   test('a wrong method is 405 with Allow', async (t) => {
     const { url } = await startLab(t);
     const put = await fetch(`${url}/api/operator/login`, { method: 'PUT' });
@@ -409,7 +417,15 @@ describe('http server: errors and bodies', () => {
     assert.equal((await post({ 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}` })).status, 200);
     // with our Referrer-Policy (no-referrer) a browser's own form post says Origin: null
     assert.equal((await post({ 'sec-fetch-site': 'same-origin', origin: 'null' })).status, 200);
-    assert.equal((await post({ origin: 'null' })).status, 200, 'no origin to judge');
+    // without Sec-Fetch-Site, Origin: null is also what a sibling page asking for no referrer
+    // sends: our pages call JSON routes with fetch(), which names its origin, so it is refused
+    // here (the bank's HTML form still takes it: see http-pay.test.js)
+    const nullOrigin = await post({ origin: 'null' });
+    assert.equal(nullOrigin.status, 403);
+    assert.equal(JSON.parse(nullOrigin.text).error.code, 'CROSS_ORIGIN');
+    const bodyless = await raw(url, { method: 'POST', path: '/api/operator/login', headers: { origin: 'null' } });
+    assert.equal(bodyless.status, 403, 'a body-less beacon with Origin: null');
+    assert.equal(bodyless.headers['set-cookie'], undefined);
     // reading is not changing anything
     const read = await raw(url, { path: '/api/admin/staff-options', headers: { origin: 'http://evil.example' } });
     assert.equal(read.status, 200);
@@ -465,6 +481,26 @@ describe('http server: sessions', () => {
     // a cookie of one role is not a session of another
     const swapped = await fetch(`${url}/api/admin/me`, { headers: { cookie: `lab_staff=${b.jar.get('lab_parent')}` } });
     assert.equal(swapped.status, 401);
+  });
+
+  test('signing out ends the session on the server, not only in the browser', async (t) => {
+    const { url, seed } = await startLab(t);
+    const b = browser(url);
+    await b.post('/api/operator/login');
+    await b.post('/api/admin/login', { staffId: staffOf(seed, 'smk-contoh', 'ADMIN').id });
+    await b.post('/api/parent/login', { parentId: seed.parents[0].id });
+    for (const [role, cookie, me] of [
+      ['operator', 'lab_operator', '/api/operator/me'],
+      ['admin', 'lab_staff', '/api/admin/me'],
+      ['parent', 'lab_parent', '/api/parent/me'],
+    ]) {
+      const token = b.jar.get(cookie);
+      const out = await b.post(`/api/${role}/logout`);
+      assert.equal(out.status, 200, role);
+      // a copy of the cookie kept from before (another tab, a stolen copy) is no session any more
+      const kept = await fetch(url + me, { headers: { cookie: `${cookie}=${token}` } });
+      assert.equal(kept.status, 401, `${role}: the old token after logout`);
+    }
   });
 });
 

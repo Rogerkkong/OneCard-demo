@@ -4,6 +4,7 @@ import { createTestCtx, eventsOf } from '../helpers.js';
 import { createPlatform } from '../../src/platform/platform.js';
 import { seedDemo } from '../../src/lab/seed.js';
 import { createHttpServer } from '../../src/http/server.js';
+import { routes as adminRoutes } from '../../src/http/routes/admin.js';
 import { exportJournal } from '../../src/devices/usb.js';
 import { signPayload } from '../../src/shared/crypto.js';
 import { DAY } from '../../src/shared/time.js';
@@ -192,6 +193,67 @@ describe('admin: session and roles', () => {
       await fine(admin, 'GET', path);
     }
     await fine(admin, 'POST', '/api/admin/jobs/run');
+  });
+
+  test('every office route names its roles (DESIGN §7); a route without them would be open to every role', () => {
+    const ANY = ['ADMIN', 'FINANCE', 'OFFICE'];
+    const OFFICE = ['ADMIN', 'OFFICE'];
+    const FINANCE = ['ADMIN', 'FINANCE'];
+    const ADMIN = ['ADMIN'];
+    const expected = {
+      'GET /api/admin/me': ANY,
+      'GET /api/admin/overview': ANY,
+      'GET /api/admin/members': ANY, // finance picks the member of a subsidy
+      'GET /api/admin/members/:id': ANY,
+      'POST /api/admin/members': OFFICE,
+      'POST /api/admin/members/:id/replace-card': OFFICE,
+      'GET /api/admin/cards': OFFICE,
+      'POST /api/admin/cards': OFFICE,
+      'POST /api/admin/cards/:uid/report-lost': OFFICE,
+      'POST /api/admin/cards/:uid/found': OFFICE,
+      'GET /api/admin/invites': OFFICE,
+      'POST /api/admin/invites': OFFICE,
+      'GET /api/admin/links': OFFICE,
+      'POST /api/admin/links/:id/approve': OFFICE,
+      'POST /api/admin/links/:id/reject': OFFICE,
+      'GET /api/admin/devices': OFFICE,
+      'POST /api/admin/devices': OFFICE,
+      'POST /api/admin/devices/:code/status': OFFICE,
+      'GET /api/admin/devices/states': OFFICE,
+      'GET /api/admin/device-log': OFFICE,
+      'GET /api/admin/configs': OFFICE,
+      'POST /api/admin/configs/prices': OFFICE,
+      'POST /api/admin/configs/settings': OFFICE,
+      'GET /api/admin/blocklist': OFFICE,
+      'POST /api/admin/imports/journal': OFFICE,
+      'GET /api/admin/topups': FINANCE,
+      'GET /api/admin/topups/parked': FINANCE,
+      'POST /api/admin/topups/:id/resolve': FINANCE,
+      'POST /api/admin/subsidies': FINANCE,
+      'GET /api/admin/ledger/trial-balance': FINANCE,
+      'GET /api/admin/ledger/postings': FINANCE,
+      'GET /api/admin/purchases': FINANCE,
+      'GET /api/admin/reports/sales': FINANCE,
+      'GET /api/admin/differences': FINANCE,
+      'POST /api/admin/differences/:id/resolve': FINANCE,
+      'GET /api/admin/audit': ADMIN,
+      'POST /api/admin/jobs/run': ADMIN,
+    };
+    const defined = adminRoutes({});
+    const staffRoutes = defined.filter((r) => r.auth === 'staff');
+    for (const r of staffRoutes) {
+      const key = `${r.method} ${r.path}`;
+      assert.ok(Object.hasOwn(expected, key), `${key} is not in the table: decide its roles`);
+      assert.ok(Array.isArray(r.roles), `${key} names no roles`);
+      assert.deepEqual([...r.roles].sort(), expected[key], key);
+    }
+    assert.deepEqual(staffRoutes.map((r) => `${r.method} ${r.path}`).sort(), Object.keys(expected).sort());
+    // the only routes of the office without a session pick who you are
+    assert.deepEqual(defined.filter((r) => r.auth !== 'staff').map((r) => `${r.method} ${r.path}`).sort(), [
+      'GET /api/admin/staff-options',
+      'POST /api/admin/login',
+      'POST /api/admin/logout',
+    ]);
   });
 
   test('overview: today\'s sales, machines, money waiting, open differences, parked orders', async (t) => {
@@ -758,5 +820,70 @@ describe('admin: tenant isolation', () => {
     const subsidy = await admin.post('/api/admin/subsidies', { schoolId: sjkc.id, memberId: member('smk-contoh', 'S1006').id, amountSen: 100 });
     assert.equal(subsidy.status, 201);
     assert.equal(subsidy.data.schoolId, smk.id);
+  });
+
+  test('the overview, block list, prices, machine states, device log, sales and parked orders show the own school only', async (t) => {
+    const { signIn, lab, school, member, device, seed, url } = await startLab(t);
+    const smk = school('smk-contoh');
+    const sjkc = school('sjkc-contoh');
+    const { topups, settlement, devices, configs, schools, differences } = lab.platform.services;
+    // SJK(C) Contoh gets one of everything: a parked order, a lost card, its own price list, a
+    // device log line, a sale today and a pending parent link
+    const tanKokWai = seed.parents.find((p) => p.name === 'Tan Kok Wai');
+    const xinYi = member('sjkc-contoh', 'P102');
+    const parked = paidTopup(lab, { parentId: tanKokWai.id, schoolId: sjkc.id, memberId: xinYi.id, amountSen: 1000, key: 'parked' });
+    const kiosk = device('sjkc-contoh', 'KIOSK-01');
+    topups.kioskPending({ schoolId: sjkc.id, kioskDeviceId: kiosk.id, cardDigest: schools.cardDigestFor(sjkc.id, xinYi.cardUid) });
+    lab.ctx.clock.advance(15 * DAY);
+    lab.platform.runJobs();
+    assert.equal(topups.getOrder(sjkc.id, parked.id).status, 'PARKED');
+    await lab.platform.reportCardLost({ schoolId: sjkc.id, uid: member('sjkc-contoh', 'P103').cardUid, actor: 'test' });
+    configs.publish({ schoolId: sjkc.id, kind: 'prices', content: { items: [{ code: 'SJKC-ONLY', name: 'Sjkc only', priceSen: 100 }], water: { perLitreSen: 20, minChargeSen: 5 } }, actor: 'test' });
+    devices.log({ schoolId: sjkc.id, deviceId: kiosk.id, level: 'WARN', code: 'SJKC_ONLY_LOG', message: 'sjkc only log line' });
+    const junHao = member('sjkc-contoh', 'P101');
+    const sold = settlement.receive({
+      schoolId: sjkc.id,
+      via: 'MQTT',
+      record: sale({
+        origin: 'CANTEEN-01', n: 1, digest: schools.cardDigestFor(sjkc.id, junHao.cardUid), last4: junHao.cardUid.slice(-4),
+        cardSeq: 1, before: 1000, items: [TEH], at: lab.ctx.clock.iso(),
+      }),
+    });
+    assert.equal(sold.status, 'POSTED');
+    const newcomer = browser(url);
+    await newcomer.post('/api/parent/register', { email: 'pending.sampel@example.com', name: 'Pending Sampel' });
+    const pending = await newcomer.post('/api/parent/invites/redeem', { code: sjkc.openInvite.code });
+    assert.equal(pending.data.link.status, 'PENDING');
+
+    const admin = await signIn('smk-contoh', 'ADMIN');
+    const overview = await admin.get('/api/admin/overview');
+    assert.equal(overview.data.school.id, smk.id);
+    assert.deepEqual([overview.data.today.salesSen, overview.data.today.purchases, overview.data.parkedOrders], [0, 0, 0]);
+    assert.equal(overview.data.openDifferences, differences.countOpen(smk.id));
+    const sales = await admin.get('/api/admin/reports/sales');
+    assert.deepEqual([sales.data.totalSen, sales.data.count, sales.data.byItem], [0, 0, []]);
+    assert.deepEqual((await admin.get('/api/admin/topups/parked')).data, []);
+    const blocklist = await admin.get('/api/admin/blocklist');
+    assert.deepEqual(blocklist.data.entries, []);
+    const sjkcDeviceIds = sjkc.devices.map((d) => d.id);
+    for (const path of ['/api/admin/blocklist', '/api/admin/configs', '/api/admin/devices/states', '/api/admin/device-log?limit=1000', '/api/admin/overview']) {
+      const res = await admin.get(path);
+      assert.equal(res.status, 200, path);
+      for (const text of ['Ng Zhi Hao', 'SJKC-ONLY', 'SJKC_ONLY_LOG', 'sjkc only', sjkc.id, ...sjkcDeviceIds]) {
+        assert.equal(res.text.includes(text), false, `${path} shows ${text}`);
+      }
+    }
+    const reject = await admin.post(`/api/admin/links/${pending.data.link.id}/reject`);
+    assert.equal(reject.status, 404);
+    assert.equal(reject.data.error.code, 'LINK_NOT_FOUND');
+    assert.equal(schools.listLinks(sjkc.id, { status: 'PENDING' }).length, 1, 'the other school\'s link is untouched');
+
+    // a school id in the query string is ignored too
+    const members = await admin.get(`/api/admin/members?schoolId=${sjkc.id}`);
+    assert.deepEqual(members.data.map((m) => m.id).sort(), smk.members.map((m) => m.id).sort());
+    const orders = await admin.get(`/api/admin/topups?schoolId=${sjkc.id}`);
+    assert.equal(orders.text.includes(parked.id), false);
+    const report = await admin.get(`/api/admin/reports/sales?schoolId=${sjkc.id}`);
+    assert.equal(report.data.count, 0);
   });
 });
