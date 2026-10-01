@@ -20,6 +20,8 @@ cables, switch the server off, break things on purpose, and watch what every mes
 > independent reference implementation, not a production system. Never put real data,
 > real keys or confidential integration documents into this repository.
 
+**New here?** Follow the step-by-step guide, from installing Node.js to your first card tap: [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) · 中文：[docs/GETTING-STARTED.zh.md](docs/GETTING-STARTED.zh.md)
+
 **中文简介在下面 ↓**
 
 ## Quick start
@@ -184,6 +186,8 @@ npm test            # unit tests and end-to-end scenarios
 ## 中文简介
 
 OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就能把整套校园一卡通跑起来试。
+
+**第一次用？** 按照 [上手指南](docs/GETTING-STARTED.zh.md) 一步一步来：从安装 Node.js 到刷第一张卡。
 
 这是 **SaaS**：一个系统服务很多学校，每所学校是一个独立的租户（tenant），资料、卡、机器、价格和密钥都分开。
 
