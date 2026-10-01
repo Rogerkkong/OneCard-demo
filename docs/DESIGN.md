@@ -530,6 +530,14 @@ Builds every service: `platform.services = { schools, devices, configs, ledger, 
 ## 7. HTTP API (src/http/)
 
 `createHttpServer({ lab })` → `{ listen(port, host) → Promise<{url,port}>, close() }`. JSON in and out, max body 1 MB.
+
+Route modules live in `src/http/routes/{admin,parent,pay,kiosk,lab}.js`. Each exports `routes(deps)` returning
+`[{ method, path, auth, roles?, handler }]`, where `deps = { lab, platform: lab.platform, ctx: lab.ctx }`, `path` uses
+`:param` segments (e.g. `'/api/admin/members/:id'`), `auth` is `'none' | 'staff' | 'parent' | 'kiosk'`, and
+`handler(req)` receives `{ params, query, body, rawBody, headers, staff, school, parent, kiosk }` (the session or
+kiosk identity filled in by the server for the route's `auth`) and returns a JSON-able value (200), or
+`{ status, body, headers }` for anything else (e.g. 201, redirects, HTML pages). `server.js` owns parsing, sessions,
+kiosk signature checks, error mapping, static files under `web/` and the SSE stream; route files own the endpoints.
 Errors: `{ error: { code, message, detail? } }` with the LabError status (500 + code `INTERNAL` for bugs).
 Sessions: in-memory, HTTP-only cookies `lab_staff` and `lab_parent`. **Lab only: there are no passwords; you
 pick who you are.** The admin API takes the school from the staff session, never from the request.

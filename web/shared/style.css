@@ -1,0 +1,170 @@
+/* OneCard Lab base styles. Palette: pandan green, kunyit (turmeric) yellow, teal for
+   device messages; neutrals lean slightly green. System fonts so the lab works offline. */
+:root {
+  color-scheme: light;
+  --bg: #f4f7f2;
+  --surface: #ffffff;
+  --surface-2: #e8eee6;
+  --ink: #15241f;
+  --ink-2: #4a5a53;
+  --line: #c9d4cc;
+  --pandan: #22704f;
+  --pandan-ink: #ffffff;
+  --pandan-soft: #dcebe2;
+  --kunyit: #f0b429;
+  --kunyit-ink: #3d2a00;
+  --kunyit-soft: #fbedc8;
+  --teal: #0f7c86;
+  --teal-soft: #d7eef0;
+  --good: #22704f;
+  --warn: #8a5a0b;
+  --warn-soft: #fbedc8;
+  --bad: #a8412c;
+  --bad-soft: #f6dcd5;
+  --focus: #8a5a0b;
+  --shadow: 0 1px 0 rgba(21, 36, 31, 0.05), 0 8px 24px -16px rgba(21, 36, 31, 0.35);
+  --radius: 10px;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #0e1512;
+    --surface: #16201c;
+    --surface-2: #1d2a25;
+    --ink: #e4ece7;
+    --ink-2: #a7b8b0;
+    --line: #2c3b35;
+    --pandan: #5cc08f;
+    --pandan-ink: #08130e;
+    --pandan-soft: #183328;
+    --kunyit: #f2c14e;
+    --kunyit-ink: #2a1d00;
+    --kunyit-soft: #3a2f12;
+    --teal: #4fc3cc;
+    --teal-soft: #13302f;
+    --good: #5cc08f;
+    --warn: #f2c14e;
+    --warn-soft: #3a2f12;
+    --bad: #f0907a;
+    --bad-soft: #3a1d16;
+    --focus: #f2c14e;
+    --shadow: none;
+  }
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0e1512;
+  --surface: #16201c;
+  --surface-2: #1d2a25;
+  --ink: #e4ece7;
+  --ink-2: #a7b8b0;
+  --line: #2c3b35;
+  --pandan: #5cc08f;
+  --pandan-ink: #08130e;
+  --pandan-soft: #183328;
+  --kunyit: #f2c14e;
+  --kunyit-ink: #2a1d00;
+  --kunyit-soft: #3a2f12;
+  --teal: #4fc3cc;
+  --teal-soft: #13302f;
+  --good: #5cc08f;
+  --warn: #f2c14e;
+  --warn-soft: #3a2f12;
+  --bad: #f0907a;
+  --bad-soft: #3a1d16;
+  --focus: #f2c14e;
+  --shadow: none;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--font);
+}
+a { color: var(--pandan); }
+h1, h2, h3 { line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: 22px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; }
+h3 { font-size: 15px; }
+p { margin: 0; }
+.mono, code, kbd { font-family: var(--mono); font-size: 0.92em; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-2); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 36px; padding: 0 14px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+.btn:hover { border-color: var(--ink-2); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn--primary { background: var(--pandan); border-color: var(--pandan); color: var(--pandan-ink); }
+.btn--accent { background: var(--kunyit); border-color: var(--kunyit); color: var(--kunyit-ink); }
+.btn--danger { color: var(--bad); border-color: var(--bad); background: transparent; }
+.btn--small { min-height: 28px; padding: 0 10px; font-size: 13px; }
+.btn--ghost { background: transparent; border-color: transparent; }
+
+/* panels and layout */
+.panel {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 16px;
+}
+.stack { display: grid; gap: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.spacer { flex: 1; }
+
+/* forms */
+label { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
+input, select, textarea {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; min-height: 36px; width: 100%;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--pandan); outline: none; box-shadow: 0 0 0 3px var(--pandan-soft); }
+
+/* tables */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--surface-2); color: var(--ink-2);
+}
+.pill--good { background: var(--pandan-soft); color: var(--good); }
+.pill--warn { background: var(--warn-soft); color: var(--warn); }
+.pill--bad { background: var(--bad-soft); color: var(--bad); }
+.pill--info { background: var(--teal-soft); color: var(--teal); }
+
+/* language switch */
+.lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.lang-switch button { font: inherit; font-size: 13px; padding: 4px 10px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; }
+.lang-switch button[aria-pressed='true'] { background: var(--ink); color: var(--bg); }
+
+/* toasts */
+.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 50; max-width: min(380px, calc(100vw - 32px)); }
+.toast { padding: 10px 14px; border-radius: 8px; background: var(--ink); color: var(--bg); box-shadow: var(--shadow); font-size: 14px; }
+.toast--good { background: var(--pandan); color: var(--pandan-ink); }
+.toast--warn { background: var(--kunyit); color: var(--kunyit-ink); }
+.toast--bad { background: var(--bad); color: #fff; }
+
+/* the "lab only" ribbon shown on every app */
+.lab-ribbon {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.03em; color: var(--kunyit-ink);
+  background: var(--kunyit); padding: 2px 8px; border-radius: 4px; white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
