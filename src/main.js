@@ -83,8 +83,8 @@ OneCard Lab is running (lab data only — nothing here is real).
   Watch traffic   mosquitto_sub -h 127.0.0.1 -p ${mqttPortShown} -u ${viewer.username} -P ${viewer.password} -t 'lab/v1/#' -v
                   (or MQTT Explorer with the same login)
 ${started.consoleAddress ? `
-  Machine consoles PuTTY (Telnet) or: telnet ${started.consoleAddress.replace(':', ' ')}
-                  then: machines · connect smk-contoh/CANTEEN-01 · show status
+  Consoles        PuTTY: Telnet to ${started.consoleAddress.replace(':', ' port ')} (Mac/Linux: nc ${started.consoleAddress.replace(':', ' ')})
+                  then type: machines · connect smk-contoh/CANTEEN-01 · show status
 ` : ''}${localOnly ? '' : `
   On a phone on the same Wi-Fi: ${lanAddresses().map((ip) => `http://${ip}:${httpPortShown}/parent/`).join('  or  ') || '(no network address found)'}
   Note: listening on ${options.host}. Other computers on your network can reach the lab,
