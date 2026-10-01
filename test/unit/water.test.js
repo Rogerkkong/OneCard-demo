@@ -80,6 +80,7 @@ describe('pouring', () => {
       resolveDevice: (u) => (u === `${A}.WATER-01` ? { schoolCode: A, deviceCode: 'WATER-01', password: brokerPassword(WATER.secret), active: true } : null),
     });
     const platform = await mqtt.connectAsync(broker.url, { username: 'platform', password: ctx.settings.platformBrokerPassword, clientId: 'platform-test', reconnectPeriod: 0 });
+    platform.on('error', () => {});
     const inbox = [];
     platform.on('message', (topic, payload) => inbox.push({ topic, env: JSON.parse(payload.toString()) }));
     await platform.subscribeAsync([`lab/v1/${A}/+/records`], { qos: 1 });

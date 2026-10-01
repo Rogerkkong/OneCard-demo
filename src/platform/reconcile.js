@@ -60,20 +60,33 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
    * member's wallet. A mismatch opens BALANCE_MISMATCH (ref `<digest>:<cardSeq>`), once per
    * card counter. A card the school does not know (or with no member) has no mirror:
    * `{ match: false, mirrorSen: null }` and no difference (its purchases are already FLAGGED).
-   * Codes: SNAPSHOT_INVALID (400) for a malformed digest, balance or counter.
-   * @param {{ schoolId: string, cardDigest: string, balanceSen: number, cardSeq: number }} args
-   * @returns {{ match: boolean, mirrorSen: number|null, cardSen: number }}
+   * `writes` are the kiosk top-ups the card itself records (the read-back's `writes`). A write
+   * whose order is still PAID or PARKED reached the card but was never confirmed (a power cut
+   * after the write): the money is on the card but not yet in the books, and the kiosk confirms
+   * it right after the read-back. Those amounts are left out of the comparison, so a power cut
+   * does not raise a false BALANCE_MISMATCH. Refunded or unknown orders are never left out.
+   * Codes: SNAPSHOT_INVALID (400) for a malformed digest, balance, counter or writes list.
+   * @param {{ schoolId: string, cardDigest: string, balanceSen: number, cardSeq: number,
+   *   writes?: Array<{ orderId: string, amountSen: number }> }} args
+   * @returns {{ match: boolean, mirrorSen: number|null, cardSen: number, unconfirmedSen: number }}
    */
   function checkCardSnapshot(args) {
-    const { schoolId, cardDigest, balanceSen, cardSeq } = args ?? {};
+    const { schoolId, cardDigest, balanceSen, cardSeq, writes = [] } = args ?? {};
     if (typeof cardDigest !== 'string' || !DIGEST_RE.test(cardDigest)) throw snapshotInvalid('cardDigest must be a 64-character card digest');
     if (!isSen(balanceSen)) throw snapshotInvalid('balanceSen must be whole sen, 0 or more');
     // a new card that was never written has counter 0
     if (!Number.isSafeInteger(cardSeq) || cardSeq < 0) throw snapshotInvalid('cardSeq must be a whole number, 0 or more');
+    if (!Array.isArray(writes) || writes.length > 50) throw snapshotInvalid('writes must be a list of at most 50 card writes');
+    for (const w of writes) {
+      if (!w || typeof w.orderId !== 'string' || w.orderId.length === 0 || w.orderId.length > 64 || !isSen(w.amountSen)) {
+        throw snapshotInvalid('each write needs an orderId and amountSen in whole sen');
+      }
+    }
     const card = schools.getCardByDigest(schoolId, cardDigest);
-    if (!card || !card.memberId) return { match: false, mirrorSen: null, cardSen: balanceSen };
+    if (!card || !card.memberId) return { match: false, mirrorSen: null, cardSen: balanceSen, unconfirmedSen: 0 };
+    const unconfirmedSen = unconfirmedWritesSen(schoolId, card.memberId, writes);
     const mirrorSen = ledger.balance(schoolId, 'STUDENT_WALLET', card.memberId);
-    const match = mirrorSen === balanceSen;
+    const match = mirrorSen === balanceSen - unconfirmedSen;
     if (!match) {
       differences.open({
         schoolId,
@@ -84,13 +97,34 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
           last4: card.last4,
           cardSeq,
           cardSen: balanceSen,
+          unconfirmedSen,
           mirrorSen,
-          differenceSen: balanceSen - mirrorSen,
-          hint: mismatchHint(balanceSen, mirrorSen),
+          differenceSen: balanceSen - unconfirmedSen - mirrorSen,
+          hint: mismatchHint(balanceSen - unconfirmedSen, mirrorSen),
         },
       });
     }
-    return { match, mirrorSen, cardSen: balanceSen };
+    return { match, mirrorSen, cardSen: balanceSen, unconfirmedSen };
+  }
+
+  /**
+   * Sum of the card's own top-up writes whose orders (of this member, in this school) the
+   * platform still holds as PAID or PARKED — written to the card but not yet confirmed. The
+   * amount is the order's, and only counted when the card records the same amount.
+   */
+  function unconfirmedWritesSen(schoolId, memberId, writes) {
+    const seen = new Set();
+    let total = 0;
+    for (const w of writes) {
+      if (seen.has(w.orderId)) continue;
+      seen.add(w.orderId);
+      const order = db.get(
+        "SELECT amount_sen FROM topup_order WHERE school_id = ? AND id = ? AND member_id = ? AND status IN ('PAID', 'PARKED')",
+        asId(schoolId), w.orderId, memberId,
+      );
+      if (order && order.amount_sen === w.amountSen) total += order.amount_sen;
+    }
+    return total;
   }
 
   /**

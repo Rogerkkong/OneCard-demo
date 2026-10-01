@@ -679,6 +679,38 @@ describe('paymentCallback', () => {
     assert.equal(pay(t, o).status, 'PAID');
     assert.deepEqual(statusesOf(t, o), ['CREATED', 'FAILED', 'PAID']);
   });
+
+  test('after the add window a repeated callback still changes nothing, and another payment is still ORDER_ALREADY_PAID', () => {
+    const t = setup();
+    const stuck = paid(t, { amountSen: 1000 });
+    pending(t, t.aina); // offered, never confirmed: parked
+    const untried = paid(t, { member: t.badrul, amountSen: 2000 }); // never offered: refunded
+    t.ctx.clock.advance(14 * DAY + 1);
+    assert.deepEqual(t.topups.runJobs(), { cancelled: 0, refunded: 1, parked: 1 });
+    for (const [o, status] of [[stuck, 'PARKED'], [untried, 'REFUNDED']]) {
+      const before = getOrder(t, o);
+      assert.equal(before.status, status);
+      assert.deepEqual(pay(t, o, { paidAt: o.paidAt }), before, `repeat on ${status}`);
+      assert.deepEqual(pay(t, o, { result: 'FAILED' }), before, `late FAILED on ${status}`);
+      assert.throws(() => pay(t, o, { providerTxnId: 'MB-second' }), code('ORDER_ALREADY_PAID', 409), status);
+    }
+    assert.deepEqual(postingsOf(t, untried), [`TOPUP:${untried.id}:PAID`, `TOPUP:${untried.id}:REVERSAL`], 'refunded once');
+    assert.deepEqual(statusesOf(t, untried), ['CREATED', 'PAID', 'EXPIRED', 'REFUNDED']);
+  });
+
+  test('a payment reported long after the add window ended is refunded by the next job run', () => {
+    const t = setup();
+    const o = order(t);
+    t.ctx.clock.advance(31 * MINUTE);
+    t.topups.runJobs();
+    t.ctx.clock.advance(20 * DAY);
+    const late = pay(t, o, { paidAt: o.createdAt + 10 * MINUTE });
+    assert.equal(late.status, 'PAID');
+    assert.ok(late.addBy < t.ctx.clock.now());
+    assert.deepEqual(pending(t, t.aina).orders, [], 'too late for the kiosk');
+    assert.deepEqual(t.topups.runJobs(), { cancelled: 0, refunded: 1, parked: 0 });
+    assert.deepEqual(balances(t, t.aina), { walletSen: 0, waitingSen: 0 });
+  });
 });
 
 describe('kioskPending', () => {
@@ -767,6 +799,16 @@ describe('kioskPending', () => {
     const replacement = t.schools.issueCard({ schoolId: t.a.id, memberId: t.aina.id, uid: '04A1B2C3D4E5F7', actor: 'test' });
     assert.deepEqual(pending(t, t.aina, { cardDigest: replacement.digest }).orders.map((x) => x.orderId), [o.id]);
   });
+
+  test('CARD_NOT_ACTIVE (409) for a RETIRED card too, and createOrder refuses its member', () => {
+    const t = setup();
+    const o = paid(t);
+    // no service retires cards yet; the schema allows it
+    t.ctx.db.run("UPDATE card SET status = 'RETIRED' WHERE school_id = ? AND id = ?", t.a.id, t.aina.card.id);
+    assert.throws(() => pending(t, t.aina), code('CARD_NOT_ACTIVE', 409));
+    assert.equal(getOrder(t, o).writeResult, null);
+    assert.throws(() => order(t), code('CARD_NOT_ACTIVE', 409));
+  });
 });
 
 describe('kioskConfirm', () => {
@@ -821,6 +863,8 @@ describe('kioskConfirm', () => {
     t.ctx.clock.advance(14 * DAY + 1);
     assert.equal(t.topups.runJobs().refunded, 1);
     assert.throws(() => confirm(t, o, { kioskTxn: 'KIOSK-01-000050' }), code('ORDER_ALREADY_REFUNDED', 409));
+    assert.throws(() => confirm(t, o, { kioskTxn: 'KIOSK-01-000050' }), code('ORDER_ALREADY_REFUNDED', 409), 'the kiosk reports it again');
+    assert.equal(t.differences.list(t.a.id).length, 1, 'the same report is flagged once');
     const [diff] = t.differences.list(t.a.id, { kind: 'TOPUP_ADDED_AFTER_REFUND' });
     assert.equal(diff.ref, `${o.id}:KIOSK-01:KIOSK-01-000050`);
     assert.equal(diff.detail.status, 'REFUNDED');
@@ -929,6 +973,17 @@ describe('kioskConfirm', () => {
     assert.equal(t.topups.kioskLookup({ schoolId: t.a.id, kioskDeviceCode: 'KIOSK-02', kioskTxn: 'KIOSK-01-000007' }).orderId, o2.id);
   });
 
+  test('a write offered before addBy and confirmed after it is still added; the job then leaves it alone', () => {
+    const t = setup();
+    const o = paid(t);
+    t.ctx.clock.advance(14 * DAY); // addBy exactly: still offered
+    assert.deepEqual(pending(t, t.aina).orders.map((x) => x.orderId), [o.id]);
+    t.ctx.clock.advance(3000); // the write and its confirm take a few seconds
+    assert.deepEqual(confirm(t, o), { orderId: o.id, status: 'ADDED', duplicate: false });
+    assert.deepEqual(t.topups.runJobs(), { cancelled: 0, refunded: 0, parked: 0 });
+    assert.deepEqual(balances(t, t.aina), { walletSen: 1500, waitingSen: 0 });
+  });
+
   test('a write made before the card was reported lost is still recorded', () => {
     const t = setup();
     const o = paid(t);
@@ -1035,6 +1090,19 @@ describe('runJobs', () => {
     assert.equal(getOrder(t, mine).status, 'CANCELLED');
     const cancels = eventsOf(t.ctx, 'topup.status').filter((e) => e.data.status === 'CANCELLED');
     assert.deepEqual(cancels.map((e) => [e.data.orderId, e.school]), [[theirs.id, 'smk-beta'], [mine.id, 'smk-alpha']]);
+  });
+
+  test('a school id that is not an id runs no school at all, never every school', () => {
+    const t = setup();
+    const mine = order(t);
+    const theirs = order(t, { member: t.eng });
+    t.ctx.clock.advance(31 * MINUTE);
+    for (const schoolId of ['', null, 42, 'sch_nope']) {
+      assert.deepEqual(t.topups.runJobs({ schoolId }), { cancelled: 0, refunded: 0, parked: 0 }, String(schoolId));
+    }
+    assert.equal(getOrder(t, mine).status, 'CREATED');
+    assert.equal(getOrder(t, theirs).status, 'CREATED');
+    assert.deepEqual(t.topups.runJobs(null), { cancelled: 2, refunded: 0, parked: 0 }, 'no options: every school');
   });
 });
 
@@ -1324,6 +1392,98 @@ describe('queries', () => {
     assert.deepEqual(t.topups.memberSummary(t.a.id, t.badrul.id), { mirrorBalanceSen: 0, waitingSen: 0, waitingOrders: [] });
     assert.throws(() => t.topups.memberSummary(t.b.id, t.aina.id), code('MEMBER_NOT_FOUND', 404));
     assert.throws(() => t.topups.memberSummary(t.a.id, 'mem_nope'), code('MEMBER_NOT_FOUND', 404));
+  });
+});
+
+describe('atomicity', () => {
+  /**
+   * Takes a posting key the module is about to use with an unrelated posting (reversed at once,
+   * so every balance stays as it was), so the module's own posting under that key fails.
+   */
+  function occupy(t, schoolId, idemKey) {
+    const { posting } = t.ledger.post({
+      schoolId,
+      idemKey,
+      kind: 'TEST',
+      lines: [
+        { kind: 'CASH_RECEIVED', side: 'DR', amountSen: 1 },
+        { kind: 'SALES_PAYABLE', side: 'CR', amountSen: 1 },
+      ],
+    });
+    t.ledger.reverse({ schoolId, postingId: posting.id, idemKey: `${idemKey}:UNDO` });
+  }
+
+  test('a payment whose posting fails leaves the order CREATED and announces nothing', () => {
+    const t = setup();
+    const o = order(t);
+    occupy(t, t.a.id, `TOPUP:${o.id}:PAID`);
+    const seen = t.ctx.events.lastSeq();
+    assert.throws(() => pay(t, o), code('IDEMPOTENCY_CONFLICT', 409));
+    const row = getOrder(t, o);
+    assert.equal(row.status, 'CREATED');
+    assert.equal(row.paidAt, null);
+    assert.equal(row.addBy, null);
+    assert.deepEqual(t.ctx.events.since(seen), [], 'no topup.status, no ledger.posting');
+  });
+
+  test('a kiosk confirm whose posting fails records nothing: the order is still PAID and its write unconfirmed', () => {
+    const t = setup();
+    const o = paid(t);
+    pending(t, t.aina);
+    occupy(t, t.a.id, `TOPUP:${o.id}:ADDED`);
+    const seen = t.ctx.events.lastSeq();
+    assert.throws(() => confirm(t, o, { kioskTxn: 'KIOSK-01-000300' }), code('IDEMPOTENCY_CONFLICT', 409));
+    const row = getOrder(t, o);
+    assert.equal(row.status, 'PAID');
+    assert.equal(row.writeResult, 'UNCONFIRMED');
+    assert.equal(row.kioskTxn, null);
+    assert.equal(t.topups.kioskLookup({ schoolId: t.a.id, kioskDeviceCode: 'KIOSK-01', kioskTxn: 'KIOSK-01-000300' }), null, 'so the kiosk sends it again');
+    assert.deepEqual(t.ctx.events.since(seen), []);
+    assert.deepEqual(balances(t, t.aina), { walletSen: 0, waitingSen: 1500 });
+  });
+
+  test('a refund or a person’s decision whose posting fails changes nothing', () => {
+    const t = setup();
+    const expiring = paid(t, { member: t.badrul });
+    const stuck = parked(t);
+    t.ctx.clock.advance(HOUR);
+    const resolve = () => t.topups.resolveParked({ schoolId: t.a.id, orderId: stuck.id, decision: 'ADDED', actor: 'staff:x', note: 'seen on the card' });
+    occupy(t, t.a.id, `TOPUP:${stuck.id}:ADDED`);
+    const audits = t.schools.listAudit(t.a.id).length;
+    const seen = t.ctx.events.lastSeq();
+    assert.throws(resolve, code('IDEMPOTENCY_CONFLICT', 409));
+    const row = getOrder(t, stuck);
+    assert.equal(row.status, 'PARKED');
+    assert.equal(row.resolvedBy, null);
+    assert.equal(row.addedAt, null);
+    assert.equal(t.schools.listAudit(t.a.id).length, audits, 'no audit entry for a decision that did not happen');
+    assert.deepEqual(t.ctx.events.since(seen), []);
+
+    // the job refunds orders one by one: the one that fails is left exactly as it was
+    assert.equal(getOrder(t, expiring).status, 'REFUNDED', 'the parked() helper already ran the job');
+    const late = paid(t, { member: t.badrul, amountSen: 1000 });
+    occupy(t, t.a.id, `TOPUP:${late.id}:REVERSAL`);
+    t.ctx.clock.advance(14 * DAY + 1);
+    assert.throws(() => t.topups.runJobs(), code('IDEMPOTENCY_CONFLICT', 409));
+    assert.equal(getOrder(t, late).status, 'PAID', 'not left EXPIRED');
+    assert.deepEqual(statusesOf(t, late), ['CREATED', 'PAID']);
+    assert.deepEqual(balances(t, t.badrul), { walletSen: 0, waitingSen: 1000 });
+  });
+
+  test('a caller’s transaction that rolls back takes the order and its events with it', () => {
+    const t = setup();
+    const seen = t.ctx.events.lastSeq();
+    assert.throws(() => t.ctx.db.tx(() => {
+      paid(t);
+      throw new Error('the caller gave up');
+    }), /the caller gave up/);
+    assert.equal(orderCount(t), 0);
+    assert.deepEqual(t.ctx.events.since(seen), [], 'nothing is announced for rows that were never written');
+    t.ctx.db.tx(() => {
+      paid(t);
+      assert.equal(eventsOf(t.ctx, 'topup.status').length, 0, 'held back until the caller commits');
+    });
+    assert.deepEqual(eventsOf(t.ctx, 'topup.status').map((e) => e.data.status), ['CREATED', 'PAID']);
   });
 });
 

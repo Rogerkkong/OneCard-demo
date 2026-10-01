@@ -256,7 +256,9 @@ describe('provision', () => {
     const ctx = createTestCtx();
     const reader = offline(ctx, CanteenReader, READER);
     const bad = [
-      { prices: { version: 0, content: DEFAULT_PRICES } },
+      { prices: { version: -1, content: DEFAULT_PRICES } },
+      { prices: { content: DEFAULT_PRICES } },
+      { prices: 'v1' },
       { prices: { version: 1, content: { items: [], water: DEFAULT_PRICES.water } } },
       { prices: { version: 1, content: { items: DEFAULT_PRICES.items } } },
       { settings: { version: 1, content: { ...DEFAULT_SETTINGS, mealWindows: [{ from: '18:00', to: '07:00' }] } } },
@@ -266,6 +268,13 @@ describe('provision', () => {
     ];
     for (const configs of bad) assert.throws(() => reader.provision(configs), TypeError, JSON.stringify(configs));
     assert.deepEqual(reader.state.versions, { prices: 0, settings: 0, blocklist: 0 });
+  });
+
+  test('a kind never published (null, or the empty block list at version 0) installs nothing', () => {
+    const ctx = createTestCtx();
+    const reader = offline(ctx, CanteenReader, READER);
+    const versions = reader.provision({ prices: null, settings: INSTALL.settings, blocklist: { kind: 'blocklist', version: 0, content: { entries: [] } } });
+    assert.deepEqual(versions, { prices: 0, settings: 1, blocklist: 0 });
   });
 });
 
@@ -402,6 +411,8 @@ describe('connection and heartbeat', () => {
     assert.equal(verifyEnvelopeSignature(READER.secret, batch.env), true);
     assert.deepEqual(batch.env.body.records, [kept.record]);
     assert.ok(batch.env.seq > seqBefore);
+    // marked sent on its PUBACK, which may reach the reader just after the platform got the batch
+    await waitFor(() => reader.state.journal.unsent === 0, { message: 'the batch to be marked sent' });
     assert.deepEqual(reader.state.journal, { total: 2, unsent: 0 });
   });
 });

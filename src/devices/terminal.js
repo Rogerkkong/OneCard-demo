@@ -712,17 +712,20 @@ export class Terminal {
    * is optional and replaces what the machine has: prices and settings as
    * `{ version, content }` (configs.current()) or a command body `{ version, ...content }`;
    * the block list as `{ version, entries }` or `{ version, content: { entries } }`.
-   * All parts are checked before any is installed; anything unusable is a TypeError.
-   * @param {{ prices?: object, settings?: object, blocklist?: object }} configs
+   * A part that is null, or at version 0 (configs.current() for a kind never published),
+   * installs nothing. All parts are checked before any is installed; anything unusable is a
+   * TypeError.
+   * @param {{ prices?: object|null, settings?: object|null, blocklist?: object|null }} configs
    * @returns {{ prices: number, settings: number, blocklist: number }} the versions now installed
    */
   provision({ prices, settings, blocklist } = {}) {
     const parts = [];
     for (const [kind, part] of Object.entries({ prices, settings, blocklist })) {
-      if (part === undefined) continue;
-      if (!isPlainObject(part) || !Number.isSafeInteger(part.version) || part.version < 1) {
-        throw new TypeError(`${kind} needs a version, 1 or more`);
+      if (part == null) continue;
+      if (!isPlainObject(part) || !Number.isSafeInteger(part.version) || part.version < 0) {
+        throw new TypeError(`${kind} needs a version, 0 or more`);
       }
+      if (part.version === 0) continue;
       const clean = CLEANERS[kind](isPlainObject(part.content) ? part.content : part);
       if (!clean) throw new TypeError(`${kind} content is not usable`);
       parts.push([kind, part.version, clean, part.effectiveFrom]);

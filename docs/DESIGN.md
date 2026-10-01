@@ -493,7 +493,7 @@ Order DTO: `{ id, schoolId, kind, parentId, memberId, memberName, amountSen, sta
 
 ### 4.7 `reconcile.js` — `createReconcile(ctx, { ledger, schools, configs, devices, differences })`
 
-- `checkCardSnapshot({ schoolId, cardDigest, balanceSen, cardSeq })` → `{ match, mirrorSen, cardSen }`; on mismatch open `BALANCE_MISMATCH` (ref `<digest>:<cardSeq>`, detail both amounts and a hint).
+- `checkCardSnapshot({ schoolId, cardDigest, balanceSen, cardSeq, writes? })` → `{ match, mirrorSen, cardSen, unconfirmedSen }`; on mismatch open `BALANCE_MISMATCH` (ref `<digest>:<cardSeq>`, detail the amounts and a hint). `writes` is the read-back's list of kiosk top-ups on the card (at most 50 `{ orderId, amountSen }`). A write whose order this member still has as `PAID` or `PARKED`, for the same amount, reached the card but was never confirmed (a kiosk power cut after the write); its amount is `unconfirmedSen` and the comparison is `mirrorSen === balanceSen − unconfirmedSen`, so the read-back that comes before the kiosk's re-confirm does not raise a false mismatch. A malformed list is `SNAPSHOT_INVALID`.
 - `scanGaps(schoolId)` → number of new differences: for each origin device, missing numbers between the lowest and highest txn number received → `MISSING_RECORDS` (ref `<origin>:<from>-<to>`).
 - `scanListLag(schoolId, { maxAgeMs = 24 h })` → number of new differences: devices whose applied block-list version is below the current version when the current version is older than `maxAgeMs` → `OLD_BLOCK_LIST` (ref `<deviceCode>:<currentVersion>`).
 - `run(schoolId)` → `{ gaps, lag }`.
@@ -503,7 +503,7 @@ Order DTO: `{ id, schoolId, kind, parentId, memberId, memberName, amountSen, sta
 - `handle(topic, payload)` (payload: Buffer or string) → `{ result: 'ACCEPTED'|'DUPLICATE'|'REFUSED', code?, type?, detail? }`. Never throws. Implements §3 "Intake pipeline".
   Dispatch: `device.heartbeat` → `devices.recordHeartbeat` + `configs.recordListState(..., via 'HEARTBEAT')` for each reported kind;
   `sale.recorded`/`water.recorded` → `settlement.receive(via 'MQTT')`; `journal.batch` → each record `settlement.receive(via 'JOURNAL_BATCH')`;
-  `card.readback` → each record `settlement.receive(via 'KIOSK_READBACK')`, then `reconcile.checkCardSnapshot`;
+  `card.readback` → each record `settlement.receive(via 'KIOSK_READBACK')`, then `reconcile.checkCardSnapshot` (passing `body.writes`);
   `command.ack` with result APPLIED/ALREADY_APPLIED → `configs.recordListState(..., via 'MQTT')`.
   Emits `intake.accepted` / `intake.duplicate` / `intake.refused` `{ device, type, code?, results? }`.
 
