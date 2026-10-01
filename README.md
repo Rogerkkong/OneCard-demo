@@ -91,8 +91,10 @@ username `viewer`, password `viewer` → *Connect*. The topic tree shows `lab/v1
 and every message as it happens.
 
 **On your phone.** The parent app is made for phone browsers. If the lab runs on your laptop,
-start it with `LAB_HOST=0.0.0.0 npm start` and open `http://<laptop-IP>:8080/parent/` on a
-phone on the same Wi-Fi. The lab has no passwords, so only do this on a network you trust.
+start it with `npm run start:lan` instead of `npm start`; it prints the address to open
+(`http://<laptop-IP>:8080/parent/`) on a phone on the same Wi-Fi. Windows may ask whether
+Node.js may use the network: allow *Private networks*. The lab has no passwords, so only do
+this on a network you trust.
 
 **PuTTY and the real server.** When the real system goes onto a cloud server, PuTTY (SSH) is
 how you log in to that server. In the lab the server is virtual, so you use its console above.
@@ -134,6 +136,13 @@ scripts/make-lab-certs.sh            # add names/IPs devices will use, e.g. 192.
 LAB_MQTT_TLS_CERT=lab-certs/server.crt LAB_MQTT_TLS_KEY=lab-certs/server.key npm start
 ```
 
+On Windows, run the script in Git Bash (it comes with [Git for Windows](https://git-scm.com/)
+and includes OpenSSL), then start the lab from PowerShell:
+
+```powershell
+$env:LAB_MQTT_TLS_CERT="lab-certs/server.crt"; $env:LAB_MQTT_TLS_KEY="lab-certs/server.key"; npm start
+```
+
 The script makes a throwaway CA and a broker certificate. Devices trust the CA and check
 that the broker's name is in the certificate — the same checks a real terminal must make.
 
@@ -144,7 +153,7 @@ that the broker's name is in the certificate — the same checks a real terminal
 | `LAB_HTTP_PORT` | 8080 | web apps and APIs |
 | `LAB_MQTT_PORT` | 1883 | MQTT broker |
 | `LAB_CONSOLE_PORT` | 2323 | machine and server consoles for PuTTY / telnet (`0` turns them off) |
-| `LAB_HOST` | 127.0.0.1 | listen address; anything else exposes the lab (which has no passwords) to your network |
+| `LAB_HOST` | 127.0.0.1 | listen address; anything else exposes the lab (which has no passwords) to your network (`npm run start:lan` = `0.0.0.0`) |
 | `LAB_MQTT_TLS_CERT`, `LAB_MQTT_TLS_KEY`, `LAB_MQTT_TLS_PORT` | — , — , 8883 | optional TLS listener |
 
 ## How it is built
@@ -197,8 +206,9 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
   `show status`、`tap <卡号> NASI-LEMAK`、`cable unplug`、`show journal`；`connect server` 再 `server down` 就是关服务器。
   控制台的 **Console** 页签里也有一样的东西。
 - **像 Wireshark 一样看消息：** MQTT Explorer → host `127.0.0.1`，port `1883`，用户名 `viewer`，密码 `viewer`。
-- **用手机看家长网页：** 实验室在你电脑上跑时，用 `LAB_HOST=0.0.0.0 npm start` 启动，手机连同一个 Wi-Fi，
-  打开 `http://<电脑IP>:8080/parent/`。实验室没有密码，只在信任的网络里这样做。
+- **用手机看家长网页：** 实验室在你电脑上跑时，改用 `npm run start:lan` 启动，它会印出手机要打开的地址
+  （`http://<电脑IP>:8080/parent/`），手机连同一个 Wi-Fi 打开就行。Windows 问 Node.js 能不能用网络时，选允许
+  *专用网络*。实验室没有密码，只在信任的网络里这样做。
 - **PuTTY 和真服务器：** 等真系统上了云端服务器，PuTTY（SSH）是用来登录那台服务器的；实验室里服务器是虚拟的，用上面的控制台就行。
 
 **看设备消息：** 用 MQTT Explorer 或 `mosquitto_sub`，只读账号 `viewer` / `viewer`，订阅 `lab/v1/#`。
