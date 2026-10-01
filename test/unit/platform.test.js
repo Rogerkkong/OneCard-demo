@@ -7,7 +7,7 @@ import { createPlatform, PLATFORM_CLIENT_ID } from '../../src/platform/platform.
 import { DEFAULT_PRICES, DEFAULT_SETTINGS } from '../../src/platform/configs.js';
 import { brokerPassword, signEnvelope, verifyEnvelopeSignature } from '../../src/shared/crypto.js';
 import { buildEnvelope, deviceTxnNo, topicFor, UP_TYPES, validateEnvelopeShape } from '../../src/shared/protocol.js';
-import { MINUTE } from '../../src/shared/time.js';
+import { DAY, MINUTE } from '../../src/shared/time.js';
 
 // Every school, person and machine here is fictional; secrets and card keys are generated
 // for each test. Machines are plain MQTT clients here (the virtual hardware is tested on its own).
@@ -129,6 +129,7 @@ let kioskTxns = 0;
 function fund(env, school, key, amountSen) {
   const member = school.members[key];
   const order = env.topups.grantSubsidy({ schoolId: school.id, memberId: member.id, amountSen, actor: 'test' });
+  const kioskTxn = deviceTxnNo('KIOSK-01', ++kioskTxns);
   env.topups.kioskConfirm({
     schoolId: school.id,
     kioskDeviceId: school.m['KIOSK-01'].id,
@@ -138,9 +139,11 @@ function fund(env, school, key, amountSen) {
     amountSen,
     cardDigest: member.digest,
     balanceAfterOnCardSen: amountSen,
-    kioskTxn: deviceTxnNo('KIOSK-01', ++kioskTxns),
+    kioskTxn,
   });
-  return { digest: member.digest, last4: member.uid.slice(-4), cardSeq: 1, balanceSen: amountSen };
+  // the chip keeps the write, as a kiosk read-back lists it
+  const writes = [{ orderId: order.id, amountSen, kioskTxn, at: env.ctx.clock.iso() }];
+  return { digest: member.digest, last4: member.uid.slice(-4), cardSeq: 1, balanceSen: amountSen, writes };
 }
 
 /** A completed canteen record off a chip (as VirtualCard.debit fills it in). */
@@ -201,7 +204,7 @@ describe('the facade', () => {
     assert.equal(platform.resolveBrokerDevice('smk-alpha.CANTEEN-02').active, false);
     platform.services.schools.setSchoolStatus(world.b.id, 'SUSPENDED', 'operator');
     assert.equal(platform.resolveBrokerDevice('smk-beta.CANTEEN-01').active, false);
-    assert.deepEqual(platform.mqttStatus(), { connected: false, url: null });
+    assert.deepEqual(platform.mqttStatus(), { connected: false, subscribed: false, url: null });
   });
 
   test('issueCard issues the card and announces it for the lab', async (t) => {
@@ -221,7 +224,7 @@ describe('MQTT link', () => {
   test('connectMqtt receives a machine\'s signed sale and posts it', NET, async (t) => {
     const env = await setup(t);
     const { ctx, platform, world, settlement, ledger } = env;
-    assert.deepEqual(platform.mqttStatus(), { connected: true, url: env.broker().url });
+    assert.deepEqual(platform.mqttStatus(), { connected: true, subscribed: true, url: env.broker().url });
     const card = fund(env, world.a, 'aina', 2000);
     const canteen = await env.machine(world.a, 'CANTEEN-01');
     const record = saleRecord(env, card, { n: 1 });
@@ -311,7 +314,7 @@ describe('MQTT link', () => {
     const deadUrl = spare.url;
     await spare.close();
     await assert.rejects(platform.connectMqtt(deadUrl), labError('BROKER_UNAVAILABLE', 503));
-    assert.deepEqual(platform.mqttStatus(), { connected: false, url: null });
+    assert.deepEqual(platform.mqttStatus(), { connected: false, subscribed: false, url: null });
     ctx.settings.platformBrokerPassword = 'cc'.repeat(32);
     await assert.rejects(platform.connectMqtt(url), labError('BROKER_UNAVAILABLE', 503));
     await assert.rejects(platform.connectMqtt(''), labError('BROKER_URL_INVALID', 400));
@@ -346,7 +349,7 @@ describe('MQTT link', () => {
     const connecting = platform.connectMqtt(url);
     await platform.disconnectMqtt();
     await connecting;
-    assert.deepEqual(platform.mqttStatus(), { connected: false, url: null });
+    assert.deepEqual(platform.mqttStatus(), { connected: false, subscribed: false, url: null });
     await waitFor(() => platformSessions() === 0, { message: 'no platform session' });
     await assert.rejects(platform.publishConfig(env.world.a.id, 'prices'), labError('BROKER_UNAVAILABLE', 503));
   });
@@ -402,18 +405,69 @@ describe('MQTT link', () => {
     const env = await setup(t, { reconnectMs: 50 });
     const { ctx, platform, world } = env;
     const old = env.broker();
+    assert.equal(platform.mqttStatus().subscribed, true);
     await old.close();
     await waitFor(() => !platform.mqttStatus().connected, { message: 'the link to drop' });
+    // a fresh broker would drop machine records until the platform has subscribed again: the lab can tell
+    assert.equal(platform.mqttStatus().subscribed, false);
     const mark = ctx.events.lastSeq();
     await env.startOn(old.port);
     await waitFor(() => platformPublishes(ctx, mark).length === 6 * 3, { timeout: 8000, message: 'the republish after reconnecting' });
-    assert.equal(platform.mqttStatus().connected, true);
+    assert.deepEqual(platform.mqttStatus(), { connected: true, subscribed: true, url: old.url });
     const canteen = await env.machine(world.a, 'CANTEEN-01');
     await waitFor(() => canteen.inbox.length === 3, { message: 'the retained settings' });
     // and records from machines reach intake again
     const card = fund(env, world.a, 'badrul', 1000);
     await canteen.send('sale.recorded', { record: saleRecord(env, card, { n: 1 }) });
     await waitFor(() => env.settlement.listPurchases(world.a.id).length === 1, { message: 'the sale after the restart' });
+  });
+
+  test('a school reactivated after a broker restart gets back the retained settings the restart lost', NET, async (t) => {
+    const env = await setup(t);
+    const { ctx, platform, world } = env;
+    await platform.setSchoolStatus({ schoolId: world.b.id, status: 'SUSPENDED', actor: 'operator' });
+    const old = env.broker();
+    await old.close();
+    const mark = ctx.events.lastSeq();
+    await env.startOn(old.port);
+    await platform.connectMqtt(env.broker().url);
+    // the reconnect republished for the ACTIVE school only (four ACTIVE machines, three kinds each)
+    const republished = await publishesOf(ctx, 4 * 3, mark);
+    assert.ok(republished.every((e) => e.data.topic.startsWith('lab/v1/smk-alpha/')), 'nothing for the suspended school');
+    const back = await platform.setSchoolStatus({ schoolId: world.b.id, status: 'ACTIVE', actor: 'operator' });
+    assert.deepEqual([back.status, back.published], ['ACTIVE', true]);
+    // the new broker had nothing for it: what its machine finds now was published on reactivation
+    const kiosk = await env.machine(world.b, 'KIOSK-01');
+    await waitFor(() => kiosk.inbox.length === 3, { message: 'the reactivated school\'s settings' });
+    assert.ok(kiosk.inbox.every((m) => m.retain && verifyEnvelopeSignature(world.b.m['KIOSK-01'].secret, m.env)));
+  });
+
+  test('a kiosk read-back that reaches the platform after the tap\'s top-up was confirmed opens no false mismatch', NET, async (t) => {
+    const env = await setup(t);
+    const { ctx, platform, world, topups, differences, ledger } = env;
+    const aina = world.a.members.aina;
+    const card = fund(env, world.a, 'aina', 1000);
+    const order = topups.grantSubsidy({ schoolId: world.a.id, memberId: aina.id, amountSen: 700, actor: 'office' });
+    const kiosk = await env.machine(world.a, 'KIOSK-01');
+    ctx.clock.advance(MINUTE);
+    // the platform's link is down for a moment: the broker acknowledges the read-back to the kiosk
+    // and keeps it for the platform's session
+    await platform.disconnectMqtt();
+    await kiosk.send('card.readback', {
+      card: card.digest, last4: card.last4, balanceSen: card.balanceSen, cardSeq: card.cardSeq, listVersionOnCard: 1, records: [], writes: card.writes,
+    });
+    // meanwhile the kiosk writes this tap's RM 7.00 and confirms it over HTTP: the books have it first
+    ctx.clock.advance(800);
+    topups.kioskPending({ schoolId: world.a.id, kioskDeviceId: world.a.m['KIOSK-01'].id, cardDigest: aina.digest });
+    topups.kioskConfirm({
+      schoolId: world.a.id, kioskDeviceId: world.a.m['KIOSK-01'].id, kioskDeviceCode: 'KIOSK-01', orderId: order.id, result: 'ADDED',
+      amountSen: 700, cardDigest: aina.digest, balanceAfterOnCardSen: 1700, kioskTxn: deviceTxnNo('KIOSK-01', 901),
+    });
+    await platform.connectMqtt(env.broker().url);
+    await waitFor(() => eventsOf(ctx, 'intake.accepted').some((e) => e.data.type === 'card.readback'), { message: 'the read-back' });
+    assert.deepEqual(differences.list(world.a.id), [], 'the card was read before the write: no BALANCE_MISMATCH');
+    assert.deepEqual(ledger.memberBalances(world.a.id, aina.id), { walletSen: 1700, waitingSen: 0 });
+    balanced(env, world.a);
   });
 });
 
@@ -559,7 +613,7 @@ describe('cards', () => {
 describe('switching machines and schools off', () => {
   test('setDeviceStatus DISABLED kicks the machine, which cannot log in again until switched back on', NET, async (t) => {
     const env = await setup(t);
-    const { platform, world } = env;
+    const { ctx, platform, world } = env;
     const water = await env.machine(world.a, 'WATER-01');
     const other = await env.machine(world.a, 'CANTEEN-01');
     const gone = closed(water.client);
@@ -569,8 +623,12 @@ describe('switching machines and schools off', () => {
     assert.ok(!env.broker().clients().some((c) => c.username === 'smk-alpha.WATER-01'));
     assert.equal(other.client.connected, true);
     assert.equal(await env.refusedLogin(world.a, 'WATER-01'), 5);
+    const mark = ctx.events.lastSeq();
     const back = await platform.setDeviceStatus({ schoolId: world.a.id, code: 'WATER-01', status: 'ACTIVE', actor: 'staff:office' });
     assert.deepEqual([back.status, back.kicked, back.published], ['ACTIVE', 0, true]);
+    // switched back on, it is sent the settings it may have missed while off, and only it
+    const resent = await publishesOf(ctx, 3, mark);
+    assert.deepEqual(resent.map((e) => e.data.topic).sort(), KINDS.map((k) => `lab/v1/smk-alpha/WATER-01/commands/${k}`).sort());
     const again = await env.machine(world.a, 'WATER-01');
     await waitFor(() => again.inbox.length === 3, { message: 'its settings' });
     await assert.rejects(platform.setDeviceStatus({ schoolId: world.a.id, code: 'WATER-01', status: 'BROKEN' }), labError('DEVICE_STATUS_INVALID'));
@@ -785,6 +843,39 @@ describe('operator view and jobs', () => {
     assert.ok(logs.some((l) => l.level === 'error' && l.meta.error === 'scan failed'));
     // only one school, when asked
     assert.deepEqual(platform.runJobs({ schoolId: world.b.id }).schools.map((r) => r.code), ['smk-beta']);
+  });
+
+  test('runJobs refunds money never added, parks unconfirmed writes, once, and every school\'s books stay balanced', async (t) => {
+    const env = await setup(t, { connect: false });
+    const { ctx, platform, world, topups, ledger } = env;
+    const { aina, badrul } = world.a.members;
+    const forAina = topups.grantSubsidy({ schoolId: world.a.id, memberId: aina.id, amountSen: 800, actor: 'office' });
+    const forChong = topups.grantSubsidy({ schoolId: world.b.id, memberId: world.b.members.chong.id, amountSen: 600, actor: 'office' });
+    // offered to the kiosk but never confirmed: it may be on the card, so it is parked, not refunded
+    const forBadrul = topups.grantSubsidy({ schoolId: world.a.id, memberId: badrul.id, amountSen: 300, actor: 'office' });
+    topups.kioskPending({ schoolId: world.a.id, kioskDeviceId: world.a.m['KIOSK-01'].id, cardDigest: badrul.digest });
+    await platform.setSchoolStatus({ schoolId: world.b.id, status: 'SUSPENDED', actor: 'operator' });
+    ctx.clock.advance(15 * DAY); // the add window is 14 days
+
+    const out = platform.runJobs();
+    assert.deepEqual([out.refunded, out.parked, out.schools.map((r) => r.code)], [1, 1, ['smk-alpha']]);
+    assert.deepEqual(
+      [topups.getOrder(world.a.id, forAina.id).status, topups.getOrder(world.a.id, forBadrul.id).status, topups.getOrder(world.b.id, forChong.id).status],
+      ['REFUNDED', 'PARKED', 'PAID'],
+    );
+    assert.deepEqual(ledger.memberBalances(world.a.id, aina.id), { walletSen: 0, waitingSen: 0 });
+    assert.deepEqual(ledger.memberBalances(world.a.id, badrul.id), { walletSen: 0, waitingSen: 300 });
+    balanced(env, world.a);
+    balanced(env, world.b);
+    // reactivated, the other school's deadline is applied too; nothing is refunded twice
+    await platform.setSchoolStatus({ schoolId: world.b.id, status: 'ACTIVE', actor: 'operator' });
+    assert.equal(platform.runJobs().refunded, 1);
+    assert.equal(topups.getOrder(world.b.id, forChong.id).status, 'REFUNDED');
+    const again = platform.runJobs();
+    assert.deepEqual([again.cancelled, again.refunded, again.parked], [0, 0, 0]);
+    assert.equal(ledger.postings(world.a.id, { limit: 100 }).filter((p) => p.reversalOf).length, 1);
+    balanced(env, world.a);
+    balanced(env, world.b);
   });
 });
 

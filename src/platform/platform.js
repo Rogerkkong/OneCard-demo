@@ -89,6 +89,9 @@ export function createPlatform(ctx, deps = {}) {
   let brokerRef = deps?.broker ?? null;
   let client = null; // the platform's MQTT client, while connectMqtt() is in force
   let clientUrl = null;
+  // The client whose connection has the machines' topics subscribed: from then on what a machine
+  // publishes reaches intake, or waits for it at the broker. A fresh broker drops it before.
+  let subscribedClient = null;
   let linkQueue = Promise.resolve(); // connectMqtt / disconnectMqtt run one at a time, in call order
   const commandSeqs = new Map(); // device id -> last seq the platform used towards it
   const inFlight = new Set(); // publishes waiting for their PUBACK
@@ -156,6 +159,8 @@ export function createPlatform(ctx, deps = {}) {
       };
       const callback = (err) => settle(err);
       timer = setTimeout(() => {
+        // settled first: taking the message back calls `callback` at once with "Message removed"
+        settle(new Error('no PUBACK from the broker in time'));
         for (const [id, pending] of Object.entries(c.outgoing ?? {})) {
           if (pending?.cb !== callback) continue;
           try {
@@ -164,7 +169,6 @@ export function createPlatform(ctx, deps = {}) {
             // the client's store is already closed: nothing left to resend
           }
         }
-        settle(new Error('no PUBACK from the broker in time'));
       }, PUBACK_TIMEOUT_MS);
       timer.unref?.();
       inFlight.add(entry);
@@ -378,6 +382,7 @@ export function createPlatform(ctx, deps = {}) {
       return false;
     }
     if (c !== client || !c.connected) return false;
+    subscribedClient = c;
     await republishAll();
     return true;
   }
@@ -472,7 +477,10 @@ export function createPlatform(ctx, deps = {}) {
         return false;
       });
     });
-    c.on('close', () => failInFlight(c, 'the connection to the broker closed'));
+    c.on('close', () => {
+      if (subscribedClient === c) subscribedClient = null;
+      failInFlight(c, 'the connection to the broker closed');
+    });
 
     const giveUp = async (reason) => {
       if (client === c) {
@@ -842,8 +850,17 @@ export function createPlatform(ctx, deps = {}) {
     services,
     connectMqtt,
     disconnectMqtt,
-    /** @returns {{ connected: boolean, url: string|null }} the platform's own broker link */
-    mqttStatus: () => ({ connected: client?.connected === true, url: clientUrl }),
+    /**
+     * The platform's own broker link. `subscribed`: the machines' records and status topics are
+     * subscribed on this connection (after every reconnect too), so what a machine publishes now
+     * reaches intake or waits for it at the broker. A freshly started broker drops what machines
+     * publish before that moment, although it acknowledges it to them.
+     * @returns {{ connected: boolean, subscribed: boolean, url: string|null }}
+     */
+    mqttStatus: () => {
+      const connected = client?.connected === true;
+      return { connected, subscribed: connected && subscribedClient === client, url: clientUrl };
+    },
     /** Use another broker for kicks (the lab restarted it); a function returning the broker works too. */
     setBroker(broker) {
       brokerRef = broker ?? null;

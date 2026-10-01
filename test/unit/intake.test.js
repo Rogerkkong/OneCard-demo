@@ -97,6 +97,7 @@ let kioskTxns = 0;
 function fund(school, key, amountSen) {
   const member = school.members[key];
   const order = t.topups.grantSubsidy({ schoolId: school.id, memberId: member.id, amountSen, actor: 'test', note: 'start' });
+  const kioskTxn = deviceTxnNo('KIOSK-01', ++kioskTxns);
   t.topups.kioskConfirm({
     schoolId: school.id,
     kioskDeviceId: school.m['KIOSK-01'].id,
@@ -106,11 +107,23 @@ function fund(school, key, amountSen) {
     amountSen,
     cardDigest: member.digest,
     balanceAfterOnCardSen: amountSen,
-    kioskTxn: deviceTxnNo('KIOSK-01', ++kioskTxns),
+    kioskTxn,
   });
-  // the chip: the kiosk's credit raised its counter too
-  return { digest: member.digest, last4: member.uid.slice(-4), cardSeq: 1, balanceSen: amountSen };
+  // the chip: the kiosk's credit raised its counter too, and the card keeps the write (a read-back lists it)
+  const writes = [{ orderId: order.id, amountSen, kioskTxn, at: t.ctx.clock.iso() }];
+  return { digest: member.digest, last4: member.uid.slice(-4), cardSeq: 1, balanceSen: amountSen, writes };
 }
+
+/** What a kiosk read-back of the card says (DESIGN §3 card.readback). */
+const readbackBody = (card, records = []) => ({
+  card: card.digest,
+  last4: card.last4,
+  balanceSen: card.balanceSen,
+  cardSeq: card.cardSeq,
+  listVersionOnCard: 1,
+  records,
+  writes: [...(card.writes ?? [])], // a copy: the chip changes later, the signed message must not
+});
 
 function debit(card, fields, amountSen) {
   card.cardSeq += 1;
@@ -617,19 +630,11 @@ describe('accepted messages', () => {
     // bought on machines with no network: only the card knows
     const r1 = sale(card, { n: 1 });
     const r2 = water(card, { n: 1, ml: 500 });
-    const body = () => ({
-      card: card.digest,
-      last4: card.last4,
-      balanceSen: card.balanceSen,
-      cardSeq: card.cardSeq,
-      listVersionOnCard: 1,
-      records: [r1, r2],
-      writes: [],
-    });
+    const body = () => readbackBody(card, [r1, r2]);
     const res = send(kiosk, 'card.readback', body());
     assert.equal(res.result, 'ACCEPTED');
     assert.deepEqual(res.detail.results.map((r) => [r.origin, r.status]), [['CANTEEN-01', 'POSTED'], ['WATER-01', 'POSTED']]);
-    assert.deepEqual(res.detail.snapshot, { checked: true, match: true, mirrorSen: card.balanceSen, cardSen: card.balanceSen, unconfirmedSen: 0 });
+    assert.deepEqual(res.detail.snapshot, { checked: true, match: true, mirrorSen: card.balanceSen, cardSen: card.balanceSen, unconfirmedSen: 0, laterSen: 0 });
     assert.deepEqual(purchases(t.a).map((p) => p.via), ['KIOSK_READBACK', 'KIOSK_READBACK']);
     assert.deepEqual(t.differences.list(t.a.id), []);
 
@@ -653,15 +658,58 @@ describe('accepted messages', () => {
     t.topups.kioskPending({ schoolId: t.a.id, kioskDeviceId: kiosk.id, cardDigest: member.digest });
     card.balanceSen += 700;
     card.cardSeq += 1;
-    const writes = [{ orderId: order.id, amountSen: 700, kioskTxn: deviceTxnNo('KIOSK-01', 99), at: toIso(t.ctx.clock.now()) }];
-    const body = { card: card.digest, last4: card.last4, balanceSen: card.balanceSen, cardSeq: card.cardSeq, listVersionOnCard: 1, records: [], writes };
+    card.writes.push({ orderId: order.id, amountSen: 700, kioskTxn: deviceTxnNo('KIOSK-01', 99), at: toIso(t.ctx.clock.now()) });
+    const body = readbackBody(card);
     const res = send(kiosk, 'card.readback', body);
-    assert.deepEqual(res.detail.snapshot, { checked: true, match: true, mirrorSen: 1000, cardSen: 1700, unconfirmedSen: 700 });
+    assert.deepEqual(res.detail.snapshot, { checked: true, match: true, mirrorSen: 1000, cardSen: 1700, unconfirmedSen: 700, laterSen: 0 });
     assert.deepEqual(t.differences.list(t.a.id), []);
     // without the card's writes the same snapshot would be a mismatch
     const blind = send(kiosk, 'card.readback', { ...body, writes: undefined });
     assert.equal(blind.detail.snapshot.match, false);
     assert.equal(t.differences.list(t.a.id, { kind: 'BALANCE_MISMATCH' }).length, 1);
+    assertBooks(t.a);
+  });
+
+  test('card.readback: a top-up confirmed before the read-back is handled, but written after the card was read, is not a mismatch', () => {
+    const kiosk = t.a.m['KIOSK-01'];
+    const member = t.a.members.aina;
+    const card = fund(t.a, 'aina', 1000);
+    const order = t.topups.grantSubsidy({ schoolId: t.a.id, memberId: member.id, amountSen: 700, actor: 'office' });
+    t.ctx.clock.advance(MINUTE);
+    // the student taps: the kiosk reads the card (RM 10.00) and publishes the read-back, which the
+    // broker acknowledges before the platform has it…
+    const taken = envelope(kiosk, 'card.readback', readbackBody(card));
+    // …then the kiosk writes this tap's RM 7.00 and confirms it over HTTP: the books have it first
+    t.ctx.clock.advance(800);
+    t.topups.kioskPending({ schoolId: t.a.id, kioskDeviceId: kiosk.id, cardDigest: member.digest });
+    const kioskTxn = deviceTxnNo('KIOSK-01', 500);
+    const confirmed = t.topups.kioskConfirm({
+      schoolId: t.a.id, kioskDeviceId: kiosk.id, kioskDeviceCode: 'KIOSK-01', orderId: order.id, result: 'ADDED',
+      amountSen: 700, cardDigest: member.digest, balanceAfterOnCardSen: 1700, kioskTxn,
+    });
+    assert.equal(confirmed.status, 'ADDED');
+    assert.equal(wallet(t.a, 'aina'), 1700);
+    // the read-back taken before the write arrives now: the card said RM 10.00 when it was read
+    const res = deliver(kiosk, taken);
+    assert.equal(res.result, 'ACCEPTED');
+    assert.deepEqual(res.detail.snapshot, { checked: true, match: true, mirrorSen: 1700, cardSen: 1000, unconfirmedSen: 0, laterSen: 700 });
+    assert.deepEqual(t.differences.list(t.a.id), []);
+    // the next tap reads RM 17.00 with the write on the card: nothing left out, still no difference
+    card.balanceSen += 700;
+    card.cardSeq += 1;
+    card.writes.push({ orderId: order.id, amountSen: 700, kioskTxn, at: t.ctx.clock.iso() });
+    t.ctx.clock.advance(MINUTE);
+    assert.deepEqual(send(kiosk, 'card.readback', readbackBody(card)).detail.snapshot, {
+      checked: true, match: true, mirrorSen: 1700, cardSen: 1700, unconfirmedSen: 0, laterSen: 0,
+    });
+    assert.deepEqual(t.differences.list(t.a.id), []);
+    // the time that counts is when the card was read (the envelope's at), not when the platform got it:
+    // the old RM 10.00 snapshot claiming to be read after the confirm is a real mismatch
+    const stale = readbackBody({ ...card, balanceSen: 1000, cardSeq: 1, writes: card.writes.slice(0, 1) });
+    const late = send(kiosk, 'card.readback', stale);
+    assert.deepEqual([late.detail.snapshot.match, late.detail.snapshot.laterSen], [false, 0]);
+    assert.equal(t.differences.list(t.a.id, { kind: 'BALANCE_MISMATCH' }).length, 1);
+    assertBooks(t.a);
   });
 
   test('card.readback: a snapshot that cannot be checked is logged, and the records stay', () => {
@@ -685,6 +733,14 @@ describe('accepted messages', () => {
       assert.deepEqual([entry.level, entry.code], ['WARN', 'SNAPSHOT_INVALID']);
       assert.match(entry.message, /^card read-back: /);
     }
+    // a read-back dated before 1970 has no usable reading time (readAt must be 0 or more): the same
+    const old = send(kiosk, 'card.readback', readbackBody(card, [r1]), { at: '1969-12-31T23:59:59.000Z' });
+    assert.equal(old.result, 'ACCEPTED');
+    assert.deepEqual([old.detail.snapshot.checked, old.detail.snapshot.code], [false, 'SNAPSHOT_INVALID']);
+    assert.deepEqual(old.detail.results.map((r) => r.status), ['DUPLICATE']);
+    assert.deepEqual([logOf(kiosk)[0].level, logOf(kiosk)[0].code], ['WARN', 'SNAPSHOT_INVALID']);
+    assert.match(logOf(kiosk)[0].message, /readAt/);
+    assert.deepEqual(t.differences.list(t.a.id), []);
     assert.equal(purchases(t.a).length, 1);
     assert.equal(wallet(t.a, 'aina'), 2000 - PRICE['NASI-LEMAK']);
     assertBooks(t.a);
@@ -723,7 +779,7 @@ describe('idempotency', () => {
     assert.deepEqual(send(canteen, 'sale.recorded', { record }).detail.results.map((r) => r.status), ['POSTED']);
     const batch = send(canteen, 'journal.batch', { batchId: 'CANTEEN-01-B1', count: 1, records: [record] });
     assert.deepEqual(batch.detail.results.map((r) => r.status), ['DUPLICATE']);
-    const readback = send(kiosk, 'card.readback', { card: card.digest, last4: card.last4, balanceSen: card.balanceSen, cardSeq: card.cardSeq, records: [record], writes: [] });
+    const readback = send(kiosk, 'card.readback', readbackBody(card, [record]));
     assert.deepEqual(readback.detail.results.map((r) => r.status), ['DUPLICATE']);
     assert.equal(readback.detail.snapshot.match, true);
     assert.equal(purchases(t.a).length, 1);
@@ -767,6 +823,43 @@ describe('tenant isolation', () => {
     assert.ok(t.devices.listLog(t.b.id).every((e) => e.deviceCode === 'CANTEEN-01' && e.schoolId === t.b.id));
     assert.deepEqual(t.devices.listLog(t.a.id), []);
     assert.deepEqual(refusedEvents().map((e) => e.school), ['smk-beta', 'smk-beta']);
+  });
+
+  test('a read-back naming another school\'s card and orders reads, counts and changes nothing of that school', () => {
+    const kioskA = t.a.m['KIOSK-01'];
+    const cardA = fund(t.a, 'aina', 1000);
+    const cardB = fund(t.b, 'chong', 1000);
+    // B has money waiting for Chong, offered at B's kiosk: PAID, the write not yet confirmed
+    const chong = t.b.members.chong;
+    const orderB = t.topups.grantSubsidy({ schoolId: t.b.id, memberId: chong.id, amountSen: 400, actor: 'office' });
+    t.topups.kioskPending({ schoolId: t.b.id, kioskDeviceId: t.b.m['KIOSK-01'].id, cardDigest: chong.digest });
+    const booksB = () => ({ tb: t.ledger.trialBalance(t.b.id), purchases: purchases(t.b), order: t.topups.getOrder(t.b.id, orderB.id) });
+    const before = booksB();
+    const mark = t.ctx.events.lastSeq();
+
+    // A's kiosk claims B's waiting order is on Aina's card: A's books never count another school's order
+    cardA.balanceSen += 400;
+    cardA.cardSeq += 1;
+    cardA.writes.push({ orderId: orderB.id, amountSen: 400, kioskTxn: deviceTxnNo('KIOSK-01', 77), at: t.ctx.clock.iso() });
+    const claimed = send(kioskA, 'card.readback', readbackBody(cardA));
+    assert.deepEqual([claimed.detail.snapshot.match, claimed.detail.snapshot.unconfirmedSen], [false, 0]);
+    assert.equal(t.differences.list(t.a.id, { kind: 'BALANCE_MISMATCH' }).length, 1);
+
+    // A's kiosk reports B's card (same UID as Aina's, B's digest) with a purchase on it
+    const onB = sale(cardB, { origin: 'CANTEEN-01', n: 1 });
+    const foreign = send(kioskA, 'card.readback', readbackBody(cardB, [onB]));
+    assert.equal(foreign.result, 'ACCEPTED');
+    assert.deepEqual(foreign.detail.results.map((r) => [r.status, r.differences]), [['FLAGGED', ['UNKNOWN_CARD']]]);
+    assert.deepEqual(foreign.detail.snapshot, { checked: true, match: false, mirrorSen: null, cardSen: cardB.balanceSen, unconfirmedSen: 0, laterSen: 0 });
+
+    // B: the same books, no purchase, its order untouched, no difference, nothing in its log or its events
+    assert.deepEqual(booksB(), before);
+    assert.deepEqual(t.differences.list(t.b.id), []);
+    assert.deepEqual(t.devices.listLog(t.b.id), []);
+    const since = t.ctx.events.since(mark);
+    assert.ok(since.length > 0 && since.every((e) => e.school === 'smk-alpha'), JSON.stringify(since.map((e) => [e.type, e.school])));
+    assertBooks(t.a);
+    assertBooks(t.b);
   });
 
   test('sequence numbers, duplicates and gates belong to one machine of one school', () => {
@@ -839,6 +932,40 @@ describe('handle never throws', () => {
     assert.deepEqual(res.detail.results.map((r) => [r.status, r.code]), [['POSTED', undefined], ['REFUSED', 'INTERNAL'], ['POSTED', undefined]]);
     assert.deepEqual([logOf(canteen)[0].level, logOf(canteen)[0].code], ['ERROR', 'INTERNAL']);
     assert.equal(purchases(t.a).length, 2);
+    assertBooks(t.a);
+  });
+
+  test('a record that fails after settlement wrote it leaves nothing behind: refused means not booked', () => {
+    t.ctx.log = () => {};
+    const canteen = t.a.m['CANTEEN-01'];
+    const kiosk = t.a.m['KIOSK-01'];
+    const card = fund(t.a, 'aina', 2000);
+    const records = [sale(card, { n: 1 }), sale(card, { n: 2 }), sale(card, { n: 3 })];
+    // settlement posts the record, then something after it fails
+    const late = {
+      receive(args) {
+        const outcome = t.settlement.receive(args);
+        if (args.record.txn === 'CANTEEN-01-000002') throw new Error('failed after the posting');
+        return outcome;
+      },
+    };
+    const intake = createIntake(t.ctx, { devices: t.devices, configs: t.configs, settlement: late, reconcile: t.reconcile });
+    const res = intake.handle(topicOf(canteen, 'records'), JSON.stringify(envelope(canteen, 'journal.batch', { batchId: 'CANTEEN-01-B1', count: 3, records })));
+    assert.deepEqual(res.detail.results.map((r) => [r.txn, r.status, r.code]), [
+      ['CANTEEN-01-000001', 'POSTED', undefined],
+      ['CANTEEN-01-000002', 'REFUSED', 'INTERNAL'],
+      ['CANTEEN-01-000003', 'POSTED', undefined],
+    ]);
+    assert.deepEqual(purchases(t.a).map((p) => p.txn).sort(), ['CANTEEN-01-000001', 'CANTEEN-01-000003']);
+    assert.equal(wallet(t.a, 'aina'), 2000 - 2 * PRICE['NASI-LEMAK']);
+    // only the purchases that are kept were announced
+    assert.deepEqual(eventsOf(t.ctx, 'purchase.received').map((e) => e.data.txn), ['CANTEEN-01-000001', 'CANTEEN-01-000003']);
+    assertBooks(t.a);
+    // the record comes home later another way (a kiosk read-back) and is booked once
+    const back = send(kiosk, 'card.readback', readbackBody(card, records));
+    assert.deepEqual(back.detail.results.map((r) => r.status), ['DUPLICATE', 'POSTED', 'DUPLICATE']);
+    assert.equal(back.detail.snapshot.match, true);
+    assert.equal(wallet(t.a, 'aina'), 2000 - 3 * PRICE['NASI-LEMAK']);
     assertBooks(t.a);
   });
 

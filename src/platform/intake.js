@@ -1,14 +1,7 @@
 import { isLabError } from '../shared/errors.js';
 import { verifyEnvelopeSignature } from '../shared/crypto.js';
-import {
-  CONFIG_KINDS,
-  DOWN_TYPES,
-  MAX_BATCH_RECORDS,
-  REFUSAL,
-  UP_TYPES,
-  parseTopic,
-  validateEnvelopeShape,
-} from '../shared/protocol.js';
+import { CONFIG_KINDS, MAX_BATCH_RECORDS, REFUSAL, UP_TYPES, parseTopic, validateEnvelopeShape } from '../shared/protocol.js';
+import { parseIso } from '../shared/time.js';
 
 // The platform's front door for machine messages (docs/DESIGN.md §3 "Intake pipeline",
 // §4.8). Every message a machine publishes on its records or status topic comes through
@@ -212,12 +205,9 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
       sender.messageId = short(env.id);
       if (Number.isSafeInteger(env.seq)) sender.seq = env.seq;
     }
+    // also UNKNOWN_TYPE for inherited names such as 'toString' (it looks types up as own properties)
     const shape = validateEnvelopeShape(env);
     if (!shape.ok) throw new Refusal(shape.code, shape.message);
-    // validateEnvelopeShape looks types up with `in`, which also finds inherited names such as 'toString'
-    if (!Object.hasOwn(UP_TYPES, env.type) && !Object.hasOwn(DOWN_TYPES, env.type)) {
-      throw new Refusal('UNKNOWN_TYPE', `unknown message type ${short(env.type) ?? '(too long to show)'}`);
-    }
     return env;
   }
 
@@ -340,7 +330,11 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
           cardDigest: body.card,
           balanceSen: body.balanceSen,
           cardSeq: body.cardSeq,
+          // the kiosk top-ups the card itself lists (one written but never confirmed is on the card only)
           writes: body.writes ?? [],
+          // when the card was read: the kiosk confirms this tap's top-ups over HTTP right after
+          // the read-back, and the confirm can reach the books first (DESIGN §4.7)
+          readAt: parseIso(env.at),
         }),
       );
       snapshot = { checked: true, ...checked };
@@ -390,7 +384,8 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
   function receiveRecord({ env, school, device }, record, { index, alone = false }) {
     let outcome;
     try {
-      outcome = settlement.receive({ schoolId: school.id, uploaderDeviceId: device.id, via: RECORD_VIAS[env.type], record });
+      // its own savepoint: a record that fails part-way leaves nothing behind, so "refused" is the whole truth
+      outcome = db.tx(() => settlement.receive({ schoolId: school.id, uploaderDeviceId: device.id, via: RECORD_VIAS[env.type], record }));
     } catch (err) {
       if (alone) throw err;
       note('error', 'intake could not settle a record', { school: school.code, device: device.code, index, error: err?.message, stack: err?.stack });
