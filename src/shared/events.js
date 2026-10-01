@@ -2,10 +2,28 @@
 // and tests use them to see what happened. Keeps the most recent `keep` events.
 //
 // Event: { seq, at (ISO, lab clock), type, school (code or null), data }
-export function createEventBus({ clock, keep = 1000 } = {}) {
+//
+// Given the database (`db`), an event emitted inside a transaction is held back until
+// the outermost transaction commits, and dropped if it rolls back: the console never
+// shows a posting, difference or card that was not actually written.
+export function createEventBus({ clock, keep = 1000, db } = {}) {
   let seq = 0;
   const recent = [];
   const subscribers = new Set();
+
+  function deliver(type, data, school) {
+    const event = { seq: ++seq, at: clock ? clock.iso() : new Date().toISOString(), type, school, data };
+    recent.push(event);
+    if (recent.length > keep) recent.splice(0, recent.length - keep);
+    for (const fn of subscribers) {
+      try {
+        fn(event);
+      } catch {
+        // a broken subscriber must not break the emitter
+      }
+    }
+  }
+
   return {
     /**
      * @param {string} type  e.g. 'mqtt.publish', 'intake.refused', 'ledger.posting'
@@ -13,17 +31,8 @@ export function createEventBus({ clock, keep = 1000 } = {}) {
      * @param {string|null} [school] school code the event belongs to, if any
      */
     emit(type, data = {}, school = null) {
-      const event = { seq: ++seq, at: clock ? clock.iso() : new Date().toISOString(), type, school, data };
-      recent.push(event);
-      if (recent.length > keep) recent.splice(0, recent.length - keep);
-      for (const fn of subscribers) {
-        try {
-          fn(event);
-        } catch {
-          // a broken subscriber must not break the emitter
-        }
-      }
-      return event;
+      if (db && db.inTransaction()) db.afterCommit(() => deliver(type, data, school));
+      else deliver(type, data, school);
     },
     /** @returns {() => void} unsubscribe */
     subscribe(fn) {

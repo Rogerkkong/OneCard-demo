@@ -9,8 +9,9 @@ import { createEventBus } from '../src/shared/events.js';
  */
 export function createTestCtx({ startAt } = {}) {
   const clock = createClock({ mode: 'manual', ...(startAt ? { startAt } : {}) });
-  const events = createEventBus({ clock, keep: 5000 });
   const db = openDb(':memory:');
+  // events emitted inside a transaction are delivered after it commits (see events.js)
+  const events = createEventBus({ clock, keep: 5000, db });
   return {
     db,
     clock,

@@ -308,6 +308,18 @@ function wrap(raw) {
   const cache = new Map();
   let depth = 0;
   let savepointSeq = 0;
+  // Callbacks waiting for the outermost COMMIT, one list per open transaction level.
+  // A savepoint that rolls back drops its own callbacks; a released one hands them up.
+  let pending = [];
+  const runAll = (callbacks) => {
+    for (const fn of callbacks) {
+      try {
+        fn();
+      } catch {
+        // an after-commit callback (e.g. an event subscriber) must not undo or break the commit
+      }
+    }
+  };
   const stmt = (sql) => {
     let s = cache.get(sql);
     if (!s) {
@@ -342,29 +354,40 @@ function wrap(raw) {
       if (depth === 0) {
         raw.exec('BEGIN IMMEDIATE');
         depth++;
+        pending = [[]];
+        let committed = false;
+        let result;
         try {
-          const result = fn();
+          result = fn();
           if (result && typeof result.then === 'function') throw new Error('db.tx() callback must be synchronous');
           raw.exec('COMMIT');
-          return result;
+          committed = true;
         } catch (err) {
           raw.exec('ROLLBACK');
           throw err;
         } finally {
           depth--;
+          const callbacks = committed ? pending[0] : [];
+          pending = [];
+          runAll(callbacks);
         }
+        return result;
       }
       const name = `sp${++savepointSeq}`;
       raw.exec(`SAVEPOINT ${name}`);
       depth++;
+      pending.push([]);
       try {
         const result = fn();
         if (result && typeof result.then === 'function') throw new Error('db.tx() callback must be synchronous');
         raw.exec(`RELEASE ${name}`);
+        const mine = pending.pop();
+        pending[pending.length - 1].push(...mine);
         return result;
       } catch (err) {
         raw.exec(`ROLLBACK TO ${name}`);
         raw.exec(`RELEASE ${name}`);
+        pending.pop();
         throw err;
       } finally {
         depth--;
@@ -372,6 +395,15 @@ function wrap(raw) {
     },
     inTransaction() {
       return depth > 0;
+    },
+    /**
+     * Run `fn` once the current transaction has committed (right away when there is
+     * none). Dropped if the transaction, or the savepoint it was registered in, rolls
+     * back — so an announcement never describes rows that were not written.
+     */
+    afterCommit(fn) {
+      if (depth === 0) runAll([fn]);
+      else pending[pending.length - 1].push(fn);
     },
     close() {
       raw.close();

@@ -46,7 +46,9 @@ separately fit together.
 - Platform business logic is **synchronous** (SQLite via `node:sqlite` is synchronous). Wrap multi-step writes in
   `db.tx(() => ...)` (nesting is allowed; inner calls become savepoints). Only network edges (MQTT, HTTP) are async.
 - Every module emits lab events through `ctx.events.emit(type, data, schoolCode)` so the lab console can show what
-  happened. Event types are listed in §9.
+  happened. Event types are listed in §9. The bus is created with the database (`createEventBus({ clock, db })`):
+  an event emitted inside a transaction is delivered only after the outermost commit and dropped on rollback, so
+  services can emit wherever it reads best without ever announcing rows that were not written.
 - Comments: explain *why*, briefly. Match the style of `src/shared/*`.
 - Tests: `node:test` + `node:assert/strict`, files under `test/unit/<module>.test.js` and
   `test/scenarios/<name>.test.js`. Use `createTestCtx()` and `waitFor()` from `test/helpers.js`. Network tests bind
@@ -60,7 +62,7 @@ Every service factory takes `ctx`:
 ctx = {
   db,        // src/platform/db.js wrapper: run/get/all/exec/tx/inTransaction/close
   clock,     // src/shared/clock.js: now(), iso(), advance(ms)
-  events,    // src/shared/events.js: emit(type, data, schoolCode), subscribe(fn), since(seq)
+  events,    // src/shared/events.js: createEventBus({ clock, db }) — emit(type, data, schoolCode), subscribe(fn), since(seq)
   settings: {
     providerSecret,          // hex secret of the mock payment provider
     platformBrokerPassword,  // password of the platform's own broker account
@@ -83,7 +85,7 @@ ctx = {
 | `src/shared/events.js` | `createEventBus({clock, keep})` |
 | `src/shared/crypto.js` | `canonicalJson`, `sha256hex`, `hmacHex`, `hmacB64url`, `safeEqual`, `randomSecret`, `deriveKey`, `normalizeUid`, `last4`, `cardDigest(cardKey, schoolCode, uid)`, `cardMac(cardKey, memoryWithoutMac)`, `brokerPassword(deviceSecret)`, `signEnvelope`, `verifyEnvelopeSignature`, `requestSigningString`, `signRequest`, `signPayload` |
 | `src/shared/protocol.js` | topics, envelope build/validate, `validateRecord`, device txn numbers, `REFUSAL`, `SCREEN_CARD_UNAVAILABLE`, constants |
-| `src/platform/db.js` | `openDb(file)` and the whole schema (read it — it is the data model) |
+| `src/platform/db.js` | `openDb(file)` and the whole schema (read it — it is the data model); `db.tx(fn)`, `db.afterCommit(fn)` |
 | `src/platform/differences.js` | `createDifferences(ctx)`, `DIFFERENCE_KINDS` |
 
 ---
