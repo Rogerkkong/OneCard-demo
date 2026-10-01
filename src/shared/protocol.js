@@ -105,7 +105,10 @@ export function validateEnvelopeShape(env) {
   if (env.txn !== undefined && (typeof env.txn !== 'string' || env.txn.length > 64)) return fail('ENVELOPE_INVALID', 'txn must be a short string');
   if (!env.body || typeof env.body !== 'object' || Array.isArray(env.body)) return fail('ENVELOPE_INVALID', 'body must be an object');
   if (typeof env.sig !== 'string' || env.sig.length < 20) return fail('ENVELOPE_INVALID', 'sig is missing');
-  if (!(env.type in UP_TYPES) && !(env.type in DOWN_TYPES)) return fail('UNKNOWN_TYPE', `unknown message type ${env.type}`);
+  // own properties only: 'toString' or '__proto__' must not pass as a known type
+  if (!Object.hasOwn(UP_TYPES, env.type) && !Object.hasOwn(DOWN_TYPES, env.type)) {
+    return fail('UNKNOWN_TYPE', `unknown message type ${env.type}`);
+  }
   return OK;
 }
 
