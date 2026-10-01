@@ -10,9 +10,15 @@ import { KioskApiError } from '../../src/devices/kioskApi.js';
 import { LabError } from '../../src/shared/errors.js';
 import { brokerPassword, cardDigest, last4, randomSecret, verifyEnvelopeSignature } from '../../src/shared/crypto.js';
 import { SCREEN_CARD_UNAVAILABLE, deviceTxnNo, topicFor, validateEnvelopeShape } from '../../src/shared/protocol.js';
-import { DEFAULT_PRICES, DEFAULT_SETTINGS } from '../../src/platform/configs.js';
+import { DAY } from '../../src/shared/time.js';
+import { DEFAULT_PRICES, DEFAULT_SETTINGS, createConfigs } from '../../src/platform/configs.js';
 import { createSchools } from '../../src/platform/schools.js';
 import { createLedger } from '../../src/platform/ledger.js';
+import { createDevices } from '../../src/platform/devices.js';
+import { createDifferences } from '../../src/platform/differences.js';
+import { createTopups } from '../../src/platform/topups.js';
+import { createSettlement } from '../../src/platform/settlement.js';
+import { createReconcile } from '../../src/platform/reconcile.js';
 import { createTestCtx, eventsOf, waitFor } from '../helpers.js';
 
 // Fictional school, members, cards and orders; every key and secret is generated per run.
@@ -371,7 +377,7 @@ describe('faults and lost reports', () => {
   });
 
   test('power cut after the write: on the card, unreported; the next tap reports it under its own number', NET, async (t) => {
-    const { ctx, platform, kiosk } = await setup(t);
+    const { ctx, platform, kiosk, readbacks } = await setup(t);
     const card = platform.newCard(1000);
     const orderId = platform.pay(2000);
     const result = await kiosk.tap(card, { fault: 'power-cut-after-commit' });
@@ -382,9 +388,17 @@ describe('faults and lost reports', () => {
     assert.equal(platform.orders.get(orderId).status, 'PAID');
     assert.equal(platform.mirror().walletSen, 1000);
     assert.deepEqual(eventsOf(ctx, 'card.write').at(-1).data, { device: 'KIOSK-01', uid: UID, kind: 'credit', amountSen: 2000, balanceAfterSen: 3000 });
+    const written = card.read(platform.cardKey).writes.at(-1);
+    assert.deepEqual(written, { orderId, amountSen: 2000, kioskTxn: K(1), at: ctx.clock.iso() });
 
     const mark = platform.calls.length;
     const next = await kiosk.tap(card);
+    // Its read-back goes up before the re-confirm and carries the unreported write as the card
+    // keeps it, so reconcile can leave that money out of the balance check (DESIGN §4.7).
+    const [, second] = await waitFor(() => readbacks().length === 2 && readbacks());
+    assert.equal(second.env.body.balanceSen, 3000);
+    assert.deepEqual(second.env.body.writes, card.read(platform.cardKey).writes);
+    assert.deepEqual(second.env.body.writes.at(-1), written);
     assert.deepEqual(next.reconfirmed, [{ orderId, kioskTxn: K(1), result: 'CONFIRMED' }]);
     assert.deepEqual(next.added, []); // never written a second time
     assert.equal(next.screen, 'Nothing to add · Balance RM 30.00');
@@ -519,6 +533,161 @@ describe('faults and lost reports', () => {
     assert.equal(card.balanceSen, 2000);
     assert.equal(platform.called('confirm').length, 1);
     platform.check(card);
+  });
+});
+
+describe("with the platform's own services", () => {
+  /** Counts the read-backs the broker acknowledged, so the fake API can wait for the platform to handle them. */
+  class CountingKiosk extends TopupKiosk {
+    readbacks = 0;
+
+    async publishUp(type, body, options) {
+      const sent = await super.publishUp(type, body, options);
+      if (sent && type === 'card.readback') this.readbacks += 1;
+      return sent;
+    }
+  }
+
+  /**
+   * The kiosk in front of the real top-ups service (what the kiosk routes call), with every
+   * read-back the platform receives handled as intake does: the records to settlement, then
+   * the card snapshot, with the read-back's writes, to reconcile.
+   */
+  async function realPlatform(t) {
+    const ctx = createTestCtx();
+    const schools = createSchools(ctx);
+    const ledger = createLedger(ctx);
+    const devices = createDevices(ctx);
+    const differences = createDifferences(ctx);
+    const configs = createConfigs(ctx, { schools });
+    const deps = { ledger, schools, configs, devices, differences };
+    const topups = createTopups(ctx, { ledger, schools, differences });
+    const settlement = createSettlement(ctx, deps);
+    const reconcile = createReconcile(ctx, deps);
+    const school = schools.createSchool({ code: A, name: 'Lab Test School' });
+    configs.publish({ schoolId: school.id, kind: 'prices', content: DEFAULT_PRICES, actor: 'test' });
+    const { device: kioskDevice, secret } = devices.registerDevice({ schoolId: school.id, code: 'KIOSK-01', type: 'KIOSK', actor: 'test' });
+    const reader = devices.registerDevice({ schoolId: school.id, code: 'CANTEEN-02', type: 'CANTEEN', actor: 'test' });
+    const member = schools.addMember({ schoolId: school.id, memberNo: 'S1001', name: 'Test Student' });
+    schools.issueCard({ schoolId: school.id, memberId: member.id, uid: UID, actor: 'test' });
+    const cardKey = schools.schoolCardKey(school.id);
+
+    const broker = await startBroker(ctx, {
+      port: 0,
+      resolveDevice: (u) => (u === `${A}.KIOSK-01` ? { schoolCode: A, deviceCode: 'KIOSK-01', password: brokerPassword(secret), active: true } : null),
+    });
+    const client = await mqtt.connectAsync(broker.url, { username: 'platform', password: ctx.settings.platformBrokerPassword, clientId: 'platform-test', reconnectPeriod: 0 });
+    client.on('error', () => {});
+    const snapshots = [];
+    client.on('message', (topic, payload) => {
+      const { type, body } = JSON.parse(payload.toString());
+      if (type !== 'card.readback') return;
+      const received = body.records.map((record) => settlement.receive({ schoolId: school.id, uploaderDeviceId: kioskDevice.id, via: 'KIOSK_READBACK', record }).status);
+      const check = reconcile.checkCardSnapshot({ schoolId: school.id, cardDigest: body.card, balanceSen: body.balanceSen, cardSeq: body.cardSeq, writes: body.writes });
+      snapshots.push({ body, received, ...check });
+    });
+    await client.subscribeAsync([`lab/v1/${A}/+/records`], { qos: 1 });
+
+    // Over a network the kiosk's next HTTP call reaches the platform after the broker passed the
+    // read-back on (a PUBACK only means the broker has it); with no network here, the fake waits.
+    let kiosk = null;
+    const handled = () => waitFor(() => snapshots.length >= kiosk.readbacks, { message: 'the platform to handle the read-back' });
+    const api = {
+      async pending({ card, max }) {
+        await handled();
+        return topups.kioskPending({ schoolId: school.id, kioskDeviceId: kioskDevice.id, cardDigest: card, max });
+      },
+      async confirm({ orderId, result, amountSen, card, balanceAfterOnCardSen, kioskTxn }) {
+        await handled();
+        return topups.kioskConfirm({
+          schoolId: school.id, kioskDeviceId: kioskDevice.id, kioskDeviceCode: 'KIOSK-01',
+          orderId, result, amountSen, cardDigest: card, balanceAfterOnCardSen, kioskTxn,
+        });
+      },
+      async lookup(kioskTxn) {
+        await handled();
+        return topups.kioskLookup({ schoolId: school.id, kioskDeviceCode: 'KIOSK-01', kioskTxn });
+      },
+      packs: async () => assert.fail('not used'),
+      receipts: async () => assert.fail('not used'),
+    };
+    kiosk = new CountingKiosk({ school: { code: A, cardKey }, device: { code: 'KIOSK-01', secret }, brokerUrl: broker.url, clock: ctx.clock, events: ctx.events, api });
+    t.after(async () => {
+      await kiosk.stop();
+      await client.endAsync(true);
+      await broker.close();
+      ctx.db.close();
+    });
+    kiosk.provision({ blocklist: { version: 1, entries: [] } });
+    await kiosk.start();
+    return { ctx, ledger, differences, topups, school, member, cardKey, kiosk, snapshots, readerSecret: reader.secret };
+  }
+
+  test('a power cut after the write raises no balance difference: the read-back carries the write, the re-confirm settles it', NET, async (t) => {
+    const p = await realPlatform(t);
+    const card = new VirtualCard({ uid: UID, schoolCode: A, cardKey: p.cardKey });
+    const grant = (amountSen) => p.topups.grantSubsidy({ schoolId: p.school.id, memberId: p.member.id, amountSen, actor: 'staff:test' }).id;
+
+    const first = grant(2000);
+    assert.equal((await p.kiosk.tap(card)).added.length, 1);
+    // lunch on a reader with no network: on the card, not yet on the platform
+    const reader = new CanteenReader({ school: { code: A, cardKey: p.cardKey }, device: { code: 'CANTEEN-02', secret: p.readerSecret }, clock: p.ctx.clock });
+    reader.provision({ prices: { version: 1, content: DEFAULT_PRICES }, settings: { version: 1, content: DEFAULT_SETTINGS }, blocklist: { version: 1, entries: [] } });
+    const lunch = (await reader.tap(card, { items: [{ code: 'NASI-LEMAK' }] })).record;
+
+    const second = grant(1000);
+    const cut = await p.kiosk.tap(card, { fault: 'power-cut-after-commit' });
+    assert.deepEqual([cut.reason, card.balanceSen, p.topups.getOrder(p.school.id, second).status], ['POWER_CUT', 2650, 'PAID']);
+    const next = await p.kiosk.tap(card);
+    assert.deepEqual(next.reconfirmed, [{ orderId: second, kioskTxn: K(2), result: 'CONFIRMED' }]);
+    await p.kiosk.tap(card);
+    await waitFor(() => p.snapshots.length === 4, { message: 'four read-backs' });
+
+    // the read-back before the re-confirm carried the write; reconcile left its RM 10.00 out
+    const writeOf = (orderId, amountSen, kioskTxn) => ({ orderId, amountSen, kioskTxn, at: p.ctx.clock.iso() });
+    assert.deepEqual(p.snapshots[2].body.writes, [writeOf(first, 2000, K(1)), writeOf(second, 1000, K(2))]);
+    assert.deepEqual(
+      p.snapshots.map((s) => [s.body.balanceSen, s.mirrorSen, s.unconfirmedSen, s.match]),
+      [[0, 0, 0, true], [1650, 1650, 0, true], [2650, 1650, 1000, true], [2650, 2650, 0, true]],
+    );
+    assert.deepEqual(p.snapshots.map((s) => s.received), [[], ['POSTED'], ['DUPLICATE'], ['DUPLICATE']]);
+    assert.deepEqual(p.snapshots[1].body.records, [lunch]);
+    assert.deepEqual(p.differences.list(p.school.id), []); // no BALANCE_MISMATCH, nothing else either
+    for (const [orderId, kioskTxn] of [[first, K(1)], [second, K(2)]]) {
+      const order = p.topups.getOrder(p.school.id, orderId);
+      assert.deepEqual([order.status, order.addedByDevice, order.kioskTxn], ['ADDED', 'KIOSK-01', kioskTxn]);
+    }
+    assert.equal(p.ledger.trialBalance(p.school.id).balanced, true);
+    assert.equal(p.ledger.memberBalances(p.school.id, p.member.id).walletSen, card.balanceSen);
+  });
+
+  test('the three faults against the real top-ups; a write parked after the add window is confirmed at the next tap', NET, async (t) => {
+    const p = await realPlatform(t);
+    const card = new VirtualCard({ uid: UID, schoolCode: A, cardKey: p.cardKey });
+    const grant = (amountSen) => p.topups.grantSubsidy({ schoolId: p.school.id, memberId: p.member.id, amountSen, actor: 'staff:test' }).id;
+    const order = (id) => p.topups.getOrder(p.school.id, id);
+
+    const first = grant(1000);
+    const dark = await p.kiosk.tap(card, { fault: 'power-cut-before-commit' });
+    assert.deepEqual([dark.reason, card.balanceSen, order(first).status, order(first).writeResult], ['POWER_CUT', 0, 'PAID', 'FAILED']);
+    const lost = await p.kiosk.tap(card, { fault: 'confirm-timeout' });
+    assert.deepEqual(lost.added, [{ orderId: first, amountSen: 1000, kioskTxn: K(2), confirmed: true }]);
+    assert.deepEqual([card.balanceSen, order(first).status, order(first).kioskTxn], [1000, 'ADDED', K(2)]);
+
+    const second = grant(500);
+    assert.equal((await p.kiosk.tap(card, { fault: 'power-cut-after-commit' })).reason, 'POWER_CUT');
+    // the add window passes with the write unconfirmed: parked for a person, never refunded
+    p.ctx.clock.advance(15 * DAY);
+    assert.deepEqual(p.topups.runJobs(), { cancelled: 0, refunded: 0, parked: 1 });
+    const next = await p.kiosk.tap(card);
+    assert.deepEqual(next.reconfirmed, [{ orderId: second, kioskTxn: K(3), result: 'CONFIRMED' }]);
+    assert.deepEqual([card.balanceSen, order(second).status, order(second).kioskTxn], [1500, 'ADDED', K(3)]);
+
+    await waitFor(() => p.snapshots.length === 4, { message: 'four read-backs' });
+    assert.deepEqual(p.snapshots.map((s) => [s.body.balanceSen, s.unconfirmedSen, s.match]), [[0, 0, true], [0, 0, true], [1000, 0, true], [1500, 500, true]]);
+    assert.deepEqual(p.differences.list(p.school.id), []);
+    assert.equal(p.ledger.trialBalance(p.school.id).balanced, true);
+    assert.equal(p.ledger.memberBalances(p.school.id, p.member.id).walletSen, card.balanceSen);
   });
 });
 

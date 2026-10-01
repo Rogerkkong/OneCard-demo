@@ -336,6 +336,32 @@ describe('connection and heartbeat', () => {
     );
   });
 
+  test('health turns WARN when the journal is nearly full of unsent records, not when it is full of sent ones', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { journalMax: 10 });
+    reader.provision(INSTALL);
+    await reader.start();
+    const card = cardWith(net.ctx, A, 5000);
+    const buy = () => reader.tap(card, { items: [{ code: 'BUAH' }] });
+    const beat = async () => {
+      const n = net.from(READER, 'device.heartbeat').length;
+      await net.command(READER, 'control.heartbeat-now', {});
+      return (await waitFor(() => net.from(READER, 'device.heartbeat')[n], { message: 'heartbeat-now' })).env.body;
+    };
+    for (let i = 0; i < 10; i++) assert.equal((await buy()).sent, true);
+    assert.deepEqual(reader.state.journal, { total: 10, unsent: 0 });
+    assert.deepEqual(await beat(), { fw: FIRMWARE_VERSION, health: 'OK', listVersions: { prices: 1, settings: 1, blocklist: 1 }, journalUnsent: 0 });
+
+    // offline, nine of the ten places fill with unsent records: sales will soon be refused
+    await reader.setCable(false);
+    for (let i = 0; i < 9; i++) assert.equal((await buy()).sent, false);
+    assert.deepEqual(reader.state.journal, { total: 10, unsent: 9 });
+    await reader.setCable(true); // heartbeat first, then the upload
+    const before = await waitFor(() => net.from(READER, 'device.heartbeat').find((m) => m.env.body.journalUnsent === 9), { message: 'the heartbeat on connect' });
+    assert.equal(before.env.body.health, 'WARN');
+    assert.deepEqual([(await beat()).health, reader.state.journal.unsent], ['OK', 0]);
+  });
+
   test('a machine that starts unplugged stays offline until the cable goes in', NET, async (t) => {
     const net = await startNet(t, [READER]);
     const reader = net.build(CanteenReader, READER, { cablePlugged: false });
@@ -677,6 +703,67 @@ describe('journal', () => {
     assert.deepEqual(reader.state.journal, { total: 3, unsent: 0 });
     assert.equal((await buy()).ok, true);
     assert.deepEqual(txns(), [['4', true], ['5', true], ['6', true]]);
+  });
+
+  test('a sale still waiting for its PUBACK when the cable is pulled counts as unsent and goes up in the next batch', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER);
+    reader.provision(INSTALL);
+    await reader.start();
+    const card = cardWith(net.ctx, A, 2000);
+    const tapping = reader.tap(card, { items: [{ code: 'BUAH' }] }); // published; its PUBACK cannot be back yet
+    await reader.setCable(false);
+    const sale = await tapping;
+    assert.deepEqual([sale.ok, sale.sent], [true, false]);
+    assert.deepEqual(reader.state.journal, { total: 1, unsent: 1 });
+
+    await reader.setCable(true);
+    assert.deepEqual(reader.state.journal, { total: 1, unsent: 0 });
+    const batch = await firstOf(() => net.from(READER, 'journal.batch'), 'the batch');
+    assert.deepEqual(batch.env.body.records, [sale.record]);
+    // the first copy may have reached the platform too: the same record, which it drops as a repeat
+    for (const m of net.from(READER, 'sale.recorded')) assert.deepEqual(m.env.body.record, sale.record);
+    assert.ok(net.from(READER, 'sale.recorded').length <= 1);
+  });
+
+  test('a record whose PUBACK does not come within ackTimeoutMs stays unsent, even when the PUBACK comes later', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { ackTimeoutMs: 100 });
+    reader.provision(INSTALL);
+    await reader.start();
+    await firstOf(() => net.from(READER, 'device.heartbeat'), 'the first heartbeat');
+    // the broker holds the reader's next message (a link that stalls) until it is let go
+    const { aedes } = net.broker;
+    const authorize = aedes.authorizePublish;
+    let hold = true;
+    let release = null;
+    aedes.authorizePublish = (client, packet, done) => {
+      if (hold && client?.id === `${A}.CANTEEN-01`) {
+        hold = false;
+        release = () => authorize.call(aedes, client, packet, done);
+        return;
+      }
+      authorize.call(aedes, client, packet, done);
+    };
+    const card = cardWith(net.ctx, A, 2000);
+    const sale = await reader.tap(card, { items: [{ code: 'BUAH' }] });
+    assert.deepEqual([sale.ok, sale.sent, reader.connected], [true, false, true]);
+    assert.deepEqual(reader.state.journal, { total: 1, unsent: 1 });
+
+    // let go at last: the platform gets it, but the late PUBACK does not count
+    release();
+    await firstOf(() => net.from(READER, 'sale.recorded'), 'the late sale');
+    await net.barrier(READER); // the reader has read everything the broker sent it before the barrier
+    assert.deepEqual(reader.state.journal, { total: 1, unsent: 1 });
+    assert.equal(net.from(READER, 'device.heartbeat').at(-1).env.body.journalUnsent, 1);
+
+    // the next upload sends it again (the platform drops the repeat); mqtt.js never resends the old envelope
+    await net.command(READER, 'control.upload-journal', {});
+    const batch = await firstOf(() => net.from(READER, 'journal.batch'), 'the batch');
+    assert.deepEqual(batch.env.body.records, [sale.record]);
+    await waitFor(() => reader.state.journal.unsent === 0, { message: 'the batch to be marked sent' });
+    await net.barrier(READER);
+    assert.equal(net.from(READER, 'sale.recorded').length, 1);
   });
 
   test('journal({ limit }) gives the newest records, as copies', async () => {

@@ -59,7 +59,7 @@ const DEFAULT_ACK_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 5000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const COMMAND_IDS_KEPT = 1000; // envelope ids remembered to drop repeated commands
-const JOURNAL_WARN_SHARE = 0.9; // heartbeat health turns WARN when the journal is this full
+const JOURNAL_WARN_SHARE = 0.9; // heartbeat health turns WARN when this much of the journal is unsent
 
 // Sanity bounds for what a machine accepts as a price list or settings: generous next to the
 // platform's own rules (configs.js), there only to keep the sums of a tap exact.
@@ -534,12 +534,14 @@ export class Terminal {
   }
 
   // WARN when the machine cannot do its job (a reader or water machine without prices,
-  // settings or a block list), or its journal is close to full.
+  // settings or a block list), or will soon have to refuse sales because its journal is
+  // nearly full of unsent records. Sent records are only history, dropped to make room, so a
+  // busy machine's journal is always close to full.
   #health() {
     const { prices, settings, blocklist } = this.#config;
     const sells = this.#device.type !== 'KIOSK';
     if (sells && (prices.version === 0 || settings.version === 0 || blocklist.version === 0)) return 'WARN';
-    if (this.#journal.length >= this.#journalMax * JOURNAL_WARN_SHARE) return 'WARN';
+    if (this.#unsentCount() >= this.#journalMax * JOURNAL_WARN_SHARE) return 'WARN';
     return 'OK';
   }
 
