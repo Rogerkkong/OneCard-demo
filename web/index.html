@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OneCard Lab</title>
+<link rel="stylesheet" href="/shared/style.css">
+<style>
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 16px 48px; display: grid; gap: 28px; }
+  header.top { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  header.top h1 { font-size: 28px; }
+  .lede { font-size: 17px; color: var(--ink-2); max-width: 62ch; }
+  .apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .app { display: grid; gap: 8px; align-content: start; text-decoration: none; color: inherit; padding: 18px; }
+  .app:hover { border-color: var(--pandan); }
+  .app .tag { font: 600 12px/1 var(--mono); color: var(--teal); letter-spacing: 0.04em; }
+  .app h2 { font-size: 19px; }
+  .app p { color: var(--ink-2); }
+  .watch { display: grid; gap: 8px; }
+  .watch pre { margin: 0; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; overflow-x: auto; font: 13px/1.5 var(--mono); }
+  .note { font-size: 13px; color: var(--ink-2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>OneCard Lab</h1>
+    <span class="lab-ribbon" data-i18n="ribbon">LAB · not real money</span>
+    <span class="spacer"></span>
+    <div id="lang"></div>
+  </header>
+
+  <p class="lede" data-i18n="lede">A virtual school card system you can try before any hardware exists: virtual cards, canteen readers, water machines and a top-up kiosk talk to the platform through a real MQTT broker.</p>
+
+  <section class="apps" aria-label="Apps">
+    <a class="panel app" href="/lab/">
+      <span class="tag">/lab/</span>
+      <h2 data-i18n="labTitle">Lab console</h2>
+      <p data-i18n="labText">Tap cards on machines, pull network cables, carry the admin card, inject faults and watch every message.</p>
+    </a>
+    <a class="panel app" href="/admin/">
+      <span class="tag">/admin/</span>
+      <h2 data-i18n="adminTitle">School office</h2>
+      <p data-i18n="adminText">Students and cards, lost cards, machines, prices, top-ups, the books and reconciliation.</p>
+    </a>
+    <a class="panel app" href="/parent/">
+      <span class="tag">/parent/</span>
+      <h2 data-i18n="parentTitle">Parent app</h2>
+      <p data-i18n="parentText">Phone-first web app: link a child with an invitation code, see the balance and top up.</p>
+    </a>
+  </section>
+
+  <section class="panel watch">
+    <h2 data-i18n="watchTitle">Watch the device messages</h2>
+    <p class="muted" data-i18n="watchText">Connect any MQTT tool to the lab broker with the read-only login (default viewer / viewer; the terminal that started the lab prints the exact details).</p>
+    <pre>mosquitto_sub -h 127.0.0.1 -p 1883 -u viewer -P viewer -t 'lab/v1/#' -v</pre>
+    <p class="note" data-i18n="safety">Everything here is fictional: schools, people, money and keys. Do not put real data or real keys into the lab.</p>
+  </section>
+</div>
+<script type="module">
+  import { createI18n } from '/shared/i18n.js';
+  const i18n = createI18n({
+    en: {
+      ribbon: 'LAB · not real money',
+      lede: 'A virtual school card system you can try before any hardware exists: virtual cards, canteen readers, water machines and a top-up kiosk talk to the platform through a real MQTT broker.',
+      labTitle: 'Lab console',
+      labText: 'Tap cards on machines, pull network cables, carry the admin card, inject faults and watch every message.',
+      adminTitle: 'School office',
+      adminText: 'Students and cards, lost cards, machines, prices, top-ups, the books and reconciliation.',
+      parentTitle: 'Parent app',
+      parentText: 'Phone-first web app: link a child with an invitation code, see the balance and top up.',
+      watchTitle: 'Watch the device messages',
+      watchText: 'Connect any MQTT tool to the lab broker with the read-only login (default viewer / viewer; the terminal that started the lab prints the exact details).',
+      safety: 'Everything here is fictional: schools, people, money and keys. Do not put real data or real keys into the lab.',
+    },
+    zh: {
+      ribbon: '实验室 · 不是真钱',
+      lede: '在任何硬件到货之前就能试的虚拟校园一卡通：虚拟卡、食堂刷卡机、饮水机和充值机，通过真正的 MQTT broker 和平台通信。',
+      labTitle: '实验室控制台',
+      labText: '在机器上刷卡、拔网线、带参数卡、制造故障，看每一条消息。',
+      adminTitle: '学校后台',
+      adminText: '学生和卡、挂失、机器、价格、充值、账本和对账。',
+      parentTitle: '家长网页',
+      parentText: '手机优先的网页：用邀请码绑定孩子，看余额，在线充值。',
+      watchTitle: '看设备消息',
+      watchText: '用任何 MQTT 工具连到实验室的 broker，用只读账号登录（默认 viewer / viewer；启动实验室的终端会印出准确资料）。',
+      safety: '这里的一切都是虚构的：学校、人名、钱和密钥。不要把真资料或真密钥放进实验室。',
+    },
+  });
+  document.getElementById('lang').append(i18n.switcher());
+  i18n.apply();
+</script>
+</body>
+</html>

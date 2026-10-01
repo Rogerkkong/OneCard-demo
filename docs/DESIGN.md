@@ -568,7 +568,7 @@ parked orders, subsidies, ledger, differences, reports), ADMIN (everything, plus
 ## 8. Lab (src/lab/) and entry point
 
 `createLab({ httpPort = 8080, mqttPort = 1883, host = '127.0.0.1', clockMode = 'real', startAt, heartbeatMs = 15000, jobsMs = 5000, tls })`
-→ `lab` with `async start()` → `{ httpUrl, mqttUrl }`, `async stop()`, `ctx`, `platform`, `broker`,
+→ `lab` with `async start()` → `{ httpUrl, mqttUrl, mqttTlsUrl? }` (`mqttTlsUrl` only when `tls` is given), `async stop()`, `ctx` (with `ctx.settings.viewer`), `platform`, `broker`,
 `terminals` (Map `'<school>/<DEVICE>'` → machine), `cards` (Map `'<school>/<UID>'` → VirtualCard), `adminCards` (Map school code → AdminCard),
 and the actions used by `/api/lab/*`: `tap({ schoolCode, deviceCode, uid, items, ml, fault })`, `setCable({ schoolCode, deviceCode, plugged })`,
 `adminCardLoad({ schoolCode })`, `adminCardTap({ schoolCode, deviceCode })`, `adminCardUpload({ schoolCode })`, `exportUsb({ schoolCode, deviceCode })`,
