@@ -46,7 +46,7 @@ export function ordersTable(ctx, orders, { showMember = true, label, empty }) {
   const head = [
     { label: t('order.created') },
     showMember ? { label: t('order.member') } : null,
-    { label: t('order.kind') },
+    { label: t('order.kind'), nowrap: true },
     { label: t('order.amount'), num: true },
     { label: t('order.status') },
     { label: t('order.detail') },

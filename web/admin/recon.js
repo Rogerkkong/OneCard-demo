@@ -2,8 +2,9 @@
 // each explained in plain words and resolved by a person with a note; importing a machine's
 // journal from a USB stick; and (admins) running the platform's checks now.
 
-import { h, formatRM, formatKL } from '/shared/api.js';
-import { sectionHead, panel, dataTable, loadProblem, openDialog, pill, humanKey, has, errorMessage, errorDetails } from './kit.js';
+import { h, formatKL } from '/shared/api.js';
+import { sectionHead, panel, dataTable, loadProblem, openDialog, pill, has, errorMessage, errorDetails } from './kit.js';
+import { detailList } from './pretty.js';
 
 const MAX_FILE = 1024 * 1024;
 
@@ -21,43 +22,16 @@ export async function renderReconciliation(ctx, el) {
 
 // ---- differences --------------------------------------------------------------------------
 
-/** One value of a difference's detail, readable: money in RM, times in KL, yes/no, links. */
-function detailValue(ctx, key, value, names) {
-  const { t } = ctx;
-  if (value === null || value === undefined || value === '') return '—';
-  if (typeof value === 'boolean') return t(value ? 'kit.yes' : 'kit.no');
-  if (typeof value === 'number' && /Sen$/.test(key)) return formatRM(value);
-  if (typeof value === 'number' && (/At$/.test(key) || key === 'currentSince')) return formatKL(value);
-  if (key === 'memberId') return h('a', { href: `#/students/${encodeURIComponent(value)}` }, names.get(value) ?? t('rc.memberPage'));
-  if (key === 'reportedVia' && has(t, `stateVia.${value}`)) return t(`stateVia.${value}`);
-  if (key === 'kind' && has(t, `saleKind.${value}`)) return t(`saleKind.${value}`);
-  if (key === 'last4') return h('span', { class: 'mono' }, `••${value}`);
-  if (Array.isArray(value)) {
-    if (value.every((v) => v && typeof v === 'object' && 'txn' in v)) return h('span', { class: 'mono small' }, value.map((v) => v.txn).join(', '));
-    if (value.every((v) => typeof v !== 'object')) return value.join(', ');
-  }
-  if (typeof value === 'object') return h('code', { class: 'small json' }, JSON.stringify(value));
-  if (/^(origin|txn|fromTxn|toTxn|deviceCode|purchaseId)$/.test(key)) return h('span', { class: 'mono' }, String(value));
-  return String(value);
-}
-
 function differenceCard(ctx, d, names, onResolve) {
   const { t, lang } = ctx;
   const title = d.explanation?.[lang] ?? d.explanation?.en ?? d.kind;
-  const entries = Object.entries(d.detail ?? {}).filter(([k]) => !['stored', 'received'].includes(k));
   const technical = ['stored', 'received'].filter((k) => d.detail?.[k] !== undefined);
   return h(
     'article',
     { class: `diff diff--${d.status === 'OPEN' ? 'open' : 'done'}` },
     h('div', { class: 'diff__head' }, h('h4', { class: 'diff__title' }, title), pill(t(`diffStatus.${d.status}`), d.status === 'OPEN' ? 'warn' : 'good')),
     h('p', { class: 'muted small diff__meta' }, h('code', {}, d.kind), ' · ', t('rc.found', { at: formatKL(d.createdAt) }), ' · ', h('span', { class: 'mono ref', title: d.ref }, d.ref)),
-    entries.length
-      ? h(
-          'dl',
-          { class: 'kv' },
-          entries.map(([k, v]) => [h('dt', {}, has(t, `dk.${k}`) ? t(`dk.${k}`) : humanKey(k)), h('dd', {}, detailValue(ctx, k, v, names))]),
-        )
-      : null,
+    detailList(ctx, d.detail, names, ['stored', 'received']),
     technical.length
       ? h('details', { class: 'details' }, h('summary', {}, t('rc.technical')), technical.map((k) => h('pre', { class: 'json' }, `${k}: ${JSON.stringify(d.detail[k], null, 2)}`)))
       : null,
@@ -127,10 +101,10 @@ async function differencesPanel(ctx, el) {
     if (!ctx.alive()) return;
     loaded = true;
     count.textContent = t(`rc.count.${status || 'ALL'}`, { n: diffs.length });
-    list.replaceChildren(...(diffs.length ? diffs.map((d) => differenceCard(ctx, d, names, resolve)) : [h('p', { class: 'empty-note' }, t(status === 'OPEN' ? 'rc.noneOpen' : 'rc.none'))]));
+    ctx.swap(list, ...(diffs.length ? diffs.map((d) => differenceCard(ctx, d, names, resolve)) : [h('p', { class: 'empty-note' }, t(status === 'OPEN' ? 'rc.noneOpen' : 'rc.none'))]));
   }
 
-  el.append(panel(t('rc.differences'), h('div', { class: 'toolbar' }, tabs, count), list));
+  el.append(panel(t('rc.differences'), h('div', { class: 'toolbar toolbar--split' }, tabs, count), list));
   ctx.poll(15000, load);
   await load();
 }

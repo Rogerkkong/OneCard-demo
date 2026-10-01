@@ -101,10 +101,11 @@ export async function renderTopups(ctx, el) {
 
   function drawParked(parked) {
     if (!parked.length) {
-      parkedBox.replaceChildren(h('p', { class: 'empty-note' }, t('tu.noParked')));
+      ctx.swap(parkedBox, h('p', { class: 'empty-note' }, t('tu.noParked')));
       return;
     }
-    parkedBox.replaceChildren(
+    ctx.swap(
+      parkedBox,
       ...parked.map((o) =>
         h(
           'article',
@@ -143,7 +144,7 @@ export async function renderTopups(ctx, el) {
       if (ctx.alive() && !listBox.querySelector('table')) listBox.replaceChildren(loadProblem(t, err, loadList));
       return;
     }
-    if (ctx.alive()) listBox.replaceChildren(ordersTable(ctx, orders, { label: t('tu.all') }));
+    if (ctx.alive()) ctx.swap(listBox, ordersTable(ctx, orders, { label: t('tu.all') }));
   }
 
   async function load() {

@@ -77,6 +77,8 @@ let stopBadgeLoop = null;
 let stopSuspendedLoop = null;
 let lastSignInMessage = null;
 let pendingFlash = null; // a result to show at the top of the next view (ctx.go with a message)
+let carried = []; // result notes kept across a language switch (a machine secret must not vanish)
+let polling = false; // true while an auto-refresh runs (see ctx.swap)
 
 const SCHOOL_MEMO = 'onecard-lab-office-school';
 function rememberSchool(name) {
@@ -388,6 +390,18 @@ function resolveRoute({ name, param }) {
   return section ? { nav: section.id, title: `nav.${section.id}`, roles: section.roles, render: section.render } : null;
 }
 
+/** The view's place for result notes, right under its heading (made on first use). */
+function flashBox(el) {
+  let box = el.querySelector(':scope > .flashes');
+  if (!box) {
+    box = h('div', { class: 'flashes' });
+    const head = el.querySelector(':scope > .section-head');
+    if (head) head.after(box);
+    else el.prepend(box);
+  }
+  return box;
+}
+
 function makeCtx(token, el) {
   const alive = () => token === view.token && screen === 'app';
   return {
@@ -405,9 +419,27 @@ function makeCtx(token, el) {
     poll(ms, fn) {
       view.stops.push(
         every(ms, async () => {
-          if (alive() && !dialogOpen()) await fn();
+          if (!alive() || dialogOpen()) return;
+          polling = true;
+          try {
+            await fn();
+          } finally {
+            polling = false;
+          }
         }),
       );
+    },
+    /**
+     * Replace a box's content. An auto-refresh leaves a box alone while the keyboard focus is in
+     * it; any other redraw that removes the focused control puts focus on the view's heading,
+     * so keyboard users are not thrown back to the top of the page.
+     */
+    swap(box, ...nodes) {
+      const hadFocus = box.contains(document.activeElement);
+      if (hadFocus && polling) return false;
+      box.replaceChildren(...nodes);
+      if (hadFocus && !box.contains(document.activeElement)) el.querySelector('.view-title')?.focus();
+      return true;
     },
     /** Open another view; `flash` ({ content, tone }) is shown at its top. */
     go: (hash, flash) => {
@@ -420,13 +452,7 @@ function makeCtx(token, el) {
     /** A result that stays at the top of the view until closed (role=status reads it out). */
     flash(content, tone = 'good') {
       if (!alive()) return null;
-      let box = el.querySelector(':scope > .flashes');
-      if (!box) {
-        box = h('div', { class: 'flashes' });
-        const head = el.querySelector(':scope > .section-head');
-        if (head) head.after(box);
-        else el.prepend(box);
-      }
+      const box = flashBox(el);
       const note = h(
         'div',
         { class: `notice notice--${tone} flash`, role: 'status' },
@@ -462,6 +488,10 @@ async function route(userNav = false) {
     ctx.flash(pendingFlash.content, pendingFlash.tone ?? 'good');
     pendingFlash = null;
   }
+  if (carried.length) {
+    flashBox(el).append(...carried);
+    carried = [];
+  }
   if (userNav) el.querySelector('.view-title')?.focus();
   try {
     await pending;
@@ -478,6 +508,7 @@ document.getElementById('lang').append(i18n.switcher());
 i18n.onChange(() => {
   watch.render();
   if (screen === 'app') {
+    carried = [...els.main.querySelectorAll('.view > .flashes > .flash')];
     fillBand();
     buildNav();
     route();

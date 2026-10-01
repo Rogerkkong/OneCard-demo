@@ -89,8 +89,9 @@ export async function renderPrices(ctx, el) {
       return;
     }
     if (!ctx.alive()) return;
-    versionsBox.replaceChildren(versionsTable(ctx, states, KINDS, devices));
-    blockBox.replaceChildren(
+    ctx.swap(versionsBox, versionsTable(ctx, states, KINDS, devices));
+    ctx.swap(
+      blockBox,
       h('p', {}, h('strong', {}, t('pr.blockVersion', { v: block.version })), ' ', h('span', { class: 'muted' }, t('pr.since', { at: formatKL(block.createdAt) }))),
       dataTable({
         label: t('pr.blocklist'),

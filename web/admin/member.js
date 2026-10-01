@@ -47,7 +47,7 @@ export async function renderMember(ctx, el, memberId) {
       member.className || t('mem.noClass'),
       ' · ',
       t(`group.${member.group}`),
-      member.status !== 'ACTIVE' ? [' · ', pill(t(`memberStatus.${member.status}`))] : null,
+      ...(member.status !== 'ACTIVE' ? [' · ', pill(t(`memberStatus.${member.status}`))] : []),
     );
 
     const active = cards.find((c) => c.status === 'ACTIVE') ?? null;

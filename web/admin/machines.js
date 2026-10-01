@@ -152,7 +152,8 @@ export async function renderMachines(ctx, el) {
 
   function drawList() {
     const head = [t('mac.machine'), t('mac.location'), t('mac.switched'), t('mac.connection'), t('mac.heartbeat'), t('mac.software'), t('mac.change')];
-    listBox.replaceChildren(
+    ctx.swap(
+      listBox,
       dataTable({
         label: t('mac.list'),
         head,
@@ -168,6 +169,7 @@ export async function renderMachines(ctx, el) {
         ]),
       }),
     );
+    if (document.activeElement === logSelect) return; // do not rebuild a list someone is choosing from
     const keep = logSelect.value;
     logSelect.replaceChildren(h('option', { value: '' }, t('mac.logAll')), ...devices.map((d) => h('option', { value: d.code, selected: d.code === keep }, d.code)));
   }
@@ -182,7 +184,8 @@ export async function renderMachines(ctx, el) {
       return;
     }
     if (!ctx.alive()) return;
-    logBox.replaceChildren(
+    ctx.swap(
+      logBox,
       dataTable({
         label: t('mac.log'),
         head: [t('mac.logAt'), t('mac.machine'), t('mac.logLevel'), t('mac.logWhat')],
@@ -213,7 +216,7 @@ export async function renderMachines(ctx, el) {
     if (!ctx.alive()) return;
     loaded = true;
     drawList();
-    versionsBox.replaceChildren(versionsTable(ctx, states, KINDS, devices));
+    ctx.swap(versionsBox, versionsTable(ctx, states, KINDS, devices));
     await loadLog();
   }
 

@@ -38,13 +38,13 @@ export async function renderStudents(ctx, el) {
     query = q;
     draw();
   });
-  el.append(h('section', { class: 'panel stack' }, h('div', { class: 'toolbar' }, search.field, count), box));
+  el.append(h('section', { class: 'panel stack' }, h('div', { class: 'toolbar toolbar--split' }, search.field, count), box));
 
   const head = [
     { label: t('st.no') },
     { label: t('st.name') },
     { label: t('st.class') },
-    { label: t('st.group') },
+    { label: t('st.group'), nowrap: true },
     { label: t('st.card') },
     { label: t('st.balance'), num: true },
     { label: t('st.waiting'), num: true },
@@ -135,7 +135,7 @@ export async function renderCards(ctx, el) {
     query = q;
     draw();
   });
-  el.append(h('section', { class: 'panel stack' }, h('div', { class: 'toolbar' }, search.field, count), box));
+  el.append(h('section', { class: 'panel stack' }, h('div', { class: 'toolbar toolbar--split' }, search.field, count), box));
 
   const head = [
     { label: t('cards.card') },

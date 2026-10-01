@@ -83,7 +83,8 @@ export async function renderParents(ctx, el) {
     const pending = links.filter((l) => l.status === 'PENDING');
     const decided = links.filter((l) => l.status !== 'PENDING');
     const pendHead = [t('par.parent'), t('par.child'), t('par.requested'), t('par.decision')];
-    pendingBox.replaceChildren(
+    ctx.swap(
+      pendingBox,
       dataTable({
         label: t('par.pending'),
         head: pendHead,
@@ -103,7 +104,8 @@ export async function renderParents(ctx, el) {
         ),
       }),
     );
-    decidedBox.replaceChildren(
+    ctx.swap(
+      decidedBox,
       dataTable({
         label: t('par.decided'),
         head: [t('par.parent'), t('par.email'), t('par.child'), t('par.status'), t('par.requested')],
@@ -118,7 +120,8 @@ export async function renderParents(ctx, el) {
         ]),
       }),
     );
-    invitesBox.replaceChildren(
+    ctx.swap(
+      invitesBox,
       dataTable({
         label: t('par.invites'),
         head: [t('par.code'), t('par.child'), t('par.status'), t('par.created'), t('par.used')],

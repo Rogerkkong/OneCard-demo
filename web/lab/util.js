@@ -122,9 +122,6 @@ export function hhmm(ms) {
   return new Date(ms + 8 * 3600_000).toISOString().slice(11, 16);
 }
 
-/** Integer sen -> 'RM 1.23' without the thousands separator surprises. */
-export { formatRM } from '/shared/api.js';
-
 // Line icons, static markup drawn with currentColor (24×24).
 const ICONS = {
   cloud: '<path d="M7 18.5h10.2a4.3 4.3 0 0 0 .6-8.56A6.2 6.2 0 0 0 5.9 9.6 4.5 4.5 0 0 0 7 18.5z"/>',

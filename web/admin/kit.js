@@ -365,7 +365,7 @@ export function openDialog({ t, title, body, fields = [], confirmLabel, tone = '
         okBtn.textContent = label;
         if (!dlg.isConnected) return;
         const details = errorDetails(err);
-        errorBox.replaceChildren(errorMessage(t, err), details.length ? h('ul', {}, details.map((d) => h('li', {}, d))) : null);
+        errorBox.replaceChildren(errorMessage(t, err), ...(details.length ? [h('ul', {}, details.map((d) => h('li', {}, d)))] : []));
         errorBox.hidden = false;
       }
     });
@@ -402,7 +402,7 @@ const overflowWatch =
 export function dataTable({ label, head, rows, empty, compact }) {
   const cols = head.map((c) => (typeof c === 'string' ? { label: c } : c));
   const cell = (tag, c, value) => {
-    const attrs = { class: c.num ? 'num' : c.class };
+    const attrs = { class: colClass(c) };
     if (tag === 'th') attrs.scope = 'col';
     return h(tag, attrs, value);
   };
@@ -420,9 +420,14 @@ export function dataTable({ label, head, rows, empty, compact }) {
   return wrap;
 }
 
+/** Column classes: { num } right-aligns, { nowrap } keeps short values on one line. */
+function colClass(c = {}) {
+  return [c.num ? 'num' : null, c.nowrap ? 'nw' : null, c.class ?? null].filter(Boolean).join(' ') || undefined;
+}
+
 /** A table row whose cells follow the same column rules as dataTable (for rows with classes). */
 export function row(cells, attrs = {}, head = []) {
-  return h('tr', attrs, cells.map((v, i) => h('td', { class: head[i]?.num ? 'num' : head[i]?.class }, v)));
+  return h('tr', attrs, cells.map((v, i) => h('td', { class: colClass(typeof head[i] === 'string' ? {} : head[i]) }, v)));
 }
 
 /** '2026-10-20' -> '20/10/2026' (a KL day from the API). */
@@ -490,7 +495,11 @@ export function secretBox(t, { code, secret, lab = true }) {
 
 /** A labelled number for overview tiles; a link when `href` is given. */
 export function tile({ label, value, sub, href, tone = '' }) {
-  const inner = [h('span', { class: 'tile__label' }, label), h('span', { class: 'tile__value num' }, value), sub ? h('span', { class: 'tile__sub' }, sub) : null];
+  const inner = [
+    h('span', { class: 'tile__head' }, h('span', { class: 'tile__label' }, label), href ? h('span', { class: 'tile__go', 'aria-hidden': 'true' }, '→') : null),
+    h('span', { class: 'tile__value num' }, value),
+    sub ? h('span', { class: 'tile__sub' }, sub) : null,
+  ];
   const cls = `tile${tone ? ` tile--${tone}` : ''}${href ? ' tile--link' : ''}`;
   return href ? h('a', { class: cls, href }, ...inner) : h('div', { class: cls }, ...inner);
 }

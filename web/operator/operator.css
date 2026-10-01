@@ -1,0 +1,41 @@
+/* OneCard Lab: the operator console (/operator/). The banner, dialogs, tables, tiles and secret
+   styles come from /admin/admin.css (shared with the school office); colours only from tokens. */
+
+.brand__mark--op { background: var(--teal); color: var(--bg); }
+
+/* the platform band: teal, so it never looks like a school's office */
+.band--operator { background: var(--teal-soft); }
+.band--operator .band__kicker { color: var(--teal); }
+.band--operator .band__meta { font-size: 14px; max-width: 70ch; }
+
+.op-main { flex: 1; width: 100%; max-width: var(--wrap); margin: 0 auto; padding: 20px 16px 56px; }
+.op-view { gap: 18px; }
+.op-head { justify-content: space-between; }
+.stack-sm { display: grid; gap: 6px; }
+.col-school { min-width: 170px; }
+.form-grid--narrow { max-width: 360px; }
+
+/* sign-in */
+.op-signin { max-width: 680px; margin: 24px auto; display: grid; gap: 12px; border-top: 6px solid var(--teal); }
+.op-signin h1 { font-size: 26px; }
+.op-signin__button { min-height: 44px; padding: 0 20px; font-size: 16px; }
+
+/* onboarding form: one line per staff member or machine */
+.rows { display: grid; gap: 10px; }
+.row-line { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) auto; gap: 10px; align-items: end; }
+.row-line--machine { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, 2fr) auto; }
+.row-line__end { padding-bottom: 2px; }
+
+/* what onboarding created */
+.onboard-result { padding: 14px 16px; border-radius: 10px; border: 1px solid var(--line); border-left: 4px solid var(--teal); background: var(--surface-2); }
+.onboard-result h3 { font-size: 17px; }
+.onboard-result h4 { font-size: 14px; }
+.secret--note { font-size: 14px; }
+.secret-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.secret-cell .secret__value { flex: 1 1 200px; white-space: normal; }
+.people { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+
+@media (max-width: 760px) {
+  .row-line, .row-line--machine { grid-template-columns: minmax(0, 1fr); padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+  .row-line__end { justify-self: start; }
+}

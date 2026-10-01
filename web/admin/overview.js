@@ -71,7 +71,7 @@ export async function renderOverview(ctx, el) {
         }),
       );
     }
-    tiles.replaceChildren(...list);
+    ctx.swap(tiles, ...list);
   }
 
   ctx.poll(10000, load);
