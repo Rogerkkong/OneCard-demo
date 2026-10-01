@@ -254,6 +254,8 @@ function renderJump() {
 
 function renderBanners() {
   const s = app.state;
+  // while the lab cannot be reached, what the page shows is the last known picture
+  $('#main').classList.toggle('is-stale', netDown);
   setHidden($('#banner-net'), !netDown);
   setHidden($('#banner-down'), netDown || !s || s.server?.up !== false);
   setHidden($('#banner-busy'), netDown || !s || s.phase === 'running');

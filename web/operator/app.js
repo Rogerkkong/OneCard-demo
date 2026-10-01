@@ -123,6 +123,9 @@ function showSignIn(message) {
     try {
       await post('/api/operator/login');
       showApp();
+      const first = document.getElementById('hl-title');
+      first?.setAttribute('tabindex', '-1');
+      first?.focus();
     } catch (err) {
       button.disabled = false;
       if (!watch.report(err)) status.replaceChildren(h('p', { class: 'notice notice--bad' }, errorMessage(t, err)));

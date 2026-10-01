@@ -4,7 +4,7 @@
 // /shared/ if that folder were ours to change; the operator console imports this file from
 // /admin/kit.js and links /admin/admin.css for the matching styles.
 
-import { get, post, h, toast } from '/shared/api.js';
+import { get, post, h, toast, parseRM } from '/shared/api.js';
 
 /** Strings the kit itself shows. Each app merges these into its own dictionary. */
 export const KIT_STRINGS = {
@@ -262,12 +262,12 @@ function fieldControl(f, id) {
  * placeholder, options, maxLength, mono, validate(value) → message|null }. Money fields give sen.
  * @returns {Promise<unknown|null>} the action's result, or null when cancelled
  */
-export function openDialog({ t, title, body, fields = [], confirmLabel, tone = 'primary', action, parseMoney, focusCancel = false }) {
+export function openDialog({ t, title, body, fields = [], confirmLabel, tone = 'primary', action, focusCancel = false }) {
   return new Promise((resolve) => {
     const id = `dlg${++dialogSeq}`;
     const opener = document.activeElement;
     let busy = false;
-    const errorBox = h('p', { class: 'dlg__error', role: 'alert', hidden: true });
+    const errorBox = h('div', { class: 'dlg__error', role: 'alert', hidden: true });
     const controls = new Map();
     const fieldEls = fields.map((f, i) => {
       const fid = `${id}-f${i}`;
@@ -323,7 +323,7 @@ export function openDialog({ t, title, body, fields = [], confirmLabel, tone = '
         let problem = null;
         if (f.required && value === '') problem = t('kit.required');
         else if (f.type === 'money' && value !== '') {
-          const sen = parseMoney(value);
+          const sen = parseRM(value);
           if (sen === null) problem = t('kit.moneyInvalid');
           else if (sen <= 0) problem = t('kit.moneyZero');
           else value = sen;
@@ -334,6 +334,7 @@ export function openDialog({ t, title, body, fields = [], confirmLabel, tone = '
         control.setAttribute('aria-invalid', problem ? 'true' : 'false');
         if (problem) control.setAttribute('aria-describedby', `${msg.id}${f.hint ? ` ${control.id}-hint` : ''}`);
         else if (f.hint) control.setAttribute('aria-describedby', `${control.id}-hint`);
+        else control.removeAttribute('aria-describedby');
         if (problem && !firstBad) firstBad = control;
         values[name] = value;
       }
@@ -548,9 +549,6 @@ export function every(ms, fn) {
     clearTimeout(timer);
   };
 }
-
-/** Is focus (or an open control) inside `el`? Auto-refresh leaves such regions alone. */
-export const busyInside = (el) => !!el && (el.contains(document.activeElement) || !!el.querySelector('[data-busy="1"]'));
 
 /** camelCase or snake_case key -> 'Words like this' (fallback label for detail objects). */
 export function humanKey(key) {

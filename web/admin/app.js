@@ -236,7 +236,7 @@ async function signIn(person, status, button) {
     // not through the api hook: a suspended school is explained here, on the sign-in page
     const out = await post('/api/admin/login', { staffId: person.id });
     history.replaceState(null, '', '#/overview');
-    startSession(out);
+    startSession(out, true);
   } catch (err) {
     button.disabled = false;
     if (watch.report(err)) return;
@@ -254,7 +254,8 @@ function fillBand() {
   els.staffRoleText.textContent = t(`roleText.${staff.role}`);
 }
 
-function startSession(me) {
+/** @param {boolean} [focus] move focus to the first view's heading (after an interactive sign-in) */
+function startSession(me, focus = false) {
   stopLoops();
   session = { staff: me.staff, school: me.school };
   rememberSchool(me.school.name);
@@ -264,7 +265,7 @@ function startSession(me) {
   document.body.classList.add('is-signed-in');
   buildNav();
   if (!location.hash.startsWith('#/')) history.replaceState(null, '', '#/overview');
-  route();
+  route(focus);
   refreshBadges();
   stopBadgeLoop = every(15000, refreshBadges);
 }
@@ -408,8 +409,6 @@ function makeCtx(token, el) {
     t,
     api,
     school: session.school,
-    staff: session.staff,
-    role: session.staff.role,
     get lang() {
       return i18n.lang;
     },
@@ -447,7 +446,6 @@ function makeCtx(token, el) {
       if (location.hash === hash) route(true);
       else location.hash = hash;
     },
-    rerender: () => route(),
     refreshBadges,
     /** A result that stays at the top of the view until closed (role=status reads it out). */
     flash(content, tone = 'good') {

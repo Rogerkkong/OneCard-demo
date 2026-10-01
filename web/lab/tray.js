@@ -3,10 +3,12 @@
 // at a water machine, an optional power cut or lost confirmation at the kiosk.
 
 import { formatKL, formatRM, h, toast } from '/shared/api.js';
-import { errorText, faultResult, kioskResult, screenCaption, toneOfScreen } from './describe.js';
+import { errorText, faultResult, kioskResult, screenCaption } from './describe.js';
 import { reconcile, setAttr, setHidden, setText, setTone } from './util.js';
 
 const KIOSK_FAULTS = ['power-cut-before-commit', 'power-cut-after-commit', 'confirm-timeout'];
+// refusals the machine shows as "Card unavailable" (red), the others are plain messages (amber)
+const CARD_REFUSALS = new Set(['BLOCKED', 'CARD_UNREADABLE', 'WRONG_SCHOOL', 'NO_BLOCKLIST', 'NOT_READY', 'JOURNAL_FULL']);
 const WATER_PRESETS = [250, 500, 650, 1000];
 const MAX_QTY = 99;
 const MAX_ML = 20_000;
@@ -224,7 +226,7 @@ export function createTrays(app) {
     const where = action === 'tap' ? deviceCode : kiosk?.code ?? '';
     const screen = res.data.screen ?? '';
     const text = screenCaption(screen, t, app.i18n.lang) ?? screen;
-    toast(`${where}: ${text}`, res.data.ok ? 'good' : 'bad');
+    toast(`${where}${t('colon')}${text}`, res.data.ok ? 'good' : 'bad');
     if (where) app.highlight(`${school}/${where}`);
   }
 
@@ -475,10 +477,10 @@ export function createTrays(app) {
     const r = res.data;
     if (job.type === 'KIOSK') {
       const out = body.fault ? faultResult(body.fault, r, t, app.i18n.lang) : kioskResult(null, r, t, app.i18n.lang);
-      toast(`${job.code}: ${out.text}`, out.tone);
+      toast(`${job.code}${t('colon')}${out.text}`, out.tone);
     } else {
       const text = screenCaption(r.screen, t, app.i18n.lang) ?? r.screen;
-      toast(`${job.code}: ${text}`, toneOfScreen(r.ok ? 'ok' : 'warn'));
+      toast(`${job.code}${t('colon')}${text}`, r.ok ? 'good' : CARD_REFUSALS.has(r.reason) ? 'bad' : 'warn');
     }
     app.highlight(job.key);
     flashCard(cardKey(found.school.code, found.card.uid));

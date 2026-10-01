@@ -36,7 +36,7 @@ export function createClock(app, root) {
 
   function tick() {
     const now = labNow();
-    if (now === null) return;
+    if (now === null || document.getElementById('main').classList.contains('is-stale')) return;
     setText(dateEl, formatKL(now).slice(0, 10));
     setText(timeEl, formatTimeKL(now));
     setText(headerClock, `${t('hdr.clock')} ${formatKL(now)}`);

@@ -97,6 +97,7 @@ h4 { margin: 0; line-height: 1.25; }
 .banner__text { display: grid; gap: 2px; flex: 1 1 320px; }
 
 /* ---- layout -------------------------------------------------------------------------------- */
+.layout.is-stale .world, .layout.is-stale .side { opacity: 0.6; filter: grayscale(0.7); }
 .layout {
   max-width: 1720px; margin: 0 auto; padding: 16px;
   display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr);

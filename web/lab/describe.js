@@ -119,14 +119,14 @@ function recordResults(results, t) {
   if (results.length === 1) {
     const r = results[0];
     const diffs = r.differences?.length ? ` · ${r.differences.join(sep(t))}` : '';
-    return `: ${r.txn} ${translatedOr(t, `purchase.${r.status}`, r.status)}${r.code ? ` (${r.code})` : ''}${diffs}`;
+    return `${t('colon')}${r.txn} ${translatedOr(t, `purchase.${r.status}`, r.status)}${r.code ? ` (${r.code})` : ''}${diffs}`;
   }
   const counts = {};
   for (const r of results) counts[r.status] = (counts[r.status] ?? 0) + 1;
   const list = Object.entries(counts)
     .map(([status, n]) => `${n} ${translatedOr(t, `purchase.${status}`, status)}`)
     .join(sep(t));
-  return `: ${t('ev.records', { n: results.length, list })}`;
+  return `${t('colon')}${t('ev.records', { n: results.length, list })}`;
 }
 
 /** How far the clock moved, in plain words. */
@@ -341,11 +341,6 @@ export function screenCaption(text, t, lang) {
 export function reasonText(code, t) {
   if (!code) return '';
   return hasKey(`reason.${code}`) ? `${t(`reason.${code}`)} (${code})` : code;
-}
-
-/** Toast tone for a screen tone. */
-export function toneOfScreen(tone) {
-  return tone === 'ok' ? 'good' : tone === 'warn' ? 'warn' : tone === 'error' ? 'bad' : 'info';
 }
 
 // ---- what a fault did ------------------------------------------------------------------------

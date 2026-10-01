@@ -195,6 +195,7 @@ export const STRINGS = {
     'kind.settings': 'settings',
     'kind.blocklist': 'block list',
     'list.sep': ', ',
+    colon: ': ',
 
     'tap.title': 'Tap a card on {code}',
     'tap.where': '{type} · {location} · {school}',
@@ -765,6 +766,7 @@ export const STRINGS = {
     'kind.settings': '设置',
     'kind.blocklist': '黑名单',
     'list.sep': '、',
+    colon: '：',
 
     'tap.title': '在 {code} 上刷卡',
     'tap.where': '{type} · {location} · {school}',

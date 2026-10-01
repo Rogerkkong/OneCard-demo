@@ -112,9 +112,7 @@ export async function renderPrices(ctx, el) {
     for (const ms of [1500, 5000]) setTimeout(() => ctx.alive() && loadSide(), ms);
   }
 
-  function sentNote(published, kindKey) {
-    return published ? t('pr.sent', { what: t(kindKey) }) : t('pr.notSent');
-  }
+  const sentNote = (published) => (published ? t('pr.sent') : t('pr.notSent'));
 
   // ---- price list --------------------------------------------------------------------------
 
@@ -260,7 +258,7 @@ export async function renderPrices(ctx, el) {
         action: () => api.post('/api/admin/configs/prices', { content: next }),
       });
       if (!out) return;
-      ctx.flash([h('strong', {}, t('pr.published', { what: t('kind.prices'), v: out.version })), ' ', sentNote(out.published, 'kind.prices')], out.published ? 'good' : 'warn');
+      ctx.flash([h('strong', {}, t('pr.published', { what: t('kind.prices'), v: out.version })), ' ', sentNote(out.published)], out.published ? 'good' : 'warn');
       await load();
       followUp();
     });
@@ -419,7 +417,7 @@ export async function renderPrices(ctx, el) {
         action: () => api.post('/api/admin/configs/settings', { content: next }),
       });
       if (!out) return;
-      ctx.flash([h('strong', {}, t('pr.published', { what: t('kind.settings'), v: out.version })), ' ', sentNote(out.published, 'kind.settings')], out.published ? 'good' : 'warn');
+      ctx.flash([h('strong', {}, t('pr.published', { what: t('kind.settings'), v: out.version })), ' ', sentNote(out.published)], out.published ? 'good' : 'warn');
       await load();
       followUp();
     });

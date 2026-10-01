@@ -2,7 +2,7 @@
 // mark found, replace and issue. Each asks in an in-page dialog first and leaves the result at
 // the top of the view, including whether the new block list went out to the machines.
 
-import { h, formatRM, parseRM } from '/shared/api.js';
+import { h, formatRM } from '/shared/api.js';
 import { openDialog, pill } from './kit.js';
 
 /** '04 A1:3b-5C' -> '04A13B5C' (the same clean-up the platform does). */
@@ -80,11 +80,13 @@ export async function replaceCard(ctx, member, activeCard, balanceSen) {
     action: (v) => api.post(`/api/admin/members/${encodeURIComponent(member.id)}/replace-card`, { newUid: cleanUid(v.uid) }),
   });
   if (!out) return null;
+  // `oldCard` is also the earlier card when none was active; only an active one was reported lost now
+  const reportedNow = Boolean(activeCard && out.oldCard && out.oldCard.uid === activeCard.uid);
   const parts = [h('strong', {}, t('card.replaceDone', { card: cardName(out.newCard.last4), name: member.name }))];
-  if (out.oldCard) parts.push(' ', t('card.replaceOldDone', { card: cardName(out.oldCard.last4) }));
+  if (reportedNow) parts.push(' ', t('card.replaceOldDone', { card: cardName(out.oldCard.last4) }));
   parts.push(' ', out.transferOrder ? t('card.replaceTransfer', { amount: formatRM(out.transferOrder.amountSen) }) : t('card.replaceNoTransfer'));
-  if (out.oldCard) parts.push(' ', sentText(t, out.published));
-  ctx.flash(parts, out.published === false ? 'warn' : 'good');
+  if (reportedNow) parts.push(' ', sentText(t, out.published));
+  ctx.flash(parts, reportedNow && out.published === false ? 'warn' : 'good');
   return out;
 }
 
@@ -102,6 +104,3 @@ export async function issueCard(ctx, member) {
   ctx.flash(h('strong', {}, t('card.issueDone', { card: cardName(card.last4), name: member.name })));
   return card;
 }
-
-/** A money field's parser for dialogs (RM text -> sen, or null). */
-export const parseMoney = (text) => parseRM(text);

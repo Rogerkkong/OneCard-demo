@@ -5,7 +5,6 @@
 import { h, formatRM, formatKL } from '/shared/api.js';
 import { sectionHead, panel, loadProblem, openDialog } from './kit.js';
 import { ordersTable } from './tables.js';
-import { parseMoney } from './cards.js';
 
 const STATUSES = ['PAID', 'PARKED', 'ADDED', 'CREATED', 'REFUNDED', 'CANCELLED', 'FAILED', 'EXPIRED'];
 const KINDS = ['TOPUP', 'SUBSIDY', 'TRANSFER'];
@@ -86,8 +85,7 @@ export async function renderTopups(ctx, el) {
         { name: 'amount', label: t('sub.amount'), type: 'money', required: true, placeholder: '10.00' },
         { name: 'note', label: t('sub.note'), type: 'textarea', maxLength: 500, placeholder: t('sub.notePlaceholder') },
       ],
-      parseMoney,
-      confirmLabel: t('sub.confirm'),
+        confirmLabel: t('sub.confirm'),
       tone: 'accent',
       action: (v) => {
         chosen = members.find((m) => m.id === v.memberId);

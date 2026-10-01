@@ -4,7 +4,7 @@
 
 import { h, formatRM, formatKL } from '/shared/api.js';
 import { sectionHead, panel, dataTable, loadProblem, openDialog, pill, copyButton } from './kit.js';
-import { cardName, cardPill, reportLost, markFound, replaceCard, issueCard, parseMoney } from './cards.js';
+import { cardName, cardPill, reportLost, markFound, replaceCard, issueCard } from './cards.js';
 import { ordersTable, purchasesTable } from './tables.js';
 
 const LINK_TONES = { PENDING: 'warn', APPROVED: 'good', REJECTED: '' };
@@ -64,7 +64,7 @@ export async function renderMember(ctx, el, memberId) {
         h('div', { class: 'stat' }, h('span', { class: 'stat__label' }, t('mem.platformBalance')), h('span', { class: 'stat__value num' }, formatRM(balances.mirrorBalanceSen)), h('span', { class: 'stat__sub' }, t('mem.platformSub'))),
         h(
           'div',
-          { class: `stat stat--waiting${balances.waitingSen > 0 ? ' stat--hot' : ''}` },
+          { class: 'stat stat--waiting' },
           h('span', { class: 'stat__label' }, t('mem.waiting')),
           h('span', { class: 'stat__value num' }, formatRM(balances.waitingSen)),
           h('span', { class: 'stat__sub' }, t('mem.waitingSub')),
@@ -148,7 +148,6 @@ async function grantSubsidy(ctx, member) {
       { name: 'amount', label: t('sub.amount'), type: 'money', required: true, placeholder: '10.00' },
       { name: 'note', label: t('sub.note'), type: 'textarea', maxLength: 500, placeholder: t('sub.notePlaceholder') },
     ],
-    parseMoney,
     confirmLabel: t('sub.confirm'),
     tone: 'accent',
     action: (v) => api.post('/api/admin/subsidies', { memberId: member.id, amountSen: v.amount, note: v.note }),

@@ -412,6 +412,29 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     }
   }
 
+  // ---- "More" menus: one open at a time; Esc or a click elsewhere closes it ---------------------
+
+  const openMenus = () => [...document.querySelectorAll('details.menu[open]')];
+  document.addEventListener(
+    'toggle',
+    (ev) => {
+      const d = ev.target;
+      if (!(d instanceof HTMLDetailsElement) || !d.classList.contains('menu') || !d.open) return;
+      for (const other of openMenus()) if (other !== d) other.open = false;
+    },
+    true,
+  );
+  document.addEventListener('click', (ev) => {
+    for (const d of openMenus()) if (!d.contains(ev.target)) d.open = false;
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    for (const d of openMenus()) {
+      d.open = false;
+      if (d.contains(document.activeElement)) d.querySelector('summary')?.focus();
+    }
+  });
+
   /** Point at a machine after an action (scrolls it into view if needed). */
   function highlight(key) {
     const el = machineEls.get(key);
