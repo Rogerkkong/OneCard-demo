@@ -64,7 +64,8 @@ export function createReconcile(ctx, { ledger, schools, configs, differences } =
    * @param {{ schoolId: string, cardDigest: string, balanceSen: number, cardSeq: number }} args
    * @returns {{ match: boolean, mirrorSen: number|null, cardSen: number }}
    */
-  function checkCardSnapshot({ schoolId, cardDigest, balanceSen, cardSeq } = {}) {
+  function checkCardSnapshot(args) {
+    const { schoolId, cardDigest, balanceSen, cardSeq } = args ?? {};
     if (typeof cardDigest !== 'string' || !DIGEST_RE.test(cardDigest)) throw snapshotInvalid('cardDigest must be a 64-character card digest');
     if (!isSen(balanceSen)) throw snapshotInvalid('balanceSen must be whole sen, 0 or more');
     // a new card that was never written has counter 0

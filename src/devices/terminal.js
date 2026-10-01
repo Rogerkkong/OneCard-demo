@@ -75,6 +75,17 @@ const HEX_KEY_RE = /^[0-9a-f]{32,}$/i; // same rule as shared/crypto.js
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isWhole = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
 const isTimerMs = (v) => isWhole(v, 1, MAX_TIMER_MS);
+const BROKER_PROTOCOLS = Object.freeze(['mqtt:', 'mqtts:', 'tcp:', 'tls:', 'ssl:', 'ws:', 'wss:']);
+
+function isBrokerUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return BROKER_PROTOCOLS.includes(url.protocol) && url.hostname !== '';
+  } catch {
+    return false;
+  }
+}
 
 function deepFreeze(value) {
   if (value && typeof value === 'object') {
@@ -242,7 +253,7 @@ export class Terminal {
     if (typeof device.secret !== 'string' || !HEX_KEY_RE.test(device.secret)) {
       throw new TypeError('device.secret must be the device secret (hex, at least 16 bytes)');
     }
-    if (brokerUrl != null && (typeof brokerUrl !== 'string' || brokerUrl === '')) throw new TypeError('brokerUrl must be an MQTT URL');
+    if (brokerUrl != null && !isBrokerUrl(brokerUrl)) throw new TypeError('brokerUrl must be an MQTT URL such as mqtt://127.0.0.1:1883');
     if (!clock || typeof clock.now !== 'function' || typeof clock.iso !== 'function') throw new TypeError('clock must be the lab clock');
     if (events != null && typeof events.emit !== 'function') throw new TypeError('events must be the lab event bus');
     if (log != null && typeof log !== 'function') throw new TypeError('log must be a function');

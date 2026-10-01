@@ -55,11 +55,23 @@ export function inWindows(ms, windows) {
   return windows.some((w) => m >= parseHHMM(w.from) && m < parseHHMM(w.to));
 }
 
-const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+const ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?(Z|([+-])(\d{2}):(\d{2}))$/;
 
-/** Strict ISO-8601 timestamp (with Z or an offset) to ms; NaN if invalid. */
+const daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+/**
+ * Strict ISO-8601 timestamp (with Z or an offset) to ms; NaN if invalid.
+ * Impossible dates and times (30 February, 24:00, minute 60, offset +25:00) are invalid,
+ * rather than silently rolled over to another moment as Date.parse would do.
+ */
 export function parseIso(text) {
-  if (typeof text !== 'string' || !ISO.test(text)) return NaN;
+  if (typeof text !== 'string') return NaN;
+  const m = ISO.exec(text);
+  if (!m) return NaN;
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return NaN;
+  if (hour > 23 || minute > 59 || second > 59) return NaN;
+  if (m[9] && (Number(m[10]) > 23 || Number(m[11]) > 59)) return NaN;
   return Date.parse(text);
 }
 

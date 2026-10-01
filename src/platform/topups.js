@@ -23,8 +23,13 @@ import { ACCOUNT_KINDS } from './ledger.js';
 // The status says where an order's money is; the ledger moves it, once per step, under the
 // idemKeys of DESIGN.md §2 (`<KIND>:<orderId>:PAID|GRANTED|CREATED|ADDED|REVERSAL`), so a
 // repeated callback, confirm or job run can never move it twice.
+//
+// Events are emitted inside the transactions that make the change: the event bus holds them
+// back until the outermost commit and drops them on a rollback (shared/events.js).
 
+/** Order kinds, as in the topup_order table. */
 export const ORDER_KINDS = Object.freeze(['TOPUP', 'SUBSIDY', 'TRANSFER']);
+/** Order statuses, as in the topup_order table (EXPIRED only ever lasts inside a refund). */
 export const ORDER_STATUSES = Object.freeze(['CREATED', 'PAID', 'ADDED', 'CANCELLED', 'FAILED', 'EXPIRED', 'REFUNDED', 'PARKED']);
 
 /**
@@ -172,24 +177,13 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
     return member;
   }
 
-  /**
-   * Run `fn(queue)` in a transaction. Events it queues are emitted only once the transaction
-   * (or savepoint) succeeded, so the lab console never shows a change that was rolled back.
-   */
-  function inTx(fn) {
-    const queue = [];
-    const result = db.tx(() => fn(queue));
-    for (const { type, data, schoolId } of queue) events.emit(type, data, schoolCode(schoolId));
-    return result;
-  }
+  /** `topup.status` for an order that is now `status` (a new order counts as a change too). */
+  const announceStatus = (row, status) =>
+    events.emit('topup.status', { orderId: row.id, kind: row.kind, status, amountSen: row.amount_sen }, schoolCode(row.school_id));
 
-  function setStatus(queue, row, status) {
+  function setStatus(row, status) {
     db.run('UPDATE topup_order SET status = ? WHERE school_id = ? AND id = ?', status, row.school_id, row.id);
-    queue.push({
-      type: 'topup.status',
-      schoolId: row.school_id,
-      data: { orderId: row.id, kind: row.kind, status, amountSen: row.amount_sen },
-    });
+    announceStatus(row, status);
   }
 
   function postFunding(row, memo) {
@@ -216,18 +210,18 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
   }
 
   /** Undo the order's funding (reversal of its PAID/GRANTED/CREATED posting) and mark it REFUNDED. */
-  function refund(queue, row) {
+  function refund(row) {
     const { step } = FUNDING[row.kind];
     const funding = ledger.findByIdemKey(row.school_id, `${row.kind}:${row.id}:${step}`);
     // Every PAID order was funded in the same transaction that made it PAID.
     if (!funding) throw new LabError('ORDER_POSTING_MISSING', `order ${row.id} has no ${step} posting to reverse`, 500);
-    setStatus(queue, row, 'REFUNDED');
+    setStatus(row, 'REFUNDED');
     ledger.reverse({ schoolId: row.school_id, postingId: funding.id, idemKey: `${row.kind}:${row.id}:REVERSAL`, memo: REFUND_MEMO[row.kind] });
-    queue.push({
-      type: 'topup.refunded',
-      schoolId: row.school_id,
-      data: { orderId: row.id, kind: row.kind, amountSen: row.amount_sen, parentId: row.parent_id ?? null },
-    });
+    events.emit(
+      'topup.refunded',
+      { orderId: row.id, kind: row.kind, amountSen: row.amount_sen, parentId: row.parent_id ?? null },
+      schoolCode(row.school_id),
+    );
   }
 
   /**
@@ -292,7 +286,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
       }
       const requestHash = sha256hex(canonicalJson({ schoolId, memberId, amountSen }));
 
-      return inTx((queue) => {
+      return db.tx(() => {
         // Keys belong to the parent, who spans schools, so this one lookup is by parent. The
         // hash covers the school, so another school's order is never returned.
         const earlier = db.get('SELECT id, request_hash FROM topup_order WHERE parent_id = ? AND idem_key = ?', parentId, idemKey);
@@ -340,7 +334,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
           id, schoolId, parentId, memberId, amountSen, idemKey, requestHash, now, `parent:${parentId}`, now + limits.payWindowMinutes * MINUTE,
         );
         const row = orderRow(schoolId, id);
-        queue.push({ type: 'topup.status', schoolId, data: { orderId: id, kind: 'TOPUP', status: 'CREATED', amountSen } });
+        announceStatus(row, 'CREATED');
         return orderDto(row);
       });
     },
@@ -368,11 +362,11 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
       const found = isId(orderId) ? db.get("SELECT school_id FROM topup_order WHERE id = ? AND kind = 'TOPUP'", orderId) : undefined;
       if (!found) throw new LabError('ORDER_NOT_FOUND', 'no such top-up order', 404);
 
-      return inTx((queue) => {
+      return db.tx(() => {
         const row = requireOrder(found.school_id, orderId);
         if (result === 'FAILED') {
           // Only an order still waiting for its payment can fail; a late FAILED never undoes a payment.
-          if (row.status === 'CREATED') setStatus(queue, row, 'FAILED');
+          if (row.status === 'CREATED') setStatus(row, 'FAILED');
           return orderDto(orderRow(row.school_id, row.id));
         }
         if (paidAmountSen !== row.amount_sen) {
@@ -388,7 +382,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
             'UPDATE topup_order SET paid_at = ?, provider_txn_id = ?, add_by = ? WHERE school_id = ? AND id = ?',
             paid, providerTxnId, paid + addWindowDays * DAY, row.school_id, row.id,
           );
-          setStatus(queue, row, 'PAID');
+          setStatus(row, 'PAID');
           postFunding(row, `parent payment ${providerTxnId}`);
         } else if (row.provider_txn_id !== providerTxnId) {
           throw new LabError('ORDER_ALREADY_PAID', 'this order was already paid under another provider transaction', 409);
@@ -457,7 +451,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
         if (!isSen(balanceAfterOnCardSen)) throw new LabError('CONFIRM_INVALID', 'balanceAfterOnCardSen must be whole sen, 0 or more');
       }
 
-      const outcome = inTx((queue) => {
+      const outcome = db.tx(() => {
         const row = requireOrder(schoolId, orderId);
         const card = schools.getCardByDigest(schoolId, cardDigest);
         if (!card || card.memberId !== row.member_id) {
@@ -510,7 +504,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
                WHERE school_id = ? AND id = ?`,
               clock.now(), kioskDeviceCode, kioskTxn, card.id, balanceAfterOnCardSen, row.school_id, row.id,
             );
-            setStatus(queue, row, 'ADDED');
+            setStatus(row, 'ADDED');
             postAdded(row, `added to the card by ${kioskDeviceCode} (${kioskTxn})`);
             return reply('ADDED');
           }
@@ -574,7 +568,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
       }
       const who = actorText(actor);
       const text = noteText(note);
-      return inTx((queue) => {
+      return db.tx(() => {
         requireMember(schoolId, memberId);
         const { addWindowDays } = schools.schoolSettings(schoolId).topup;
         const now = clock.now();
@@ -585,7 +579,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
           id, schoolId, memberId, amountSen, now, who, now, now + addWindowDays * DAY,
         );
         const row = orderRow(schoolId, id);
-        queue.push({ type: 'topup.status', schoolId, data: { orderId: id, kind: 'SUBSIDY', status: 'PAID', amountSen } });
+        announceStatus(row, 'PAID');
         postFunding(row, text ?? 'school subsidy');
         schools.audit(schoolId, who, 'subsidy.grant', { orderId: id, memberId, amountSen, note: text });
         return orderDto(row);
@@ -600,7 +594,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
      */
     createTransfer({ schoolId, memberId, actor } = {}) {
       const who = actorText(actor);
-      return inTx((queue) => {
+      return db.tx(() => {
         requireMember(schoolId, memberId);
         const walletSen = ledger.balance(schoolId, 'STUDENT_WALLET', memberId);
         if (walletSen <= 0) return null;
@@ -612,7 +606,7 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
           id, schoolId, memberId, walletSen, now, who, now,
         );
         const row = orderRow(schoolId, id);
-        queue.push({ type: 'topup.status', schoolId, data: { orderId: id, kind: 'TRANSFER', status: 'PAID', amountSen: walletSen } });
+        announceStatus(row, 'PAID');
         postFunding(row, 'balance moved to a replacement card');
         schools.audit(schoolId, who, 'transfer.create', { orderId: id, memberId, amountSen: walletSen });
         return orderDto(row);
@@ -622,24 +616,29 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
     /**
      * Scheduled work: CREATED past payBy -> CANCELLED; PAID past addBy with no write tried, or a
      * failed one -> EXPIRED -> REFUNDED (funding reversed, `topup.refunded`); PAID past addBy
-     * with an unconfirmed write -> PARKED. Every school, or only `schoolId` when given.
+     * with an unconfirmed write -> PARKED. Every school when no `schoolId` is given (whatever its
+     * status: the platform calls it per ACTIVE school), otherwise only that school; a `schoolId`
+     * that is not an id matches no school, so a request that lost its school never runs them all.
      * Each order is its own transaction.
      * @param {{ schoolId?: string }} [options]
      * @returns {{ cancelled: number, refunded: number, parked: number }}
      */
-    runJobs({ schoolId } = {}) {
+    runJobs(options = {}) {
+      const { schoolId } = options ?? {};
       const now = clock.now();
       const counts = { cancelled: 0, refunded: 0, parked: 0 };
-      const schoolIds = isId(schoolId) ? [schoolId] : db.all('SELECT id FROM school ORDER BY created_at, rowid').map((r) => r.id);
+      let schoolIds;
+      if (schoolId === undefined) schoolIds = db.all('SELECT id FROM school ORDER BY created_at, rowid').map((r) => r.id);
+      else schoolIds = isId(schoolId) ? [schoolId] : [];
       for (const sid of schoolIds) {
         const unpaid = db.all("SELECT id FROM topup_order WHERE school_id = ? AND status = 'CREATED' AND pay_by < ? ORDER BY pay_by, rowid", sid, now);
         for (const { id } of unpaid) {
           // Each order is checked again inside its own transaction: an event subscriber may
           // have acted on it after the previous order's events went out.
-          const done = inTx((queue) => {
+          const done = db.tx(() => {
             const row = orderRow(sid, id);
             if (!row || row.status !== 'CREATED' || !(row.pay_by < now)) return null;
-            setStatus(queue, row, 'CANCELLED');
+            setStatus(row, 'CANCELLED');
             return 'cancelled';
           });
           if (done) counts[done]++;
@@ -649,16 +648,16 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
           sid, now,
         );
         for (const { id } of late) {
-          const done = inTx((queue) => {
+          const done = db.tx(() => {
             const row = orderRow(sid, id);
             if (!row || row.status !== 'PAID' || row.add_by === null || !(row.add_by < now)) return null;
             // The kiosk may have written it and lost the reply: a person must check the card.
             if (row.write_result === 'UNCONFIRMED') {
-              setStatus(queue, row, 'PARKED');
+              setStatus(row, 'PARKED');
               return 'parked';
             }
-            setStatus(queue, row, 'EXPIRED');
-            refund(queue, row);
+            setStatus(row, 'EXPIRED');
+            refund(row);
             return 'refunded';
           });
           if (done) counts[done]++;
@@ -677,17 +676,17 @@ export function createTopups(ctx, { ledger, schools, differences } = {}) {
       if (decision !== 'ADDED' && decision !== 'REFUND') throw new LabError('DECISION_INVALID', 'decision must be ADDED or REFUND');
       const who = actorText(actor);
       const text = noteText(note);
-      return inTx((queue) => {
+      return db.tx(() => {
         const row = requireOrder(schoolId, orderId);
         if (row.status !== 'PARKED') throw new LabError('ORDER_NOT_PARKED', `order is ${row.status}, not PARKED`, 409);
         db.run('UPDATE topup_order SET resolved_by = ?, resolution_note = ? WHERE school_id = ? AND id = ?', who, text, row.school_id, row.id);
         if (decision === 'ADDED') {
           // writeResult stays UNCONFIRMED: the kiosk never confirmed; a person did.
           db.run('UPDATE topup_order SET added_at = ? WHERE school_id = ? AND id = ?', clock.now(), row.school_id, row.id);
-          setStatus(queue, row, 'ADDED');
+          setStatus(row, 'ADDED');
           postAdded(row, `confirmed on the card by ${who}`);
         } else {
-          refund(queue, row);
+          refund(row);
         }
         schools.audit(schoolId, who, 'topup.resolve', { orderId: row.id, kind: row.kind, decision, amountSen: row.amount_sen, note: text });
         return orderDto(orderRow(row.school_id, row.id));

@@ -156,11 +156,9 @@ export class TopupKiosk extends Terminal {
     let stopped = null;
     const orders = Array.isArray(pending?.orders) ? pending.orders : [];
     for (const [i, order] of orders.entries()) {
-      const outcome = await this.#addOrder(card, order, { digest, uid: memory.uid, balanceSen, fault: i === 0 ? fault : null });
-      if (outcome.added) {
-        added.push(outcome.added);
-        balanceSen = outcome.balanceSen;
-      }
+      const outcome = await this.#addOrder(card, order, { digest, fault: i === 0 ? fault : null });
+      if (outcome.added) added.push(outcome.added);
+      if (outcome.balanceSen !== undefined) balanceSen = outcome.balanceSen;
       if (outcome.stop) {
         stopped = outcome;
         break;
@@ -186,10 +184,24 @@ export class TopupKiosk extends Terminal {
   /**
    * Write one order to the card and report it.
    * @returns {Promise<{ added?: object, balanceSen?: number, stop?: string|null, reason?: string, interrupted?: object }>}
+   *   balanceSen: the card balance as last seen
    */
-  async #addOrder(card, order, { digest, uid, balanceSen, fault }) {
+  async #addOrder(card, order, { digest, fault }) {
     if (!isOrder(order)) return {};
     const { orderId, amountSen } = order;
+    // The card is read again before every write: other machines may have used it while the
+    // kiosk was waiting for the platform.
+    let current;
+    try {
+      current = this._readCard(card);
+    } catch (err) {
+      if (err instanceof CardError) return { stop: 'CARD', reason: err.code };
+      throw err;
+    }
+    const balanceSen = current.balanceSen;
+    const onCard = current.writes.find((w) => isPlainObject(w) && w.orderId === orderId);
+    if (onCard) return { ...(await this.#alreadyOnCard(onCard, { digest, balanceSen })), balanceSen };
+
     const kioskTxn = this.nextTxn();
     const report = { orderId, amountSen, card: digest, kioskTxn };
     let credit;
@@ -204,7 +216,7 @@ export class TopupKiosk extends Terminal {
         if (err.committed) {
           // On the card, but the kiosk lost power before it could say so: the next tap finds
           // the write on the card and reports it then.
-          this.#cardWrite(uid, amountSen, balanceSen + amountSen);
+          this.#cardWrite(current.uid, amountSen, balanceSen + amountSen);
         } else {
           // Nothing reached the card; once the power is back the kiosk reports the failure.
           await this.#call(() => this.#api.confirm({ ...report, result: 'FAILED', balanceAfterOnCardSen: balanceSen }));
@@ -212,19 +224,12 @@ export class TopupKiosk extends Terminal {
         return { stop: 'POWER_CUT', interrupted: { orderId, amountSen, kioskTxn, committed: err.committed } };
       }
       if (err instanceof CardError && err.code === 'ALREADY_WRITTEN') {
-        // Written on an earlier tap. Only that write's own report can settle it; another
-        // kiosk's write is left to that kiosk (or the school office).
-        const earlier = err.detail?.write;
-        if (this.#ownUnsettled(earlier)) {
-          const outcome = await this.#reportAdded({ ...report, amountSen: earlier.amountSen, balanceAfterOnCardSen: balanceSen, kioskTxn: earlier.kioskTxn });
-          if (outcome === UNREACHABLE) return { stop: 'UNREACHABLE' };
-        }
-        return {};
+        return { ...(await this.#alreadyOnCard(err.detail?.write, { digest, balanceSen })), balanceSen };
       }
       if (err instanceof CardError) return { stop: 'CARD', reason: err.code };
       throw err;
     }
-    this.#cardWrite(uid, amountSen, credit.balanceAfterSen);
+    this.#cardWrite(current.uid, amountSen, credit.balanceAfterSen);
     const outcome = await this.#reportAdded(
       { ...report, balanceAfterOnCardSen: credit.balanceAfterSen },
       { firstLost: fault === 'confirm-timeout' },
@@ -234,6 +239,23 @@ export class TopupKiosk extends Terminal {
       balanceSen: credit.balanceAfterSen,
       stop: outcome === UNREACHABLE ? 'UNREACHABLE' : null,
     };
+  }
+
+  /**
+   * The order is on the card already (written on an earlier tap): it is never written again.
+   * Only that write's own report can settle it, so this kiosk reports its own write; another
+   * kiosk's write is left to that kiosk (or to the school office).
+   */
+  async #alreadyOnCard(write, { digest, balanceSen }) {
+    if (!this.#ownUnsettled(write)) return {};
+    const outcome = await this.#reportAdded({
+      orderId: write.orderId,
+      amountSen: write.amountSen,
+      card: digest,
+      balanceAfterOnCardSen: balanceSen,
+      kioskTxn: write.kioskTxn,
+    });
+    return outcome === UNREACHABLE ? { stop: 'UNREACHABLE' } : {};
   }
 
   /**

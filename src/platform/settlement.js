@@ -44,7 +44,14 @@ const refused = (code, message) => ({ status: 'REFUSED', code, message, differen
  * @returns {string|null} what is wrong, or null
  */
 function recordProblem(record) {
-  const check = validateRecord(record);
+  let check;
+  try {
+    check = validateRecord(record);
+  } catch {
+    // validateRecord reads txn and item codes through String(), which throws for a value
+    // with no text form (never from JSON.parse, but a refusal must not become a crash)
+    return 'record must be plain JSON';
+  }
   if (!check.ok) return check.message;
   if (record.txn.length > MAX_TXN_LENGTH) return `txn must be at most ${MAX_TXN_LENGTH} characters`;
   // '<origin>-<6+ digits>' allows any number of digits; the number itself must stay exact
@@ -289,7 +296,8 @@ export function createSettlement(ctx, { ledger, schools, configs, devices, diffe
    * @throws {LabError} only for a broken call: SCHOOL_NOT_FOUND (404), VIA_INVALID (400),
    *   DEVICE_NOT_FOUND (404) when uploaderDeviceId is not a device of the school
    */
-  function receive({ schoolId, uploaderDeviceId = null, via, record } = {}) {
+  function receive(args) {
+    const { schoolId, uploaderDeviceId = null, via, record } = args ?? {};
     const school = schools.getSchool(schoolId);
     if (!school) throw new LabError('SCHOOL_NOT_FOUND', 'no such school', 404);
     if (!PURCHASE_VIAS.includes(via)) throw new LabError('VIA_INVALID', `via must be one of ${PURCHASE_VIAS.join(', ')}`);

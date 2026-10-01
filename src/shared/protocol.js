@@ -163,4 +163,5 @@ export const REFUSAL = Object.freeze({
   WRONG_DEVICE_TYPE: 'this device type may not send this message',
   COUNT_MISMATCH: 'batch count does not match the number of records',
   RECORD_INVALID: 'record is malformed',
+  UNKNOWN_ORIGIN_DEVICE: 'the record names a machine this school does not have',
 });

@@ -486,6 +486,9 @@ describe('receive: refused records', () => {
       ['an item price beyond one posting', good({ items: [{ code: 'NASI-LEMAK', qty: 1, priceSen: 1_000_000_001 }] }), /item priceSen/],
       ['an item code that is a number', good({ items: [{ code: 123, qty: 1, priceSen: 350 }] }), /item code must be text/],
       ['a value that is not plain JSON', good({ extra: new Date(T0) }), /plain JSON/],
+      // validateRecord reads these through String(), which throws for a value with no text form
+      ['a txn with no text form', good({ txn: Object.create(null) }), /plain JSON/],
+      ['an item code with no text form', good({ items: [{ code: Object.create(null), qty: 1, priceSen: 350 }] }), /plain JSON/],
     ];
     for (const [name, record, why] of cases) {
       const { message, ...rest } = receive(record, { uploader: 'CANTEEN-01' });
@@ -520,6 +523,7 @@ describe('receive: refused records', () => {
     const record = sale(card, { n: 1 });
     assert.throws(() => t.settlement.receive({ schoolId: 'sch_nope', via: 'MQTT', record }), code('SCHOOL_NOT_FOUND', 404));
     assert.throws(() => t.settlement.receive(), code('SCHOOL_NOT_FOUND', 404));
+    assert.throws(() => t.settlement.receive(null), code('SCHOOL_NOT_FOUND', 404));
     assert.throws(() => t.settlement.receive({ schoolId: t.a.id, via: 'PIGEON', record }), code('VIA_INVALID', 400));
     assert.throws(() => t.settlement.receive({ schoolId: t.a.id, record }), code('VIA_INVALID', 400));
     // the uploader is stored with the purchase, so it must be a machine of the same school
@@ -567,6 +571,29 @@ describe('receive: checks on the money', () => {
     // the next purchases on each card carry on with their own counters
     assert.deepEqual(receive(sale(card, { n: 2, items: [['BUAH', 1]] })).differences, []);
     assertBooks();
+  });
+
+  test("another school's purchases never count as a twin, nor as the first copy", () => {
+    const card = funded(t.a, 'aina', 2000);
+    const record = sale(card, { n: 1 });
+    // the same chip data reaching smk-beta (a forged or misrouted copy): smk-beta does not know the card
+    const there = receive(record, { school: t.b });
+    assert.deepEqual([there.status, there.differences], ['FLAGGED', ['UNKNOWN_CARD']]);
+    // in smk-alpha it is a first copy, and the stored row with the same digest and counter is not its twin
+    const here = receive(record);
+    assert.deepEqual(here, { status: 'POSTED', purchaseId: here.purchaseId, differences: [] });
+    assert.notEqual(here.purchaseId, there.purchaseId);
+    assert.equal(diffsOf('CARD_CLONE_SUSPECTED').length, 0);
+    assert.equal(diffsOf('CARD_CLONE_SUSPECTED', t.b).length, 0);
+    // a real second purchase with that counter in smk-alpha is still caught
+    const copy = { ...card, cardSeq: 0, balanceSen: 2000 };
+    assert.deepEqual(receive(sale(copy, { origin: 'CANTEEN-02', n: 1 })).differences, ['CARD_CLONE_SUSPECTED']);
+    assert.deepEqual(diffsOf('CARD_CLONE_SUSPECTED')[0].detail.purchases, [
+      { origin: 'CANTEEN-01', txn: 'CANTEEN-01-000001' },
+      { origin: 'CANTEEN-02', txn: 'CANTEEN-02-000001' },
+    ]);
+    assertBooks();
+    assertBooks(t.b);
   });
 
   test('a purchase that takes the mirror below zero is posted and flagged MIRROR_NEGATIVE', () => {
@@ -747,8 +774,12 @@ describe('receive: events and transactions', () => {
     assert.equal(t.ledger.findByIdemKey(t.a.id, 'PURCHASE:CANTEEN-01:CANTEEN-01-000001'), null);
     assert.equal(wallet(t.a, 'aina'), 2000);
     assert.equal(eventsOf(t.ctx, 'purchase.received').length, 0);
+    // the posting written before the failure was rolled back, so it is never announced either
+    const purchasePostingEvents = () => eventsOf(t.ctx, 'ledger.posting').filter((e) => e.data.kind === 'PURCHASE');
+    assert.equal(purchasePostingEvents().length, 0);
     // nothing was left behind, so the real upload is a first copy, not a duplicate
     assert.equal(receive(record).status, 'POSTED');
+    assert.equal(purchasePostingEvents().length, 1);
     assertBooks();
   });
 
@@ -770,19 +801,31 @@ describe('receive: events and transactions', () => {
     assert.equal(countRows('purchase'), 0);
     assert.equal(t.differences.list(t.a.id).length, 0);
     assert.equal(t.ledger.findByIdemKey(t.a.id, 'PURCHASE:CANTEEN-01:CANTEEN-01-000001'), null);
+    // the first difference was opened and rolled back with the rest: the console never hears of it
+    assert.equal(eventsOf(t.ctx, 'difference.opened').length, 0);
     assert.deepEqual(receive(record).differences, ['PRICE_VERSION_UNKNOWN', 'BALANCE_CONTINUITY']);
+    assert.deepEqual(eventsOf(t.ctx, 'difference.opened').map((e) => e.data.kind), ['PRICE_VERSION_UNKNOWN', 'BALANCE_CONTINUITY']);
     assertBooks();
   });
 
-  test('inside a caller\'s transaction the record becomes part of it', () => {
+  test("inside a caller's transaction the record and its events become part of it", () => {
     const card = funded(t.a, 'aina', 2000);
+    const record = sale(card, { n: 1, priceVersion: 7 }); // opens PRICE_VERSION_UNKNOWN
+    const seen = t.ctx.events.lastSeq();
     assert.throws(() =>
       t.ctx.db.tx(() => {
-        assert.equal(receive(sale(card, { n: 1 })).status, 'POSTED');
+        assert.deepEqual(receive(record).differences, ['PRICE_VERSION_UNKNOWN']);
+        assert.deepEqual(t.ctx.events.since(seen), [], 'nothing is announced before the caller commits');
         throw new Error('the caller changed its mind');
       }), /changed its mind/);
     assert.equal(countRows('purchase'), 0);
+    assert.equal(t.differences.list(t.a.id).length, 0);
     assert.equal(wallet(t.a, 'aina'), 2000);
+    // a rolled-back purchase is never shown: no posting, difference or purchase event
+    assert.deepEqual(t.ctx.events.since(seen), []);
+    // committed, the same record is announced once, after what it wrote
+    t.ctx.db.tx(() => assert.equal(receive(record).status, 'POSTED'));
+    assert.deepEqual(t.ctx.events.since(seen).map((e) => e.type), ['ledger.posting', 'difference.opened', 'purchase.received']);
     assertBooks();
   });
 });
@@ -936,6 +979,19 @@ describe('salesReport', () => {
     assert.deepEqual(t.settlement.salesReport(t.a.id), tuesday);
     assert.deepEqual(t.settlement.salesReport(t.a.id, { day: '' }), tuesday);
     assert.deepEqual(t.settlement.salesReport(t.a.id, { day: '2026-10-04' }), { day: '2026-10-04', totalSen: 0, count: 0, byDevice: [], byItem: [] });
+  });
+
+  test('midnight in Kuala Lumpur starts the new day, to the millisecond', () => {
+    const aina = funded(t.a, 'aina', 5000);
+    t.ctx.clock.advance(MIDNIGHT + HOUR - t.ctx.clock.now());
+    receive(sale(aina, { n: 1, items: [['BUAH', 1]], at: at(MIDNIGHT - 1) }), { via: 'JOURNAL_BATCH' }); // 23:59:59.999
+    receive(sale(aina, { n: 2, items: [['TEH-TARIK', 1]], at: at(MIDNIGHT) }), { via: 'JOURNAL_BATCH' }); // 00:00:00.000
+    const day = (d) => {
+      const r = t.settlement.salesReport(t.a.id, { day: d });
+      return [r.count, r.totalSen, r.byItem.map((i) => i.code)];
+    };
+    assert.deepEqual(day('2026-10-05'), [1, 100, ['BUAH']]);
+    assert.deepEqual(day('2026-10-06'), [1, 180, ['TEH-TARIK']]);
   });
 
   test('a zero-amount purchase counts as a sale of nothing', () => {

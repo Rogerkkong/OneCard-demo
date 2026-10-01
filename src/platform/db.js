@@ -278,6 +278,10 @@ const MIGRATIONS = [
     at INTEGER NOT NULL
   );
   `,
+  // V2: settlement looks purchases up by machine and transaction number for every record
+  `
+  CREATE INDEX purchase_by_origin_txn ON purchase(school_id, origin_device_code, txn_number);
+  `,
 ];
 
 /**

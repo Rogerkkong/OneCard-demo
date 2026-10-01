@@ -247,6 +247,7 @@ describe('checkCardSnapshot', () => {
       assert.throws(() => t.reconcile.checkCardSnapshot({ ...good, ...bad }), code('SNAPSHOT_INVALID', 400), JSON.stringify(bad));
     }
     assert.throws(() => t.reconcile.checkCardSnapshot(), code('SNAPSHOT_INVALID', 400));
+    assert.throws(() => t.reconcile.checkCardSnapshot(null), code('SNAPSHOT_INVALID', 400));
     assert.equal(t.differences.list(t.a.id).length, 0);
     assert.deepEqual(t.reconcile.checkCardSnapshot(good), { match: true, mirrorSen: 2000, cardSen: 2000 });
   });
@@ -292,6 +293,17 @@ describe('scanGaps', () => {
     // the whole range arriving later opens nothing more
     for (const n of [2, 4]) receive(sale(card, { n }), { via: 'USB_IMPORT' });
     assert.equal(t.reconcile.scanGaps(t.a.id), 0);
+  });
+
+  test('numbers count, however many leading zeros a txn is written with', () => {
+    const card = funded(t.a, 'aina', 5000);
+    receive(sale(card, { n: 1 }));
+    const fourth = sale(card, { n: 4 });
+    assert.equal(receive({ ...fourth, txn: 'CANTEEN-01-0000004' }).status, 'POSTED');
+    assert.equal(t.reconcile.scanGaps(t.a.id), 1);
+    const [d] = diffsOf('MISSING_RECORDS');
+    assert.equal(d.ref, 'CANTEEN-01:2-3');
+    assert.deepEqual([d.detail.fromTxn, d.detail.toTxn], ['CANTEEN-01-000002', 'CANTEEN-01-000003']);
   });
 
   test('a FLAGGED purchase (unknown card) still counts as received', () => {
@@ -373,6 +385,15 @@ describe('scanListLag', () => {
     assert.deepEqual(d.detail, {
       deviceCode: late.code, appliedVersion: 0, currentVersion: 1, currentSince: T0, reportedVia: null, reportedAt: null,
     });
+  });
+
+  test('a machine the office switched off is still judged: offline, it sells on its old list', () => {
+    t.devices.setDeviceStatus({ schoolId: t.a.id, code: 'WATER-01', status: 'DISABLED', actor: 'test' });
+    assert.equal(block(t.a, 'aina'), 2);
+    for (const deviceCode of ['CANTEEN-01', 'CANTEEN-02', 'KIOSK-01']) applied(t.a, deviceCode, 2);
+    t.ctx.clock.advance(DAY + 1);
+    assert.equal(scan(), 1);
+    assert.deepEqual(refsOf('OLD_BLOCK_LIST'), ['WATER-01:2']);
   });
 
   test('a school that never had a block list has nothing to lag behind', () => {
