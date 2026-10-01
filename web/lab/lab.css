@@ -70,6 +70,7 @@ html { scroll-padding-top: calc(var(--header-h) + 12px); }
 }
 .skip-link:focus { top: 8px; }
 code { overflow-wrap: anywhere; }
+h4 { margin: 0; line-height: 1.25; }
 
 /* ---- header ------------------------------------------------------------------------------ */
 .lab-header { position: sticky; top: 0; z-index: 30; background: var(--surface); border-bottom: 1px solid var(--line); }
@@ -111,18 +112,19 @@ code { overflow-wrap: anywhere; }
 
 /* ---- how to use, jump links -------------------------------------------------------------- */
 .help { padding: 0; }
-.help__summary { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; list-style: none; }
+.help__summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 10px 16px; cursor: pointer; list-style: none; }
 .help__summary::-webkit-details-marker { display: none; }
 .help__summary::before {
   content: ''; flex: 0 0 auto; width: 7px; height: 7px; margin: 0 2px;
   border-right: 2px solid var(--ink-2); border-bottom: 2px solid var(--ink-2); transform: rotate(-45deg);
 }
 .help[open] > .help__summary::before { transform: rotate(45deg); }
-.help__title { font-size: 16px; }
-.help__body { display: grid; gap: 10px; padding: 0 16px 16px; font-size: 14px; }
+.help__title { font-size: 15px; }
+.help__tip { flex: 1 1 260px; font-size: 13px; color: var(--ink-2); }
+.help__body { display: grid; gap: 10px; padding: 0 16px 14px; font-size: 14px; }
 .help__body h3 { font-size: 14px; margin-top: 4px; }
 .help__steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
-.help__tools { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.help__tools { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
 .help__tool { display: grid; gap: 6px; align-content: start; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); }
 .help__tool h4 { font-size: 13px; }
 .help code, .con__intro code { padding: 0 4px; border-radius: 4px; background: var(--surface-2); }

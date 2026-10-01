@@ -165,7 +165,7 @@ for (const a of document.querySelectorAll('[data-jump-tab]')) {
 }
 
 const help = $('#help');
-help.open = prefs.get('help.open', true) !== false;
+help.open = prefs.get('help.open', false) === true;
 help.addEventListener('toggle', () => prefs.set('help.open', help.open));
 
 function renderHelp() {

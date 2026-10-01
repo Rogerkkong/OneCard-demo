@@ -37,6 +37,7 @@ export const STRINGS = {
     'toast.back': 'The lab is reachable again.',
 
     'help.title': 'How to use this page',
+    'help.tip': 'Pick a card in a card tray, press “Tap card” on a machine, then watch its screen, the card’s balance and the messages.',
     'help.intro':
       'Everything here is virtual: one cloud server serves many schools, and each school has its own machines, cards and admin card. Try this:',
     'help.s1':
@@ -612,6 +613,7 @@ export const STRINGS = {
     'toast.back': '已重新连上实验室。',
 
     'help.title': '这个页面怎么用',
+    'help.tip': '在卡片托盘里选一张卡，在机器上按“刷卡”，再看机器屏幕、卡上余额和消息。',
     'help.intro': '这里的一切都是虚拟的：一台云端服务器服务很多学校，每所学校有自己的机器、卡和参数卡。试试看：',
     'help.s1': '在学校的卡片托盘里选一张卡，再在机器上按“刷卡”。机器屏幕会回应，卡上余额会变，右边的消息检视器会出现消息。',
     'help.s2': '拔掉机器的网线：它会继续离线售卖并保留记录。再插回去，看它把记录上传。',
