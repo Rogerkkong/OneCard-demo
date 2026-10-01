@@ -412,7 +412,8 @@ export function kioskResult(fault, r, t, lang) {
   if (fault === 'confirm-timeout' && added[0]) {
     return { tone: 'good', text: t('fr.kiosk.timeout', { txn: added[0].kioskTxn, amount: money(added[0].amountSen) }) + tail };
   }
-  return { tone: added.length || again.length ? 'good' : 'info', text: screen + tail };
+  if (again.length) return { tone: 'good', text: t('fr.kiosk.shows', { screen }) + tail };
+  return { tone: added.length ? 'good' : 'info', text: screen };
 }
 
 // ---- errors -------------------------------------------------------------------------------------

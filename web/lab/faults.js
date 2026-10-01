@@ -44,7 +44,8 @@ export function createFaults(app, root) {
       r.title = h('h4', { class: 'fault__title', id: `fault-${f.type}-title` });
       r.text = h('p', { class: 'fault__text' });
       r.where = h('p', { class: 'fault__where muted' });
-      r.button = h('button', { type: 'button', class: 'btn btn--small fault__run', 'aria-describedby': `fault-${f.type}-title` });
+      // read as "Try it, Copy a card": the button names the fault it runs
+      r.button = h('button', { type: 'button', class: 'btn btn--small fault__run', id: `fault-${f.type}-run`, 'aria-labelledby': `fault-${f.type}-run fault-${f.type}-title` });
       r.result = h('p', { class: 'fault__result', 'aria-live': 'polite', hidden: true });
       const controls = h('div', { class: 'fault__controls' });
       if (f.extra === 'amount') {

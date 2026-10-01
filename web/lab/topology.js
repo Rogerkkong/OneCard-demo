@@ -8,6 +8,12 @@ import { directionOf, parseTopic, reasonText, screenCaption } from './describe.j
 import { hhmm, icon, reconcile, reducedMotion, setAttr, setHidden, setText, setTone } from './util.js';
 
 const FLASH_MS = 900;
+// Refusals whose screen does not say why ("Card unavailable", "Cannot reach the platform", a power
+// cut): the lab shows the reason. Plain refusals (closed, limits, balance) already say it on screen.
+const HIDDEN_REASONS = new Set([
+  'BLOCKED', 'CARD_UNREADABLE', 'WRONG_SCHOOL', 'NO_BLOCKLIST', 'NOT_READY', 'JOURNAL_FULL', 'OFFLINE',
+  'PLATFORM_UNREACHABLE', 'CARD_NOT_ACTIVE', 'CARD_NOT_FOUND', 'POWER_CUT', 'PACKS_INVALID',
+]);
 
 /** What a machine's link looks like and what its status pill says. */
 function machineStatus(m, school, serverUp) {
@@ -185,7 +191,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setText(r.caption, caption ?? '');
     setHidden(r.caption, !caption);
     const last = m.lastResult;
-    const why = last && !last.ok && last.reason && screen && last.screen === screen.text ? reasonText(last.reason, t) : '';
+    const why = last && !last.ok && HIDDEN_REASONS.has(last.reason) && screen && last.screen === screen.text ? reasonText(last.reason, t) : '';
     setText(r.why, why ? t('m.why', { reason: why }) : '');
     setHidden(r.why, !why);
 
@@ -219,7 +225,6 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
       setText(r.cableBtn, m.cablePlugged ? t('m.pull') : t('m.plug'));
       r.cableBtn.disabled = !installed;
     }
-    setAttr(r.cableBtn, 'aria-pressed', m.cablePlugged ? 'true' : 'false');
     setText(r.moreSummary, t('m.more'));
     setAttr(r.moreSummary, 'aria-label', t('m.moreLabel', { code: m.code }));
     for (const b of r.menuItems) setText(b, t(b.dataset.label));
@@ -435,7 +440,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     }
   });
 
-  /** Point at a machine after an action (scrolls it into view if needed). */
+  /** Briefly ring a machine that an action just used. */
   function highlight(key) {
     const el = machineEls.get(key);
     if (!el) return;
@@ -443,5 +448,5 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setTimeout(() => el.classList.remove('is-acted'), 1600);
   }
 
-  return { render, onEvent, highlight, machineElement: (key) => machineEls.get(key) ?? null };
+  return { render, onEvent, highlight };
 }

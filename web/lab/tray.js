@@ -100,7 +100,6 @@ export function createTrays(app) {
     setHidden(r.staff, c.group !== 'STAFF');
     const picked = app.selected === key;
     setAttr(r.button, 'aria-pressed', picked ? 'true' : 'false');
-    setAttr(r.button, 'aria-label', t('card.pick', { name: c.member ?? t('card.noMember'), uid: c.uid, balance: formatRM(c.balanceSen) }));
     li.classList.toggle('is-copy', Boolean(c.copy));
     li.classList.toggle('is-bad', c.readable === false || c.platformStatus === 'LOST');
   }
@@ -240,7 +239,7 @@ export function createTrays(app) {
   const errorEl = dialog.querySelector('.dialog__error');
   const submitBtn = dialog.querySelector('[data-role="submit"]');
   const cancelBtn = dialog.querySelector('[data-role="cancel"]');
-  let current = null; // { key, school, code, type, opener, read(), label() }
+  let current = null; // { key, school, code, type, opener, select, read() }
 
   cancelBtn.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => {

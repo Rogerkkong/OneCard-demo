@@ -27,7 +27,8 @@ export function createShell(app, root) {
   let target = null;
   let prompt = 'onecard>';
   let running = false;
-  const history = prefs.get('console.history', []).filter((x) => typeof x === 'string').slice(-MAX_HISTORY);
+  const saved = prefs.get('console.history', []);
+  const history = (Array.isArray(saved) ? saved : []).filter((x) => typeof x === 'string').slice(-MAX_HISTORY);
   let cursor = history.length;
   let draft = '';
 
@@ -87,6 +88,7 @@ export function createShell(app, root) {
 
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
+    if (running) return; // keep what was typed until the previous command has answered
     const line = input.value;
     input.value = '';
     run(line);
@@ -135,7 +137,10 @@ export function createShell(app, root) {
       const i = addr.lastIndexOf(':');
       setText(hint, t('con.hint', { host: addr.slice(0, i), port: addr.slice(i + 1) }));
     } else setText(hint, t('con.hintOff'));
-    intro.replaceChildren(...rich(t('con.intro')));
+    if (intro.dataset.lang !== app.i18n.lang) {
+      intro.replaceChildren(...rich(t('con.intro')));
+      intro.dataset.lang = app.i18n.lang;
+    }
     setText(promptEl, prompt);
     input.setAttribute('aria-label', t('con.command', { prompt }));
     setText(runBtn, t('con.run'));

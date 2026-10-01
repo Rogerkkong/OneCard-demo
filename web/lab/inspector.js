@@ -10,6 +10,12 @@ const MAX_ITEMS = 1500; // events kept in memory
 const MAX_ROWS = 400; // rows in the list at once
 const narrow = window.matchMedia('(max-width: 1023px)');
 
+/** 'intake.accepted' with a line-break chance after each dot, so a narrow column breaks there. */
+function breakable(type) {
+  const parts = String(type).split('.');
+  return parts.flatMap((part, i) => (i < parts.length - 1 ? [`${part}.`, h('wbr')] : [part]));
+}
+
 export function createInspector(app, root) {
   const { t } = app;
   const q = (sel) => root.querySelector(sel);
@@ -42,8 +48,8 @@ export function createInspector(app, root) {
   let selectedId = null;
   let live = 'connecting';
   const filters = {
-    school: prefs.get('insp.school', ''),
-    kinds: new Set(prefs.get('insp.kinds', KINDS).filter((k) => KINDS.includes(k))),
+    school: String(prefs.get('insp.school', '') ?? ''),
+    kinds: new Set([].concat(prefs.get('insp.kinds', KINDS)).filter((k) => KINDS.includes(k))),
     heartbeats: prefs.get('insp.heartbeats', false) === true,
   };
 
@@ -104,7 +110,7 @@ export function createInspector(app, root) {
       h('span', { class: 'ev__time num' }, formatTimeKL(e.at)),
       h('span', { class: 'ev__school' }, e.school ?? t('insp.server')),
       h('span', { class: 'ev__machine' }, item.machine || '—'),
-      h('span', { class: 'ev__type' }, h('span', { class: 'ev__dot', 'aria-hidden': 'true' }), e.type),
+      h('span', { class: 'ev__type' }, h('span', { class: 'ev__dot', 'aria-hidden': 'true' }), h('span', {}, breakable(e.type))),
       h('span', { class: 'ev__summary' }, summarize(e, t, app.i18n.lang)),
     );
     button.addEventListener('click', (ev) => openDetail(item, ev.detail === 0));

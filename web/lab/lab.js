@@ -21,6 +21,7 @@ const { t } = i18n;
 const $ = (sel) => document.querySelector(sel);
 
 let refreshTimer = null;
+let refreshDue = 0;
 let netDown = false;
 
 // Events after which the picture on screen is out of date (the state is fetched again).
@@ -110,9 +111,16 @@ const app = {
     app.selected = null;
   },
 
+  /** Fetch the state again soon; a burst of events leads to one fetch, never to an endless wait. */
   refresh(delay = 0) {
+    const due = Date.now() + delay;
+    if (refreshTimer !== null && refreshDue <= due) return;
     clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(load, delay);
+    refreshDue = due;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      load();
+    }, delay);
   },
 };
 
@@ -127,7 +135,8 @@ const shell = createShell(app, $('#panel-console'));
 
 // ---- header, language, help, banners ---------------------------------------------------------------
 
-$('#lang').append(i18n.switcher());
+const switcher = i18n.switcher();
+$('#lang').append(switcher);
 
 const tabs = (() => {
   const buttons = [...document.querySelectorAll('[role="tab"]')];
@@ -283,10 +292,12 @@ function render() {
 
 i18n.onChange(() => {
   document.title = t('doc.title');
+  switcher.setAttribute('aria-label', t('lang.label'));
   render();
   inspector.relang();
 });
 document.title = t('doc.title');
+switcher.setAttribute('aria-label', t('lang.label'));
 i18n.apply();
 
 // the sticky right column sits under the header, whatever its height
