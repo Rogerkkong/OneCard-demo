@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lab console · OneCard Lab</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/shared/style.css">
+<link rel="stylesheet" href="/lab/lab.css">
+</head>
+<body>
+<a class="skip-link" href="#topology" data-i18n="skip">Skip to the machines</a>
+
+<header class="lab-header" id="lab-header">
+  <div class="lab-header__inner">
+    <a class="brand" href="/"><span data-i18n="app.brand">OneCard Lab</span></a>
+    <h1 class="lab-header__title" data-i18n="app.title">Lab console</h1>
+    <span class="lab-ribbon" data-i18n="ribbon">LAB · not real money</span>
+    <span class="pill" id="hdr-server" role="status" hidden></span>
+    <span class="hdr-clock num" id="hdr-clock"></span>
+    <span class="spacer"></span>
+    <nav class="apps" aria-labelledby="apps-label">
+      <span class="sr-only" id="apps-label" data-i18n="nav.label">Other apps</span>
+      <a href="/operator/" target="_blank" rel="noopener"><span data-i18n="nav.operator">Operator console</span><span class="sr-only" data-i18n="nav.newTab">(opens in a new tab)</span></a>
+      <a href="/admin/" target="_blank" rel="noopener"><span data-i18n="nav.admin">School office</span><span class="sr-only" data-i18n="nav.newTab">(opens in a new tab)</span></a>
+      <a href="/parent/" target="_blank" rel="noopener"><span data-i18n="nav.parent">Parent app</span><span class="sr-only" data-i18n="nav.newTab">(opens in a new tab)</span></a>
+    </nav>
+    <div id="lang"></div>
+  </div>
+</header>
+
+<div class="banners">
+  <div class="banner banner--bad" id="banner-net" role="alert" hidden>
+    <div class="banner__text">
+      <strong data-i18n="banner.net.title">Cannot reach the lab</strong>
+      <span data-i18n="banner.net.text">The browser cannot reach the lab server. Is it still running? This page keeps trying every few seconds.</span>
+    </div>
+  </div>
+  <div class="banner banner--bad" id="banner-down" role="status" hidden>
+    <div class="banner__text">
+      <strong data-i18n="banner.down.title">The cloud server is switched off</strong>
+      <span data-i18n="banner.down.text">Every school lost it at the same moment.</span>
+    </div>
+    <button type="button" class="btn btn--primary" data-i18n="banner.down.button">Switch the server on</button>
+  </div>
+  <div class="banner banner--info" id="banner-busy" role="status" hidden>
+    <div class="banner__text">
+      <strong data-i18n="banner.busy.title">The lab is setting up the demo</strong>
+      <span data-i18n="banner.busy.text">This takes a moment. The page updates by itself.</span>
+    </div>
+  </div>
+</div>
+
+<main class="layout" id="main">
+  <div class="world">
+    <details class="panel help" id="help">
+      <summary class="help__summary"><h2 class="help__title" data-i18n="help.title">How to use this page</h2><span class="help__tip" data-i18n="help.tip">Pick a card in a card tray, press “Tap card” on a machine, then watch its screen, the card’s balance and the messages.</span></summary>
+      <div class="help__body" id="help-body"></div>
+    </details>
+
+    <nav class="jump" aria-labelledby="jump-label">
+      <span class="jump__label" id="jump-label" data-i18n="jump.label">On this page</span>
+      <ul class="jump__list">
+        <li><a href="#cloud" data-i18n="jump.server">Cloud server</a></li>
+        <li class="jump__schools"><ul id="jump-schools" class="jump__list"></ul></li>
+        <li><a href="#clock" data-i18n="jump.clock">Lab clock</a></li>
+        <li><a href="#faults" data-i18n="jump.faults">Faults</a></li>
+        <li><a href="#side" data-jump-tab="messages" data-i18n="jump.messages">Messages</a></li>
+        <li><a href="#side" data-jump-tab="console" data-i18n="jump.console">Console</a></li>
+      </ul>
+    </nav>
+
+    <section class="topology" id="topology" tabindex="-1">
+      <div class="top-row">
+        <article class="cloud" id="cloud" aria-labelledby="cloud-title"></article>
+        <section class="panel clock" id="clock" aria-labelledby="clock-title">
+          <h2 class="clock__title" id="clock-title" data-i18n="clock.title">Lab clock</h2>
+          <p class="clock__face">
+            <span class="clock__date num"></span>
+            <span class="clock__time num"></span>
+          </p>
+          <p class="clock__meta"><span class="clock__zone"></span> · <span class="clock__mode"></span></p>
+          <div class="clock__buttons">
+            <button type="button" class="btn btn--small" data-advance="3600000">+1 hour</button>
+            <button type="button" class="btn btn--small" data-advance="86400000">+1 day</button>
+            <button type="button" class="btn btn--small" data-advance="1296000000">+15 days</button>
+            <button type="button" class="btn btn--small btn--primary" data-role="jobs">Run jobs now</button>
+          </div>
+          <p class="clock__off muted" hidden></p>
+          <p class="clock__result" role="status" hidden></p>
+          <p class="clock__note muted"></p>
+          <button type="button" class="btn btn--small btn--ghost clock__reset" data-role="reset">Reset the demo…</button>
+        </section>
+      </div>
+      <div class="internet" id="sites"></div>
+    </section>
+
+    <section class="panel faults" id="faults" aria-labelledby="faults-title">
+      <h2 id="faults-title" data-i18n="fault.title">Faults</h2>
+      <p class="faults__intro muted"></p>
+      <div class="faults__pickers">
+        <div class="faults__picker">
+          <label for="fault-machine">Machine for the faults</label>
+          <select id="fault-machine"></select>
+        </div>
+        <div class="faults__picker">
+          <label for="fault-card">Card for the faults</label>
+          <select id="fault-card"></select>
+        </div>
+      </div>
+      <div class="faults__groups"></div>
+    </section>
+  </div>
+
+  <aside class="side" id="side" tabindex="-1" data-i18n-attr="aria-label:tabs.label" aria-label="Messages and console">
+    <div class="tabs" role="tablist" data-i18n-attr="aria-label:tabs.label" aria-label="Messages and console">
+      <button type="button" role="tab" class="tab" id="tab-messages" data-tab="messages" aria-controls="panel-messages" aria-selected="true"><span data-i18n="insp.tab">Messages</span></button>
+      <button type="button" role="tab" class="tab" id="tab-console" data-tab="console" aria-controls="panel-console" aria-selected="false" tabindex="-1"><span data-i18n="con.tab">Console</span></button>
+    </div>
+
+    <section class="insp" id="panel-messages" role="tabpanel" aria-labelledby="tab-messages">
+      <div class="insp__bar">
+        <h2 class="insp__title" id="insp-title">Message inspector</h2>
+        <span class="insp__count muted num"></span>
+        <span class="insp__live"><span class="insp__livedot" aria-hidden="true"></span><span class="insp__livetext"></span></span>
+      </div>
+      <div class="insp__filters">
+        <div class="insp__row">
+          <div class="insp__filter">
+            <label for="insp-school">School</label>
+            <select id="insp-school"></select>
+          </div>
+          <div class="insp__tools">
+            <label class="insp__hb"><input type="checkbox" id="insp-hb"> <span class="insp__hb-text">Heartbeats</span></label>
+            <button type="button" class="btn btn--small" data-role="pause" aria-pressed="false">Pause</button>
+            <button type="button" class="btn btn--small" data-role="clear">Clear</button>
+          </div>
+        </div>
+        <div class="insp__kinds" role="group" aria-labelledby="insp-kinds-label">
+          <span class="insp__kindslabel" id="insp-kinds-label">Show</span>
+          <span class="insp__kinds-list"></span>
+        </div>
+      </div>
+      <div class="insp__head" aria-hidden="true">
+        <span data-key="insp.col.time">Time</span>
+        <span data-key="insp.col.school">School</span>
+        <span data-key="insp.col.machine">Machine</span>
+        <span data-key="insp.col.type">Type</span>
+      </div>
+      <ol class="insp__list" aria-labelledby="insp-title"></ol>
+      <p class="insp__empty muted"></p>
+      <section class="insp__detail" id="insp-detail" aria-labelledby="insp-detail-title" hidden>
+        <header class="insp__detailhead">
+          <h3 id="insp-detail-title" tabindex="-1"></h3>
+          <button type="button" class="btn btn--small" data-role="close-detail">Close</button>
+        </header>
+        <p class="insp__explain"></p>
+        <pre class="insp__json" tabindex="0"></pre>
+      </section>
+    </section>
+
+    <section class="con" id="panel-console" role="tabpanel" aria-labelledby="tab-console" hidden>
+      <div class="con__bar">
+        <h2 class="con__title" id="con-title">Machine and server consoles</h2>
+        <button type="button" class="btn btn--small" data-role="con-clear">Clear</button>
+      </div>
+      <p class="con__hint"></p>
+      <p class="con__intro muted"></p>
+      <div class="term">
+        <div class="term__out" role="log" aria-live="polite" aria-labelledby="con-title" tabindex="0"></div>
+        <form class="term__form" autocomplete="off">
+          <label class="term__prompt mono" for="term-in">onecard&gt;</label>
+          <input class="term__input mono" id="term-in" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+          <button type="submit" class="btn btn--small term__run">Run</button>
+        </form>
+      </div>
+      <div class="con__quick"><span class="con__quicklabel">Try</span><span class="con__quicklist"></span></div>
+    </section>
+  </aside>
+</main>
+
+<dialog class="dialog" id="tap-dialog" aria-labelledby="tap-title" aria-describedby="tap-sub">
+  <form class="dialog__form" novalidate>
+    <header class="dialog__head">
+      <h2 id="tap-title"></h2>
+      <p id="tap-sub" class="muted"></p>
+    </header>
+    <div class="dialog__body"></div>
+    <p class="dialog__error" role="alert" hidden></p>
+    <footer class="dialog__foot">
+      <button type="button" class="btn" data-role="cancel">Cancel</button>
+      <button type="submit" class="btn btn--primary" data-role="submit">Tap card</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="dialog dialog--small" id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-text">
+  <div class="dialog__form">
+    <header class="dialog__head"><h2 id="reset-title"></h2></header>
+    <p id="reset-text"></p>
+    <footer class="dialog__foot">
+      <button type="button" class="btn" data-role="cancel">Cancel</button>
+      <button type="button" class="btn btn--danger" data-role="confirm">Reset the demo</button>
+    </footer>
+  </div>
+</dialog>
+
+<script type="module" src="/lab/lab.js"></script>
+</body>
+</html>

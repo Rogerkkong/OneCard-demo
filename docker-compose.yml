@@ -1,0 +1,9 @@
+# Start the lab with Docker instead of Node:   docker compose up --build
+# Then open http://localhost:8080/lab/
+services:
+  lab:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"   # web apps and APIs
+      - "127.0.0.1:1883:1883"   # MQTT broker
+      - "127.0.0.1:2323:2323"   # machine consoles (PuTTY / telnet)

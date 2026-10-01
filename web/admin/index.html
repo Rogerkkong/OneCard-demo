@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>School office · OneCard Lab</title>
+<link rel="stylesheet" href="/shared/style.css">
+<link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body class="app app--office">
+<a class="skip-link" href="#main" data-i18n="app.skip">Skip to content</a>
+<div id="conn"></div>
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="/" data-i18n-attr="title:app.home">
+      <span class="brand__mark" aria-hidden="true">1</span>
+      <span class="brand__name">OneCard</span>
+      <span class="brand__app" data-i18n="app.name">School office</span>
+    </a>
+    <span class="lab-ribbon" data-i18n="app.ribbon">LAB · not real money</span>
+    <span class="spacer"></span>
+    <div id="lang"></div>
+  </div>
+</header>
+
+<div id="school-band" class="band" hidden>
+  <div class="band__inner">
+    <div class="band__school">
+      <p class="band__kicker" data-i18n="app.yourSchool">Your school on the OneCard platform</p>
+      <h1 id="school-name" class="band__name"></h1>
+      <p class="band__meta"><code id="school-code" class="chip"></code> <span data-i18n="app.onlyYours">You see this school only. Other schools on the platform are invisible here.</span></p>
+    </div>
+    <div class="band__who">
+      <p class="band__person"><span id="staff-name"></span> <span id="staff-role" class="pill pill--info"></span></p>
+      <p id="staff-role-text" class="muted band__roletext"></p>
+      <button id="signout" type="button" class="btn btn--small" data-i18n="app.signOut">Sign out</button>
+    </div>
+  </div>
+</div>
+
+<div id="shell" class="shell">
+  <nav id="nav" class="nav" data-i18n-attr="aria-label:app.sections" aria-label="Sections" hidden></nav>
+  <main id="main" class="main" tabindex="-1">
+    <p class="muted boot-note" data-i18n="kit.loading">Loading…</p>
+  </main>
+</div>
+<script type="module" src="/admin/app.js"></script>
+</body>
+</html>

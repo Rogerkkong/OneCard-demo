@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Operator console · OneCard Lab</title>
+<link rel="stylesheet" href="/shared/style.css">
+<link rel="stylesheet" href="/admin/admin.css">
+<link rel="stylesheet" href="/operator/operator.css">
+</head>
+<body class="app app--operator">
+<a class="skip-link" href="#main" data-i18n="app.skip">Skip to content</a>
+<div id="conn"></div>
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="/" data-i18n-attr="title:app.home">
+      <span class="brand__mark brand__mark--op" aria-hidden="true">1</span>
+      <span class="brand__name">OneCard</span>
+      <span class="brand__app" data-i18n="app.name">Operator console</span>
+    </a>
+    <span class="lab-ribbon" data-i18n="app.ribbon">LAB · not real money</span>
+    <span class="spacer"></span>
+    <div id="lang"></div>
+  </div>
+</header>
+
+<div id="band" class="band band--operator" hidden>
+  <div class="band__inner">
+    <div class="band__school">
+      <p class="band__kicker" data-i18n="band.kicker">SaaS operator</p>
+      <h1 class="band__name" data-i18n="band.title">OneCard platform</h1>
+      <p class="band__meta" data-i18n="band.text">One server, many schools. You see every tenant; each school's staff see only their own school.</p>
+    </div>
+    <div class="band__who">
+      <p class="band__person" data-i18n="band.who">OneCard platform operator</p>
+      <button id="signout" type="button" class="btn btn--small" data-i18n="app.signOut">Sign out</button>
+    </div>
+  </div>
+</div>
+
+<main id="main" class="op-main" tabindex="-1">
+  <p class="muted boot-note" data-i18n="kit.loading">Loading…</p>
+</main>
+<script type="module" src="/operator/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+node_modules
+.git
+lab-certs
+data
+test
+*.log
