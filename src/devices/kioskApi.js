@@ -18,6 +18,8 @@ const NONCE_BYTES = 16; // 32 hex characters, inside the 16-64 the platform acce
 const MAX_TXN_LENGTH = 64;
 /** Status of a NETWORK error: there was no answer, so it reads as "service unavailable". */
 const NO_ANSWER_STATUS = 503;
+/** Status of an answer that is not one (a 2xx that is not JSON, a redirect): "bad gateway". */
+const BAD_ANSWER_STATUS = 502;
 // Node timers hold whole milliseconds up to 2^31 - 1: AbortSignal.timeout() refuses a
 // fraction, and a longer delay fires after 1 ms, so either would turn every call into NETWORK.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -32,12 +34,16 @@ const isHexSecret = matches(/^[0-9a-f]{32,}$/i); // same rule as shared/crypto.j
  * A kiosk API call failed. `code` is the platform's error code from the JSON body
  * (e.g. SIGNATURE_INVALID, REPLAY, ORDER_ALREADY_ADDED, SERVER_DOWN), `NETWORK` when the
  * platform could not be reached in time (detail.timedOut says which), `BAD_RESPONSE` for a
- * 2xx answer that is not JSON, or `HTTP_<status>` when an error answer has no code.
+ * 2xx answer that is not JSON, or `HTTP_<status>` when an answer has no code.
+ * `status` is always an error status, as on any LabError, because the error may reach an API
+ * response: the platform's own 4xx/5xx, 503 for NETWORK, and 502 for an answer that is not
+ * one (BAD_RESPONSE, or a redirect, which is never followed), with the platform's status in
+ * detail.httpStatus.
  */
 export class KioskApiError extends LabError {
   /**
    * @param {string} code
-   * @param {number} status  the platform's HTTP status (503 for NETWORK: no answer)
+   * @param {number} status  HTTP error status (see above)
    * @param {string} [message]
    * @param {unknown} [detail]
    */
@@ -155,13 +161,18 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
 
     const data = parseJson(raw);
     if (res.status >= 200 && res.status < 300) {
-      if (data === undefined) throw new KioskApiError('BAD_RESPONSE', res.status, 'the platform answered with something that is not JSON');
+      if (data === undefined) {
+        throw new KioskApiError('BAD_RESPONSE', BAD_ANSWER_STATUS, 'the platform answered with something that is not JSON', {
+          httpStatus: res.status,
+        });
+      }
       return data;
     }
     if (nullOn404 && res.status === 404) return null;
     const error = isPlainObject(data) && isPlainObject(data.error) ? data.error : {};
     const code = typeof error.code === 'string' && error.code ? error.code : `HTTP_${res.status}`;
     const message = typeof error.message === 'string' && error.message ? error.message : `the platform answered HTTP ${res.status}`;
+    if (res.status < 400) throw new KioskApiError(code, BAD_ANSWER_STATUS, message, { httpStatus: res.status });
     throw new KioskApiError(code, res.status, message, error.detail);
   }
 
