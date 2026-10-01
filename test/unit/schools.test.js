@@ -1,4 +1,4 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestCtx, eventsOf } from '../helpers.js';
 import { createSchools, DEFAULT_SCHOOL_SETTINGS } from '../../src/platform/schools.js';
@@ -15,8 +15,15 @@ const code = (c, status) => (err) => {
   return true;
 };
 
+// Every test opens its own in-memory database; close each one when the test ends.
+const opened = [];
+afterEach(() => {
+  for (const ctx of opened.splice(0)) ctx.db.close();
+});
+
 function setup() {
   const ctx = createTestCtx();
+  opened.push(ctx);
   const schools = createSchools(ctx);
   const a = schools.createSchool({ code: 'smk-alpha', name: 'SMK Alpha (fictional)' });
   const b = schools.createSchool({ code: 'smk-beta', name: 'SMK Beta (fictional)' });
@@ -39,6 +46,9 @@ describe('schools', () => {
       assert.ok(!JSON.stringify(dto).includes(schools.schoolCardKey(dto.id)), 'card key leaked in a DTO');
       assert.ok(!('cardKey' in dto) && !('card_key' in dto));
     }
+    // nor in the audit trail or the lab console's event stream
+    const shown = JSON.stringify([ctx.events.since(0), schools.listAudit(a.id), schools.listAudit(b.id)]);
+    assert.ok(!shown.includes(schools.schoolCardKey(a.id)) && !shown.includes(schools.schoolCardKey(b.id)));
   });
 
   test('createSchool generates a separate 32-byte card key per school', () => {
@@ -80,6 +90,11 @@ describe('schools', () => {
     assert.equal(c.settings.topup.minSen, 1000);
     assert.equal(c.settings.topup.maxSen, DEFAULT_SCHOOL_SETTINGS.topup.maxSen);
     assert.equal(c.settings.topup.addWindowDays, 14);
+  });
+
+  test('createSchool with settings null (a JSON body without settings) uses the defaults', () => {
+    const c = schools.createSchool({ code: 'smk-gamma', name: 'Gamma', settings: null });
+    assert.deepEqual(c.settings, DEFAULT_SCHOOL_SETTINGS);
   });
 
   test('getSchool / getSchoolByCode return null when missing; listSchools lists all', () => {
@@ -151,6 +166,26 @@ describe('school settings', () => {
     assert.equal(s.topup.minSen, 500);
     assert.equal(s.topup.maxSen, 9000);
     assert.deepEqual(schools.updateSchoolSettings(a.id, { topup: null }, 'x'), DEFAULT_SCHOOL_SETTINGS);
+  });
+
+  test('null for a value the school never changed keeps the default; it is never stored as null', () => {
+    // regression: { topup: { minSen: null } } used to be stored as is, and merging it over the
+    // defaults deleted minSen, so top-ups would have had no minimum at all
+    const s = schools.updateSchoolSettings(a.id, { topup: { minSen: null } }, 'x');
+    assert.deepEqual(s, DEFAULT_SCHOOL_SETTINGS);
+    assert.deepEqual(schools.schoolSettings(a.id), DEFAULT_SCHOOL_SETTINGS);
+    assert.equal(ctx.db.get('SELECT settings FROM school WHERE id = ?', a.id).settings, '{}');
+    // ...and the minSen <= maxSen rule cannot be dodged by "resetting" maxSen first
+    schools.updateSchoolSettings(a.id, { topup: { maxSen: null } }, 'x');
+    assert.equal(schools.schoolSettings(a.id).topup.maxSen, DEFAULT_SCHOOL_SETTINGS.topup.maxSen);
+    assert.throws(() => schools.updateSchoolSettings(a.id, { topup: { minSen: 9_000_000 } }, 'x'), code('SETTINGS_INVALID'));
+    // the same through createSchool
+    const c = schools.createSchool({ code: 'smk-gamma', name: 'Gamma', settings: { topup: { maxSen: null, minSen: 700 } } });
+    assert.deepEqual(c.settings, { topup: { ...DEFAULT_SCHOOL_SETTINGS.topup, minSen: 700 } });
+    // whatever the patches, every default key is always present in the effective settings
+    for (const id of [a.id, b.id, c.id]) {
+      assert.deepEqual(Object.keys(schools.schoolSettings(id).topup).sort(), Object.keys(DEFAULT_SCHOOL_SETTINGS.topup).sort());
+    }
   });
 
   test('invalid settings are refused with SETTINGS_INVALID and nothing changes', () => {
@@ -331,6 +366,25 @@ describe('cards', () => {
     assert.throws(() => schools.markCardLost({ schoolId: b.id, uid: c1.uid, actor: 'x' }), code('CARD_NOT_FOUND', 404));
     assert.throws(() => schools.setLostListVersion(b.id, c1.id, 1), code('CARD_NOT_FOUND', 404));
     assert.equal(schools.getCard(a.id, c1.id).status, 'ACTIVE');
+    schools.markCardLost({ schoolId: a.id, uid: c1.uid, actor: 'x' });
+    assert.throws(() => schools.markCardFound({ schoolId: b.id, uid: c1.uid, actor: 'x' }), code('CARD_NOT_FOUND', 404));
+    assert.equal(schools.getCard(a.id, c1.id).status, 'LOST', 'another school cannot bring it back');
+  });
+
+  test('a missing school id finds nothing instead of crashing the query', () => {
+    const c1 = schools.issueCard({ schoolId: a.id, memberId: m.id, uid: '04000001', actor: 'x' });
+    for (const missing of [undefined, null, '']) {
+      assert.deepEqual(schools.listMembers(missing), []);
+      assert.deepEqual(schools.listCards(missing), []);
+      assert.deepEqual(schools.listInvites(missing), []);
+      assert.deepEqual(schools.listLinks(missing), []);
+      assert.deepEqual(schools.listAudit(missing), []);
+      assert.equal(schools.getCardByUid(missing, c1.uid), null);
+      assert.throws(() => schools.markCardLost({ schoolId: missing, uid: c1.uid, actor: 'x' }), code('CARD_NOT_FOUND', 404));
+      assert.throws(() => schools.markCardFound({ schoolId: missing, uid: c1.uid, actor: 'x' }), code('CARD_NOT_FOUND', 404));
+      assert.throws(() => schools.issueCard({ schoolId: missing, memberId: m2.id, uid: '04000002', actor: 'x' }), code('SCHOOL_NOT_FOUND', 404));
+    }
+    assert.equal(schools.getCard(a.id, c1.id).status, 'ACTIVE');
   });
 
   test('listMembers and getMember show the member card summary', () => {
@@ -481,7 +535,21 @@ describe('invites and links', () => {
     const listed = schools.listInvites(a.id)[0];
     assert.equal(listed.status, 'USED');
     assert.equal(listed.usedAt, ctx.clock.now());
-    // a used code is invalid, for anyone
+    // a used code is invalid for anyone else
+    assert.throws(() => schools.redeemInvite({ parentId: parent2.id, code: inv.code }), code('INVITE_INVALID', 404));
+  });
+
+  test('the same parent entering a used code again gets the same link back (app retry)', () => {
+    const inv = schools.createInvite({ schoolId: a.id, memberId: ma.id, actor: 'x' });
+    const link = schools.redeemInvite({ parentId: parent.id, code: inv.code });
+    const audits = schools.listAudit(a.id).length;
+    ctx.clock.advance(MINUTE);
+    assert.deepEqual(schools.redeemInvite({ parentId: parent.id, code: inv.code.toLowerCase() }), link);
+    assert.equal(schools.listAudit(a.id).length, audits, 'a retry writes nothing');
+    assert.equal(schools.listLinks(a.id).length, 1);
+    // after the office decides, a retry shows the decision; it never reopens the link
+    schools.decideLink({ schoolId: a.id, linkId: link.id, approve: false, actor: 'x' });
+    assert.equal(schools.redeemInvite({ parentId: parent.id, code: inv.code }).status, 'REJECTED');
     assert.throws(() => schools.redeemInvite({ parentId: parent2.id, code: inv.code }), code('INVITE_INVALID', 404));
   });
 
@@ -557,6 +625,7 @@ describe('invites and links', () => {
     assert.deepEqual(schools.listLinks(a.id).map((l) => l.id), [l1.id, l2.id]);
     assert.deepEqual(schools.listLinks(a.id, { status: 'PENDING' }).map((l) => l.id), [l2.id]);
     assert.deepEqual(schools.listLinks(a.id, { status: 'APPROVED' }).map((l) => l.id), [l1.id]);
+    assert.deepEqual(schools.listLinks(a.id, null).map((l) => l.id), [l1.id, l2.id], 'null options = no filter');
     assert.deepEqual(schools.listLinks(b.id), []);
     const row = schools.listLinks(a.id)[1];
     assert.deepEqual(Object.keys(row).sort(), ['createdAt', 'id', 'memberId', 'memberName', 'parentEmail', 'parentId', 'parentName', 'status']);

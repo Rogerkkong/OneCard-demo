@@ -1,4 +1,4 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestCtx, eventsOf } from '../helpers.js';
 import { ACCOUNT_KINDS, createLedger } from '../../src/platform/ledger.js';
@@ -55,6 +55,9 @@ beforeEach(() => {
   ctx = createTestCtx();
   seed(ctx);
   ledger = createLedger(ctx);
+});
+afterEach(() => {
+  ctx.db.close();
 });
 
 describe('ACCOUNT_KINDS', () => {
@@ -256,12 +259,23 @@ describe('post()', () => {
       },
       'account kind missing': { ...base, lines: [good[0], { ...good[1], kind: undefined }] },
       'memberId not text': { ...base, lines: [good[0], { ...good[1], memberId: 7 }] },
+      // a hole in the array must be refused, not skipped
+      'sparse lines': { ...base, lines: [good[0], , good[1]] },
+      'more than 100 lines': {
+        ...base,
+        lines: [{ kind: 'CASH_RECEIVED', side: 'DR', amountSen: 100 }, ...Array.from({ length: 100 }, () => ({ kind: 'SALES_PAYABLE', side: 'CR', amountSen: 1 }))],
+      },
       'schoolId missing': { ...base, schoolId: undefined },
+      'schoolId not text': { ...base, schoolId: 42 },
       'idemKey missing': { ...base, idemKey: undefined },
       'idemKey empty': { ...base, idemKey: '' },
       'idemKey not text': { ...base, idemKey: 12 },
+      'idemKey too long': { ...base, idemKey: 'K'.repeat(201) },
       'posting kind missing': { ...base, kind: undefined },
+      'posting kind too long': { ...base, kind: 'T'.repeat(65) },
       'ref not text': { ...base, ref: 5 },
+      'ref empty': { ...base, ref: '' },
+      'ref too long': { ...base, ref: 'r'.repeat(201) },
       'memo not text': { ...base, memo: { note: 'x' } },
     };
     for (const [name, args] of Object.entries(cases)) {
@@ -292,6 +306,84 @@ describe('post()', () => {
   test('a long memo is shortened, not refused', () => {
     const { posting } = ledger.post({ schoolId: A, idemKey: 'MEMO', kind: 'TEST', memo: 'x'.repeat(600), lines: paidLines('mem_a1', 100) });
     assert.equal(posting.memo.length, 500);
+  });
+
+  test('accepts up to 100 lines', () => {
+    const lines = [
+      { kind: 'CASH_RECEIVED', side: 'DR', amountSen: 99 },
+      ...Array.from({ length: 99 }, () => ({ kind: 'WAITING_TO_BE_ADDED', memberId: 'mem_a1', side: 'CR', amountSen: 1 })),
+    ];
+    const { posting, created } = ledger.post({ schoolId: A, idemKey: 'HUNDRED', kind: 'TEST', lines });
+    assert.equal(created, true);
+    assert.equal(posting.lines.length, 100);
+    assert.equal(ledger.balance(A, 'WAITING_TO_BE_ADDED', 'mem_a1'), 99);
+  });
+
+  test('every line is checked for shape before any account rule', () => {
+    // line 1 names an unknown account, line 2 is malformed: the malformed request wins
+    rejects(
+      () =>
+        ledger.post({
+          schoolId: A,
+          idemKey: 'ORDER',
+          kind: 'TEST',
+          lines: [
+            { kind: 'PETTY_CASH', side: 'DR', amountSen: 100 },
+            { kind: 'SALES_PAYABLE', side: 'XX', amountSen: 100 },
+          ],
+        }),
+      'POSTING_INVALID',
+    );
+  });
+
+  test('one posting moves at most RM 10,000,000, so balances stay exact (POSTING_INVALID)', () => {
+    const cash = (idemKey, amountSen) => ({
+      schoolId: A,
+      idemKey,
+      kind: 'TEST',
+      lines: [
+        { kind: 'CASH_RECEIVED', side: 'DR', amountSen },
+        { kind: 'SALES_PAYABLE', side: 'CR', amountSen },
+      ],
+    });
+    assert.equal(ledger.post(cash('AT-LIMIT', 1_000_000_000)).created, true);
+    assert.throws(
+      () => ledger.post(cash('OVER', 1_000_000_001)),
+      (err) => err.code === 'POSTING_INVALID' && err.status === 400 && err.detail.maxSen === 1_000_000_000,
+    );
+    // lines that are each a safe integer but sum past 2^53 are refused, not mis-added
+    const max = Number.MAX_SAFE_INTEGER;
+    rejects(
+      () =>
+        ledger.post({
+          schoolId: A,
+          idemKey: 'PAST-2^53',
+          kind: 'TEST',
+          lines: [
+            { kind: 'CASH_RECEIVED', side: 'DR', amountSen: max },
+            { kind: 'CASH_RECEIVED', side: 'DR', amountSen: max },
+            { kind: 'SALES_PAYABLE', side: 'CR', amountSen: max },
+            { kind: 'SALES_PAYABLE', side: 'CR', amountSen: max },
+          ],
+        }),
+      'POSTING_INVALID',
+    );
+    assert.equal(count(ctx, 'posting'), 1);
+    // the books can still be read exactly
+    assert.equal(ledger.balance(A, 'CASH_RECEIVED'), 1_000_000_000);
+    assert.deepEqual(ledger.trialBalance(A).totals, { debitSen: 1_000_000_000, creditSen: 1_000_000_000 });
+  });
+
+  test('the event keeps its own copy of the lines', () => {
+    const { posting } = ledger.post({ schoolId: A, idemKey: 'COPY', kind: 'TEST', lines: paidLines('mem_a1', 100) });
+    posting.lines[0].amountSen = 999;
+    posting.lines.push({ kind: 'SALES_PAYABLE', memberId: null, side: 'CR', amountSen: 1 });
+    assert.deepEqual(eventsOf(ctx, 'ledger.posting')[0].data.lines, [
+      { kind: 'CASH_RECEIVED', memberId: null, side: 'DR', amountSen: 100 },
+      { kind: 'WAITING_TO_BE_ADDED', memberId: 'mem_a1', side: 'CR', amountSen: 100 },
+    ]);
+    // and the stored posting is untouched
+    assert.equal(ledger.getPosting(A, posting.id).lines[0].amountSen, 100);
   });
 });
 
@@ -330,6 +422,14 @@ describe('post() idempotency', () => {
     assert.equal(count(ctx, 'posting'), 1);
     assert.equal(ledger.balance(A, 'WAITING_TO_BE_ADDED', 'mem_a1'), 1000);
     assert.equal(ledger.balance(A, 'WAITING_TO_BE_ADDED', 'mem_a2'), 0);
+  });
+
+  test('a repeat compares only the lines: kind, ref and memo of the repeat are ignored', () => {
+    const first = ledger.post({ schoolId: A, idemKey: 'K', kind: 'TOPUP_PAID', ref: 'ord_1', memo: 'first', lines: paidLines('mem_a1', 1000) });
+    const again = ledger.post({ schoolId: A, idemKey: 'K', kind: 'OTHER', ref: 'ord_2', memo: 'second', lines: paidLines('mem_a1', 1000) });
+    assert.equal(again.created, false);
+    assert.deepEqual(again.posting, first.posting);
+    assert.equal(again.posting.memo, 'first');
   });
 
   test('idemKeys are per school: the same key in two schools makes two postings', () => {
@@ -403,10 +503,22 @@ describe('reverse()', () => {
     assert.equal(ledger.balance(A, 'CASH_RECEIVED'), 0);
   });
 
-  test('a reversal cannot be reversed (CANNOT_REVERSE_REVERSAL)', () => {
+  test('a reversal cannot be reversed (CANNOT_REVERSE_REVERSAL, 409)', () => {
     const { posting: reversal } = ledger.reverse({ schoolId: A, postingId: paid.id, idemKey: 'TOPUP:ord_1:REVERSAL' });
-    rejects(() => ledger.reverse({ schoolId: A, postingId: reversal.id, idemKey: 'UNDO-REVERSAL' }), 'CANNOT_REVERSE_REVERSAL');
+    rejects(() => ledger.reverse({ schoolId: A, postingId: reversal.id, idemKey: 'UNDO-REVERSAL' }), 'CANNOT_REVERSE_REVERSAL', 409);
+    // whatever key is sent: the reversal's own key, or the original's
+    rejects(() => ledger.reverse({ schoolId: A, postingId: reversal.id, idemKey: 'TOPUP:ord_1:REVERSAL' }), 'CANNOT_REVERSE_REVERSAL', 409);
+    rejects(() => ledger.reverse({ schoolId: A, postingId: reversal.id, idemKey: 'TOPUP:ord_1:PAID' }), 'CANNOT_REVERSE_REVERSAL', 409);
     assert.equal(count(ctx, 'posting'), 2);
+    assert.equal(eventsOf(ctx, 'ledger.posting').length, 2);
+  });
+
+  test('an already reversed posting is ALREADY_REVERSED even when the new idemKey is taken', () => {
+    ledger.reverse({ schoolId: A, postingId: paid.id, idemKey: 'TOPUP:ord_1:REVERSAL' });
+    ledger.post({ schoolId: A, idemKey: 'TAKEN', kind: 'TEST', lines: paidLines('mem_a2', 100) });
+    rejects(() => ledger.reverse({ schoolId: A, postingId: paid.id, idemKey: 'TAKEN' }), 'ALREADY_REVERSED', 409);
+    rejects(() => ledger.reverse({ schoolId: A, postingId: paid.id, idemKey: 'TOPUP:ord_1:PAID' }), 'ALREADY_REVERSED', 409);
+    assert.equal(count(ctx, 'posting'), 3);
   });
 
   test('an unknown posting is POSTING_NOT_FOUND (404)', () => {
@@ -471,6 +583,45 @@ describe('balances', () => {
     assert.equal(ledger.balance(A, 'WAITING_TO_BE_ADDED', 'mem_a1'), 500);
     assert.equal(ledger.balance(A, 'SALES_PAYABLE'), 350);
     assert.deepEqual(ledger.memberBalances(A, 'mem_a1'), { walletSen: 1650, waitingSen: 500 });
+  });
+
+  test('follow every posting in the DESIGN.md §2 table, keeping wallet and waiting apart', () => {
+    const m = 'mem_a1';
+    const step = (idemKey, kind, lines) => ledger.post({ schoolId: A, idemKey, kind, ref: idemKey.split(':')[1], lines }).posting;
+    const balances = () => ledger.memberBalances(A, m);
+
+    step('TOPUP:o1:PAID', 'TOPUP_PAID', paidLines(m, 3000));
+    assert.deepEqual(balances(), { walletSen: 0, waitingSen: 3000 });
+    step('TOPUP:o1:ADDED', 'TOPUP_ADDED', addedLines(m, 3000));
+    assert.deepEqual(balances(), { walletSen: 3000, waitingSen: 0 });
+    step('PURCHASE:CANTEEN-01:CANTEEN-01-000001', 'PURCHASE', purchaseLines(m, 530));
+    assert.deepEqual(balances(), { walletSen: 2470, waitingSen: 0 });
+
+    // a subsidy that is never added at the kiosk expires and is reversed
+    const granted = step('SUBSIDY:o2:GRANTED', 'SUBSIDY_GRANTED', [
+      { kind: 'SCHOOL_SUBSIDY', side: 'DR', amountSen: 1000 },
+      { kind: 'WAITING_TO_BE_ADDED', memberId: m, side: 'CR', amountSen: 1000 },
+    ]);
+    assert.deepEqual(balances(), { walletSen: 2470, waitingSen: 1000 });
+    ledger.reverse({ schoolId: A, postingId: granted.id, idemKey: 'SUBSIDY:o2:REVERSAL', memo: 'not added in time' });
+    assert.deepEqual(balances(), { walletSen: 2470, waitingSen: 0 });
+    assert.equal(ledger.balance(A, 'SCHOOL_SUBSIDY'), 0);
+
+    // a replacement card: the mirror balance waits at the kiosk, then lands on the new card
+    step('TRANSFER:o3:CREATED', 'TRANSFER_CREATED', [
+      { kind: 'STUDENT_WALLET', memberId: m, side: 'DR', amountSen: 2470 },
+      { kind: 'WAITING_TO_BE_ADDED', memberId: m, side: 'CR', amountSen: 2470 },
+    ]);
+    assert.deepEqual(balances(), { walletSen: 0, waitingSen: 2470 });
+    step('TRANSFER:o3:ADDED', 'TRANSFER_ADDED', addedLines(m, 2470));
+    assert.deepEqual(balances(), { walletSen: 2470, waitingSen: 0 });
+
+    const tb = ledger.trialBalance(A);
+    assert.equal(tb.balanced, true);
+    const bal = (kind) => tb.accounts.find((a) => a.kind === kind).balanceSen;
+    // what the school holds (cash) plus what it gave (subsidy) = what it owes
+    assert.equal(bal('CASH_RECEIVED') + bal('SCHOOL_SUBSIDY'), bal('STUDENT_WALLET') + bal('WAITING_TO_BE_ADDED') + bal('SALES_PAYABLE'));
+    assert.deepEqual([bal('CASH_RECEIVED'), bal('SALES_PAYABLE')], [3000, 530]);
   });
 
   test('may be negative', () => {
@@ -567,6 +718,34 @@ describe('trialBalance()', () => {
     assert.deepEqual(ledger.trialBalance(B), { accounts: [], totals: { debitSen: 0, creditSen: 0 }, balanced: true });
   });
 
+  test('lists accounts in the order of the accounts table, member accounts by name', () => {
+    // created out of order on purpose; Badrul's wallet is opened before Aina's
+    ledger.post({ schoolId: A, idemKey: 'P1', kind: 'PURCHASE', lines: purchaseLines('mem_a2', 10) });
+    ledger.post({ schoolId: A, idemKey: 'P2', kind: 'SUBSIDY_GRANTED', lines: [
+      { kind: 'SCHOOL_SUBSIDY', side: 'DR', amountSen: 20 },
+      { kind: 'WAITING_TO_BE_ADDED', memberId: 'mem_a1', side: 'CR', amountSen: 20 },
+    ] });
+    ledger.post({ schoolId: A, idemKey: 'P3', kind: 'TOPUP_PAID', lines: paidLines('mem_a1', 30) });
+    ledger.post({ schoolId: A, idemKey: 'P4', kind: 'TOPUP_ADDED', lines: addedLines('mem_a1', 30) });
+    assert.deepEqual(
+      ledger.trialBalance(A).accounts.map((a) => `${a.kind}/${a.memberName ?? ''}`),
+      [
+        'CASH_RECEIVED/',
+        'STUDENT_WALLET/Aina Contoh',
+        'STUDENT_WALLET/Badrul Contoh',
+        'WAITING_TO_BE_ADDED/Aina Contoh',
+        'SCHOOL_SUBSIDY/',
+        'SALES_PAYABLE/',
+      ],
+    );
+  });
+
+  test('a missing school id has no books, rather than a database error', () => {
+    ledger.post({ schoolId: A, idemKey: 'P', kind: 'TOPUP_PAID', lines: paidLines('mem_a1', 700) });
+    assert.deepEqual(ledger.trialBalance(undefined), { accounts: [], totals: { debitSen: 0, creditSen: 0 }, balanced: true });
+    assert.deepEqual(ledger.trialBalance(null).accounts, []);
+  });
+
   test('reports balanced: false when entries were written outside post()', () => {
     const { posting } = ledger.post({ schoolId: A, idemKey: 'P', kind: 'TOPUP_PAID', lines: paidLines('mem_a1', 700) });
     const acc = ledger.account(A, 'CASH_RECEIVED');
@@ -645,6 +824,20 @@ describe('postings()', () => {
 
   test('is empty for a school with no postings', () => {
     assert.deepEqual(ledger.postings(B), []);
+  });
+
+  test('takes options as a route passes them, without database errors', () => {
+    const p = ledger.post({ schoolId: A, idemKey: 'A1', kind: 'TOPUP_PAID', lines: paidLines('mem_a1', 100) }).posting;
+    // null options mean the defaults; an empty memberId (`?memberId=`) means no filter
+    assert.deepEqual(ledger.postings(A, null).map((x) => x.id), [p.id]);
+    assert.deepEqual(ledger.postings(A, { memberId: '' }).map((x) => x.id), [p.id]);
+    assert.deepEqual(ledger.postings(A, { memberId: null, limit: 'lots' }).map((x) => x.id), [p.id]);
+    // a memberId that cannot be an id matches nothing
+    assert.deepEqual(ledger.postings(A, { memberId: 7 }), []);
+    assert.deepEqual(ledger.postings(A, { memberId: ['mem_a1', 'mem_a2'] }), []);
+    // a missing school id has no postings
+    assert.deepEqual(ledger.postings(undefined), []);
+    assert.deepEqual(ledger.postings(null, { memberId: 'mem_a1' }), []);
   });
 });
 

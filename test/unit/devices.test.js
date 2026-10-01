@@ -1,4 +1,4 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestCtx, eventsOf } from '../helpers.js';
 import { createSchools } from '../../src/platform/schools.js';
@@ -19,8 +19,15 @@ const code = (c, status) => (err) => {
 
 const DTO_KEYS = ['code', 'createdAt', 'fwVersion', 'health', 'id', 'lastHeartbeatAt', 'lastSeq', 'location', 'online', 'schoolId', 'status', 'type'];
 
+// Every test opens its own in-memory database; close each one when the test ends.
+const opened = [];
+afterEach(() => {
+  for (const ctx of opened.splice(0)) ctx.db.close();
+});
+
 function setup(ctxOptions) {
   const ctx = createTestCtx(ctxOptions);
+  opened.push(ctx);
   const schools = createSchools(ctx);
   const devices = createDevices(ctx);
   const a = schools.createSchool({ code: 'smk-alpha', name: 'SMK Alpha (fictional)' });
@@ -141,6 +148,9 @@ describe('lookups and tenant isolation', () => {
     assert.equal(devices.getDevice(b.id, canteen.device.id), null);
     assert.equal(devices.getDeviceByCode(b.id, 'CANTEEN-01'), null);
     assert.equal(devices.getDevice(undefined, canteen.device.id), null);
+    // a missing school id lists nothing instead of crashing the query
+    assert.deepEqual(devices.listDevices(undefined), []);
+    assert.deepEqual(devices.listDevices(''), []);
     // same code, different school: each school sees its own
     assert.equal(devices.getDeviceByCode(b.id, 'KIOSK-01').id, kioskB.device.id);
     assert.notEqual(devices.getDeviceByCode(a.id, 'KIOSK-01').id, kioskB.device.id);
@@ -316,6 +326,8 @@ describe('claimSeq', () => {
       assert.throws(() => devices.claimSeq(dev.id, bad), code('SEQ_INVALID'), String(bad));
     }
     assert.throws(() => devices.claimSeq('dev_missing', 1), code('DEVICE_NOT_FOUND', 404));
+    assert.throws(() => devices.claimSeq(undefined, 1), code('DEVICE_NOT_FOUND', 404));
+    assert.throws(() => devices.claimSeq(null, 1), code('DEVICE_NOT_FOUND', 404));
   });
 });
 
@@ -337,21 +349,24 @@ describe('useNonce', () => {
     assert.equal(devices.useNonce(other.id, nonce(1)), false);
   });
 
-  test('remembered for 10 minutes of lab time, then purged', () => {
+  test('remembered for 10 minutes of lab time, the boundary included, then purged', () => {
     assert.equal(NONCE_TTL_MS, 10 * MINUTE);
     devices.useNonce(kiosk.id, nonce(1));
     ctx.clock.advance(10 * MINUTE - 1);
     assert.equal(devices.useNonce(kiosk.id, nonce(1)), false, 'still remembered just before 10 minutes');
     devices.useNonce(kiosk.id, nonce(2)); // stored at 10 min - 1 ms
+    ctx.clock.advance(1);
+    // a request stamped 5 minutes ahead still passes the ±5 min timestamp check now, so this is a replay
+    assert.equal(devices.useNonce(kiosk.id, nonce(1)), false, 'still a replay at exactly 10 minutes');
     assert.equal(nonceRows(), 2);
     ctx.clock.advance(1);
-    assert.equal(devices.useNonce(kiosk.id, nonce(1)), true, 'expired after 10 minutes, so fresh again');
-    // the expired row was purged and replaced; nonce(2) is still there
+    assert.equal(devices.useNonce(kiosk.id, nonce(1)), true, 'fresh again once the 10 minutes are over');
+    // the expired row was purged and stored again; nonce(2) is still there
     assert.equal(nonceRows(), 2);
     assert.equal(devices.useNonce(kiosk.id, nonce(2)), false);
-    ctx.clock.advance(10 * MINUTE);
-    devices.useNonce(kiosk.id, nonce(3));
-    assert.equal(nonceRows(), 1, 'every expired nonce is purged');
+    ctx.clock.advance(10 * MINUTE + 1);
+    devices.useNonce(other.id, nonce(3));
+    assert.equal(nonceRows(), 1, "another device's call purges every expired nonce, of every device");
   });
 
   test('NONCE_INVALID and DEVICE_NOT_FOUND', () => {
@@ -404,6 +419,9 @@ describe('device log', () => {
     assert.deepEqual(devices.listLog(b.id).map((e) => e.code), ['TOPIC_MISMATCH']);
     // another school's device id finds nothing in this school
     assert.deepEqual(devices.listLog(a.id, { deviceId: devB.id }), []);
+    // null options or an empty device filter mean "every device of the school"
+    assert.equal(devices.listLog(a.id, null).length, 3);
+    assert.equal(devices.listLog(a.id, { deviceId: '' }).length, 3);
   });
 
   test('entries without a school (unknown sender) are listed with schoolId null only', () => {

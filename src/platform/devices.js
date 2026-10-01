@@ -15,7 +15,10 @@ import { createSchools } from './schools.js';
 
 export const DEVICE_STATUSES = Object.freeze(['ACTIVE', 'DISABLED', 'MAINTENANCE']);
 export const LOG_LEVELS = Object.freeze(['INFO', 'WARN', 'ERROR']);
-/** How long a kiosk request nonce is remembered (lab time). Longer than the ±5 min timestamp window. */
+/**
+ * How long a kiosk request nonce is remembered (lab time), the boundary included. A request
+ * can pass the ±5 min timestamp check for at most 10 minutes, so its nonce outlives it.
+ */
 export const NONCE_TTL_MS = 10 * MINUTE;
 const DEFAULT_HEARTBEAT_ONLINE_MS = 90_000;
 const NONCE_RE = /^[\x21-\x7e]{16,64}$/; // printable ASCII, no spaces (DESIGN §3: 16-64 chars)
@@ -23,6 +26,8 @@ const MAX_LOCATION = 80;
 const MAX_LOG_MESSAGE = 500;
 
 const isId = (v) => typeof v === 'string' && v.length > 0;
+// SQLite cannot bind undefined; a missing id must match nothing, not crash the query.
+const asId = (v) => (isId(v) ? v : null);
 
 /** Office input may be typed in lower case; stored codes are always upper case. */
 const cleanCode = (code) => (typeof code === 'string' ? code.trim().toUpperCase() : '');
@@ -146,7 +151,7 @@ export function createDevices(ctx) {
     },
 
     listDevices(schoolId) {
-      return db.all('SELECT * FROM device WHERE school_id = ? ORDER BY code', schoolId).map(deviceDto);
+      return db.all('SELECT * FROM device WHERE school_id = ? ORDER BY code', asId(schoolId)).map(deviceDto);
     },
 
     /**
@@ -211,7 +216,7 @@ export function createDevices(ctx) {
      */
     claimSeq(deviceId, seq) {
       if (!Number.isSafeInteger(seq)) throw new LabError('SEQ_INVALID', 'seq must be a whole number');
-      const { changes } = db.run('UPDATE device SET last_seq = ? WHERE id = ? AND last_seq < ?', seq, deviceId, seq);
+      const { changes } = db.run('UPDATE device SET last_seq = ? WHERE id = ? AND last_seq < ?', seq, asId(deviceId), seq);
       if (changes > 0) return 'OK';
       requireDeviceById(deviceId);
       return 'ROLLBACK';
@@ -219,7 +224,8 @@ export function createDevices(ctx) {
 
     /**
      * Replay protection for signed kiosk requests: true the first time a device uses a
-     * nonce, false if it used it in the last 10 minutes of lab time.
+     * nonce, false if it used it in the last 10 minutes of lab time (exactly 10 minutes
+     * later still counts as a replay).
      */
     useNonce(deviceId, nonce) {
       if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) {
@@ -228,8 +234,9 @@ export function createDevices(ctx) {
       return db.tx(() => {
         requireDeviceById(deviceId);
         const now = clock.now();
-        // purge first, so a nonce whose 10 minutes are over counts as fresh again
-        db.run('DELETE FROM request_nonce WHERE expires_at <= ?', now);
+        // Purge first, so a nonce whose 10 minutes are over counts as fresh again. Strictly
+        // older only: a request stamped 5 min ahead still passes the timestamp check at +10 min.
+        db.run('DELETE FROM request_nonce WHERE expires_at < ?', now);
         const { changes } = db.run(
           'INSERT INTO request_nonce (device_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT (device_id, nonce) DO NOTHING',
           deviceId, nonce, now + NONCE_TTL_MS,
@@ -265,13 +272,14 @@ export function createDevices(ctx) {
      * Newest first. `schoolId` null lists entries no school could be found for
      * (the lab console's view of unknown senders).
      */
-    listLog(schoolId, { deviceId, limit = 100 } = {}) {
+    listLog(schoolId, options = {}) {
+      const { deviceId, limit = 100 } = options ?? {};
       const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
       const where = [schoolId == null ? 'l.school_id IS NULL' : 'l.school_id = ?'];
-      const params = schoolId == null ? [] : [schoolId];
+      const params = schoolId == null ? [] : [asId(schoolId)];
       if (deviceId) {
         where.push('l.device_id = ?');
-        params.push(deviceId);
+        params.push(asId(deviceId));
       }
       return db.all(`${LOG_SELECT} WHERE ${where.join(' AND ')} ORDER BY l.id DESC LIMIT ?`, ...params, n).map(logDto);
     },

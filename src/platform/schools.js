@@ -51,7 +51,9 @@ function mergeSettings(base, patch) {
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
     if (value === null) delete out[key];
-    else if (isPlainObject(value) && isPlainObject(out[key])) out[key] = mergeSettings(out[key], value);
+    // Recurse even into a section the base does not have yet. Copying it whole would store
+    // { minSen: null }, and merging that over the defaults would delete the default minSen.
+    else if (isPlainObject(value)) out[key] = mergeSettings(isPlainObject(out[key]) ? out[key] : {}, value);
     else out[key] = structuredClone(value);
   }
   return out;
@@ -125,6 +127,8 @@ function actorText(actor) {
 }
 
 const isId = (v) => typeof v === 'string' && v.length > 0;
+// SQLite cannot bind undefined; a missing id must match nothing, not crash the query.
+const asId = (v) => (isId(v) ? v : null);
 
 /**
  * Schools, staff, members, cards, parents, invites, links and audit.
@@ -223,7 +227,7 @@ export function createSchools(ctx) {
   }
 
   function requireCardByUid(schoolId, uid) {
-    const row = db.get('SELECT * FROM card WHERE school_id = ? AND uid = ?', schoolId, normalizeUid(uid));
+    const row = db.get('SELECT * FROM card WHERE school_id = ? AND uid = ?', asId(schoolId), normalizeUid(uid));
     if (!row) throw new LabError('CARD_NOT_FOUND', 'no such card in this school', 404);
     return row;
   }
@@ -259,7 +263,8 @@ export function createSchools(ctx) {
         throw new LabError('SCHOOL_CODE_INVALID', 'school code must be lower-case letters, digits and dashes (e.g. smk-contoh)');
       }
       const cleanName = text(name, { code: 'NAME_INVALID', field: 'school name' });
-      const stored = settings === undefined ? {} : applySettingsPatch({}, settings);
+      // null (a JSON body with no settings) means the same as leaving them out
+      const stored = settings == null ? {} : applySettingsPatch({}, settings);
       return db.tx(() => {
         if (db.get('SELECT 1 FROM school WHERE code = ?', code)) {
           throw new LabError('SCHOOL_CODE_TAKEN', `school code ${code} is already used`, 409);
@@ -379,11 +384,11 @@ export function createSchools(ctx) {
     listMembers(schoolId) {
       // one query for all cards instead of one per member; first row per member wins
       const cards = new Map();
-      for (const c of db.all(`SELECT member_id, uid, status FROM card WHERE school_id = ? AND member_id IS NOT NULL ${CARD_PREFERENCE}`, schoolId)) {
+      for (const c of db.all(`SELECT member_id, uid, status FROM card WHERE school_id = ? AND member_id IS NOT NULL ${CARD_PREFERENCE}`, asId(schoolId))) {
         if (!cards.has(c.member_id)) cards.set(c.member_id, cardSummary(c));
       }
       return db
-        .all('SELECT * FROM member WHERE school_id = ? ORDER BY member_no, rowid', schoolId)
+        .all('SELECT * FROM member WHERE school_id = ? ORDER BY member_no, rowid', asId(schoolId))
         .map((row) => memberDto(row, cards.get(row.id) ?? null));
     },
 
@@ -438,7 +443,7 @@ export function createSchools(ctx) {
     },
 
     listCards(schoolId) {
-      return db.all('SELECT * FROM card WHERE school_id = ? ORDER BY issued_at, rowid', schoolId).map(cardDto);
+      return db.all('SELECT * FROM card WHERE school_id = ? ORDER BY issued_at, rowid', asId(schoolId)).map(cardDto);
     },
 
     /** ACTIVE -> LOST. The caller blocks the card and stores the block-list version with setLostListVersion(). */
@@ -537,7 +542,7 @@ export function createSchools(ctx) {
         .all(
           `SELECT i.*, m.name AS member_name FROM invite i JOIN member m ON m.id = i.member_id AND m.school_id = i.school_id
            WHERE i.school_id = ? ORDER BY i.created_at DESC, i.rowid DESC`,
-          schoolId,
+          asId(schoolId),
         )
         .map((row) => ({ ...inviteDto(row), memberName: row.member_name, createdAt: row.created_at, usedAt: row.used_at ?? null }));
     },
@@ -545,7 +550,8 @@ export function createSchools(ctx) {
     /**
      * A parent enters an invitation code: the invite is used up and a PENDING link
      * waits for the school office. A link the office REJECTED earlier is opened again,
-     * because the school chose to hand out a new code.
+     * because the school chose to hand out a new code. The same parent entering a code
+     * they already used gets their link back (a phone app retries after a lost reply).
      */
     redeemInvite({ parentId, code } = {}) {
       return db.tx(() => {
@@ -554,6 +560,13 @@ export function createSchools(ctx) {
         // people type codes with spaces, dashes or in lower case
         const clean = String(code ?? '').replace(/[\s-]/g, '').toUpperCase();
         const invite = clean ? db.get('SELECT * FROM invite WHERE code = ?', clean) : undefined;
+        if (invite && invite.status === 'USED' && invite.used_by === parentId) {
+          const mine = db.get(
+            'SELECT id FROM parent_link WHERE school_id = ? AND parent_id = ? AND member_id = ?',
+            invite.school_id, parentId, invite.member_id,
+          );
+          if (mine) return getLink(invite.school_id, mine.id);
+        }
         if (!invite || invite.status !== 'OPEN') throw new LabError('INVITE_INVALID', 'this invitation code is not valid or was already used', 404);
         const schoolId = invite.school_id;
         const now = clock.now();
@@ -583,9 +596,10 @@ export function createSchools(ctx) {
     // ---- links -------------------------------------------------------------
 
     /** Oldest first, so the office works through the queue in order. */
-    listLinks(schoolId, { status } = {}) {
-      if (status) return db.all(`${LINK_SELECT} WHERE l.school_id = ? AND l.status = ? ORDER BY l.created_at, l.rowid`, schoolId, status).map(linkDto);
-      return db.all(`${LINK_SELECT} WHERE l.school_id = ? ORDER BY l.created_at, l.rowid`, schoolId).map(linkDto);
+    listLinks(schoolId, options = {}) {
+      const { status } = options ?? {};
+      if (status) return db.all(`${LINK_SELECT} WHERE l.school_id = ? AND l.status = ? ORDER BY l.created_at, l.rowid`, asId(schoolId), String(status)).map(linkDto);
+      return db.all(`${LINK_SELECT} WHERE l.school_id = ? ORDER BY l.created_at, l.rowid`, asId(schoolId)).map(linkDto);
     },
 
     /** The office approves or rejects a PENDING link. A decision is final. */
@@ -674,7 +688,7 @@ export function createSchools(ctx) {
     listAudit(schoolId, limit = 100) {
       const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
       return db
-        .all('SELECT * FROM audit WHERE school_id = ? ORDER BY id DESC LIMIT ?', schoolId, n)
+        .all('SELECT * FROM audit WHERE school_id = ? ORDER BY id DESC LIMIT ?', asId(schoolId), n)
         .map((r) => ({ id: r.id, schoolId: r.school_id, actor: r.actor, action: r.action, detail: r.detail == null ? null : JSON.parse(r.detail), at: r.at }));
     },
   };

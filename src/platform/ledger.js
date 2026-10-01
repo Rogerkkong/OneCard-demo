@@ -16,14 +16,20 @@ export const ACCOUNT_KINDS = Object.freeze({
   SALES_PAYABLE: Object.freeze({ normal: 'CR', perMember: false }),
 });
 
-// Trial balance lists accounts in the order of the table above (assets and
-// expenses first, then liabilities), which reads like a paper ledger.
+// Trial balance lists accounts in the order of the table above (the order of the
+// accounts table in DESIGN.md §2), and a kind's member accounts by member name, so
+// the school office sees the same layout every time.
 const KIND_ORDER = Object.keys(ACCOUNT_KINDS);
 const SIDES = new Set(['DR', 'CR']);
 const MAX_LINES = 100;
 const MAX_KEY = 200; // idemKey, ref and ids
 const MAX_KIND = 64;
 const MAX_MEMO = 500;
+// Sums are read back as JS numbers, which are exact only up to 2^53 − 1 (node:sqlite
+// refuses to return anything larger). One posting moves at most RM 10,000,000, so
+// every balance and trial-balance total stays exact for millions of postings; a
+// school wallet never moves anything near that, so a bigger amount is a broken caller.
+const MAX_POSTING_SEN = 1_000_000_000;
 /** Kind given to the posting that reverse() writes. */
 const REVERSAL_KIND = 'REVERSAL';
 
@@ -49,14 +55,17 @@ function checkAccountRule(kind, memberId) {
 }
 
 /**
- * Validates posting lines: shape first (POSTING_INVALID), then the account rules
- * (ACCOUNT_INVALID), then DR = CR (POSTING_UNBALANCED). Nothing is written yet.
+ * Validates posting lines: the shape of every line first (POSTING_INVALID), then the
+ * account rules (ACCOUNT_INVALID), then the size limit (POSTING_INVALID) and DR = CR
+ * (POSTING_UNBALANCED). Nothing is written yet.
  */
 function normaliseLines(lines) {
   if (!Array.isArray(lines) || lines.length < 2 || lines.length > MAX_LINES) {
     throw postingInvalid(`a posting needs 2 to ${MAX_LINES} lines`);
   }
-  const out = lines.map((line, i) => {
+  // An index loop, not map(): map() skips the holes of a sparse array.
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const at = `line ${i + 1}`;
     if (!line || typeof line !== 'object' || Array.isArray(line)) throw postingInvalid(`${at} is not an object`);
     if (!SIDES.has(line.side)) throw postingInvalid(`${at}: side must be DR or CR`);
@@ -65,16 +74,23 @@ function normaliseLines(lines) {
     }
     if (typeof line.kind !== 'string' || line.kind.length === 0) throw postingInvalid(`${at}: account kind is missing`);
     if (line.memberId != null && typeof line.memberId !== 'string') throw postingInvalid(`${at}: memberId must be a string`);
-    const memberId = checkAccountRule(line.kind, line.memberId);
-    return { kind: line.kind, memberId, side: line.side, amountSen: line.amountSen };
-  });
+  }
+  const out = lines.map((line) => ({
+    kind: line.kind,
+    memberId: checkAccountRule(line.kind, line.memberId),
+    side: line.side,
+    amountSen: line.amountSen,
+  }));
   let debitSen = 0;
   let creditSen = 0;
   for (const l of out) {
     if (l.side === 'DR') debitSen += l.amountSen;
     else creditSen += l.amountSen;
   }
-  if (!Number.isSafeInteger(debitSen) || !Number.isSafeInteger(creditSen)) throw postingInvalid('posting total is too large');
+  // Every term is positive, so a sum that lost precision past 2^53 is still over the limit.
+  if (debitSen > MAX_POSTING_SEN || creditSen > MAX_POSTING_SEN) {
+    throw postingInvalid(`a posting moves at most ${MAX_POSTING_SEN} sen`, { debitSen, creditSen, maxSen: MAX_POSTING_SEN });
+  }
   if (debitSen !== creditSen) {
     throw new LabError('POSTING_UNBALANCED', `debits (${debitSen} sen) do not equal credits (${creditSen} sen)`, 400, { debitSen, creditSen });
   }
@@ -164,7 +180,8 @@ export function createLedger(ctx) {
         ref: posting.ref,
         reversalOf: posting.reversalOf,
         amountSen,
-        lines: posting.lines,
+        // Copies: the bus keeps events for the console, and the caller owns the returned DTO.
+        lines: posting.lines.map((l) => ({ ...l })),
       },
       schoolCode(posting.schoolId),
     );
@@ -196,7 +213,8 @@ export function createLedger(ctx) {
   /**
    * Write one balanced posting, once per (schoolId, idemKey).
    * A repeat with the same lines returns the existing posting (`created: false`);
-   * with different lines it is IDEMPOTENCY_CONFLICT (409).
+   * with different lines it is IDEMPOTENCY_CONFLICT (409). Other codes: POSTING_INVALID
+   * (bad shape, or more than RM 10,000,000 in one posting), ACCOUNT_INVALID, POSTING_UNBALANCED.
    * @param {{ schoolId: string, idemKey: string, kind: string, ref?: string|null, memo?: string|null,
    *   lines: Array<{ kind: string, memberId?: string|null, side: 'DR'|'CR', amountSen: number }> }} args
    * @returns {{ posting: object, created: boolean }}
@@ -253,17 +271,21 @@ export function createLedger(ctx) {
     const result = db.tx(() => {
       const original = db.get('SELECT * FROM posting WHERE school_id = ? AND id = ?', schoolId, postingId);
       if (!original) throw new LabError('POSTING_NOT_FOUND', 'no such posting', 404, { postingId });
-      const sameKey = db.get('SELECT * FROM posting WHERE school_id = ? AND idem_key = ?', schoolId, idemKey);
-      if (sameKey) {
-        if (sameKey.reversal_of === original.id) return { posting: loadPosting(sameKey), created: false };
-        throw new LabError('IDEMPOTENCY_CONFLICT', `idemKey ${idemKey} was already used for a different posting`, 409, { postingId: sameKey.id });
-      }
+      // The facts about the posting come before the generic key check, so the caller
+      // learns the real reason whatever key it happened to send.
       if (original.reversal_of !== null) {
         throw new LabError('CANNOT_REVERSE_REVERSAL', 'a reversal cannot itself be reversed; post a new entry instead', 409, { postingId });
       }
-      const earlier = db.get('SELECT id, idem_key FROM posting WHERE school_id = ? AND reversal_of = ?', schoolId, original.id);
+      // A posting is reversed at most once, so a repeat of the same call is exactly
+      // "the earlier reversal carries this idemKey".
+      const earlier = db.get('SELECT * FROM posting WHERE school_id = ? AND reversal_of = ?', schoolId, original.id);
       if (earlier) {
+        if (earlier.idem_key === idemKey) return { posting: loadPosting(earlier), created: false };
         throw new LabError('ALREADY_REVERSED', 'this posting was already reversed', 409, { postingId, reversalId: earlier.id, idemKey: earlier.idem_key });
+      }
+      const sameKey = db.get('SELECT id FROM posting WHERE school_id = ? AND idem_key = ?', schoolId, idemKey);
+      if (sameKey) {
+        throw new LabError('IDEMPOTENCY_CONFLICT', `idemKey ${idemKey} was already used for a different posting`, 409, { postingId: sameKey.id });
       }
       const entries = db.all(
         `SELECT e.account_id, e.side, e.amount_sen FROM entry e JOIN account a ON a.id = e.account_id
@@ -315,6 +337,8 @@ export function createLedger(ctx) {
    * only if the books were written outside post()/reverse().
    */
   function trialBalance(schoolId) {
+    // Like getPosting(): no school, no books (SQLite would refuse to bind a non-text id).
+    if (typeof schoolId !== 'string') return { accounts: [], totals: { debitSen: 0, creditSen: 0 }, balanced: true };
     const rows = db.all(
       `SELECT a.id, a.kind, a.member_id, m.name AS member_name, ${SUMS}
        FROM account a
@@ -352,19 +376,25 @@ export function createLedger(ctx) {
   /**
    * Newest first (lab-clock time, then the order they were written).
    * `memberId` keeps only postings that touch one of that member's accounts.
+   * @param {string} schoolId
+   * @param {{ limit?: number|string, memberId?: string }} [options] limit 1–1000, default 50
    */
-  function postings(schoolId, { limit = 50, memberId } = {}) {
+  function postings(schoolId, options = {}) {
+    if (typeof schoolId !== 'string') return [];
+    const { limit = 50, memberId } = options ?? {};
     // Routes may pass the query string's text ('20'); anything unusable falls back to 50.
     const asked = Number(limit);
     const n = Number.isSafeInteger(asked) && asked > 0 ? Math.min(asked, 1000) : 50;
-    const rows = memberId
+    // Ids are text; String() keeps an odd value (a number, a repeated query key) bindable.
+    const member = memberId === undefined || memberId === null || memberId === '' ? null : String(memberId);
+    const rows = member
       ? db.all(
           `SELECT p.* FROM posting p
            WHERE p.school_id = ? AND EXISTS (
              SELECT 1 FROM entry e JOIN account a ON a.id = e.account_id
              WHERE e.posting_id = p.id AND a.school_id = p.school_id AND a.member_id = ?)
            ORDER BY p.created_at DESC, p.rowid DESC LIMIT ?`,
-          schoolId, memberId, n,
+          schoolId, member, n,
         )
       : db.all('SELECT p.* FROM posting p WHERE p.school_id = ? ORDER BY p.created_at DESC, p.rowid DESC LIMIT ?', schoolId, n);
     if (rows.length === 0) return [];
