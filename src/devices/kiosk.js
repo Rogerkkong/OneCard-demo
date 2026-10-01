@@ -88,7 +88,10 @@ export class TopupKiosk extends Terminal {
    *   reconfirmed: Array<{ orderId: string, kioskTxn: string, result: string }>,
    *   interrupted?: { orderId: string, amountSen: number, kioskTxn: string, committed: boolean } }>}
    *   added: written to the card on this tap (confirmed: the platform has the report);
-   *   interrupted: the order a power cut hit (committed: the money did reach the card)
+   *   interrupted: the order a power cut hit (committed: the money did reach the card);
+   *   reason (refusals, for the lab console): OFFLINE (no broker link), PLATFORM_UNREACHABLE
+   *   (the kiosk API failed; `error` has its code), CARD_UNREADABLE, WRONG_SCHOOL,
+   *   CARD_NOT_ACTIVE, CARD_NOT_FOUND, POWER_CUT
    * @throws {LabError} FAULT_INVALID for an unknown fault
    */
   async tap(card, { fault } = {}) {
@@ -102,7 +105,7 @@ export class TopupKiosk extends Terminal {
     const added = [];
     const reconfirmed = [];
     let readback = null;
-    const refuse = (reason, text) => ({ ...this._refuse(reason, text, 'error'), added, readback, reconfirmed });
+    const refuse = (reason, text, extra = {}) => ({ ...this._refuse(reason, text, 'error'), ...extra, added, readback, reconfirmed });
 
     if (!this.connected) return refuse('OFFLINE', SCREEN_NO_PLATFORM);
     let memory;
@@ -138,7 +141,7 @@ export class TopupKiosk extends Terminal {
         balanceAfterOnCardSen: memory.balanceSen,
         kioskTxn: write.kioskTxn,
       });
-      if (outcome === UNREACHABLE) return refuse('OFFLINE', SCREEN_NO_PLATFORM);
+      if (outcome === UNREACHABLE) return refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM);
       reconfirmed.push({ orderId: write.orderId, kioskTxn: write.kioskTxn, result: outcome });
     }
 
@@ -149,7 +152,7 @@ export class TopupKiosk extends Terminal {
       if (!(err instanceof LabError)) throw err;
       // A lost or retired card (CARD_NOT_ACTIVE), or one the platform does not know.
       if (err.code === 'CARD_NOT_ACTIVE' || err.code === 'CARD_NOT_FOUND') return refuse(err.code, SCREEN_CARD_UNAVAILABLE);
-      return refuse('OFFLINE', SCREEN_NO_PLATFORM);
+      return refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM, { error: err.code });
     }
 
     let balanceSen = memory.balanceSen;
@@ -321,7 +324,7 @@ export class TopupKiosk extends Terminal {
       try {
         answer = await this.#api.packs();
       } catch (err) {
-        if (err instanceof LabError) return this._refuse(err.code, SCREEN_NO_PLATFORM, 'error');
+        if (err instanceof LabError) return { ...this._refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM, 'error'), error: err.code };
         throw err;
       }
       try {
@@ -357,7 +360,7 @@ export class TopupKiosk extends Terminal {
         answer = await this.#api.receipts({ token: adminCard.token, receipts });
       } catch (err) {
         for (const r of receipts) adminCard.addReceipt(r);
-        if (err instanceof LabError) return this._refuse(err.code, SCREEN_NO_PLATFORM, 'error');
+        if (err instanceof LabError) return { ...this._refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM, 'error'), error: err.code };
         throw err;
       }
       const recorded = Number.isSafeInteger(answer?.recorded) ? answer.recorded : receipts.length;

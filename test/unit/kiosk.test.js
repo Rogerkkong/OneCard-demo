@@ -328,9 +328,9 @@ describe('refusals', () => {
     const before = card.memory;
     platform.failNext('pending', { before: noAnswer() });
     platform.failNext('pending', { before: new KioskApiError('SERVER_DOWN', 503, 'the server is switched off') });
-    for (const reason of ['OFFLINE', 'OFFLINE']) {
+    for (const error of ['NETWORK', 'SERVER_DOWN']) {
       const result = await kiosk.tap(card);
-      assert.deepEqual([result.ok, result.reason, result.screen, result.added], [false, reason, SCREEN_NO_PLATFORM, []]);
+      assert.deepEqual([result.ok, result.reason, result.error, result.screen, result.added], [false, 'PLATFORM_UNREACHABLE', error, SCREEN_NO_PLATFORM, []]);
     }
     assert.deepEqual(card.memory, before);
     assert.equal((await kiosk.tap(card)).added.length, 1); // back again
@@ -460,7 +460,7 @@ describe('faults and lost reports', () => {
     platform.failNext('lookup', { before: noAnswer() });
     const asked = platform.called('pending').length;
     const blocked = await kiosk.tap(card);
-    assert.deepEqual([blocked.ok, blocked.reason, blocked.reconfirmed], [false, 'OFFLINE', []]);
+    assert.deepEqual([blocked.ok, blocked.reason, blocked.reconfirmed], [false, 'PLATFORM_UNREACHABLE', []]);
     assert.equal(platform.called('pending').length, asked); // it does not go on without reporting
     const next = await kiosk.tap(card);
     assert.deepEqual(next.reconfirmed, [{ orderId, kioskTxn: K(1), result: 'CONFIRMED' }]);
@@ -536,7 +536,7 @@ describe('admin card at the kiosk', () => {
     assert.deepEqual(await kiosk.loadAdminCard(theirs), { ok: false, screen: SCREEN_CARD_UNAVAILABLE, reason: 'WRONG_SCHOOL' });
     assert.equal(theirs.token, 0);
     platform.failNext('packs', { before: noAnswer() });
-    assert.deepEqual(await kiosk.loadAdminCard(adminCard), { ok: false, screen: SCREEN_NO_PLATFORM, reason: 'NETWORK' });
+    assert.deepEqual(await kiosk.loadAdminCard(adminCard), { ok: false, screen: SCREEN_NO_PLATFORM, reason: 'PLATFORM_UNREACHABLE', error: 'NETWORK' });
     platform.api.packs = async () => ({ token: 9, school: B, packs: [] }); // the answer is for another school
     assert.equal((await kiosk.loadAdminCard(adminCard)).reason, 'PACKS_INVALID');
     assert.equal(adminCard.token, 1);
@@ -555,7 +555,7 @@ describe('admin card at the kiosk', () => {
     assert.deepEqual(results.map((r) => [r.device, r.kind, r.result, r.appliedVersion]), [['CANTEEN-02', 'prices', 'APPLIED', 2]]);
 
     platform.failNext('receipts', { before: noAnswer() });
-    assert.deepEqual(await kiosk.uploadAdminCardReceipts(adminCard), { ok: false, screen: SCREEN_NO_PLATFORM, reason: 'NETWORK' });
+    assert.deepEqual(await kiosk.uploadAdminCardReceipts(adminCard), { ok: false, screen: SCREEN_NO_PLATFORM, reason: 'PLATFORM_UNREACHABLE', error: 'NETWORK' });
     assert.deepEqual(adminCard.memory.receipts, results); // back on the card
     const uploaded = await kiosk.uploadAdminCardReceipts(adminCard);
     assert.deepEqual(uploaded, { ok: true, screen: 'Admin card receipts uploaded · 1', uploaded: 1, recorded: 1 });
