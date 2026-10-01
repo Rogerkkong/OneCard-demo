@@ -59,6 +59,7 @@ const CONNECT_WAIT_MS = 15_000; // boot: plugged machines must be on the broker 
 const VERDICT_WAIT_MS = 3000; // a fault waits this long for the platform's answer
 const THROWAWAY_WAIT_MS = 2000; // cross-device-publish: how long the copied login may stay on
 const RECONNECT_WAIT_MS = 15_000; // machines retry 1 s doubling to 10 s
+const LOGIN_GATE_MS = 3000; // a machine login waits this long for the platform to listen (machines give up after 5 s)
 const COPY_SUFFIX_RE = /^(.*?)-copy(\d*)$/i;
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -321,13 +322,24 @@ export function createLab(options = {}) {
 
   // ---- the virtual cloud server: broker and platform link ------------------------------
 
+  /**
+   * A machine may log in only once the platform listens on this broker again. A fresh broker
+   * acknowledges what a machine uploads and drops it when nobody has subscribed yet, so a
+   * machine that came back before the platform would lose its journal. The login waits a moment
+   * (the platform reconnects within milliseconds), else it is refused and the machine retries.
+   */
+  async function machineLogin(username) {
+    if (!platform.mqttStatus().subscribed && !(await waitUntil(() => platform.mqttStatus().subscribed, LOGIN_GATE_MS))) return null;
+    return platform.resolveBrokerDevice(username);
+  }
+
   async function openBroker() {
     const tls = config.tls ? { key: config.tls.key, cert: config.tls.cert, port: tlsPort } : undefined;
     const started = await startBroker(ctx, {
       host: config.host,
       port: brokerPort,
       tls,
-      resolveDevice: (username) => platform.resolveBrokerDevice(username),
+      resolveDevice: machineLogin,
       platformPassword: ctx.settings.platformBrokerPassword,
       viewer: ctx.settings.viewer,
     });
@@ -970,7 +982,17 @@ export function createLab(options = {}) {
     clock.advance(step);
     emit('lab.clock', { advancedMs: step, now: clock.iso(), kl: formatKL(clock.now()) });
     // machines would have sent heartbeats all along; one now keeps them "online" at the new time
-    await Promise.allSettled([...terminals.values()].filter((m) => m.connected).map((m) => m.heartbeat()));
+    const mark = events.lastSeq();
+    const connected = [...terminals.values()].filter((m) => m.connected);
+    const sent = await Promise.all(connected.map((m) => m.heartbeat().catch(() => false)));
+    const reporting = connected.filter((m, i) => sent[i]);
+    // the broker acknowledges a heartbeat before the platform has it: wait (briefly) for intake
+    await waitUntil(() => {
+      const heard = new Set(
+        events.since(mark).filter((e) => e.type.startsWith('intake.') && e.data?.type === 'device.heartbeat').map((e) => `${e.school}/${e.data.device}`),
+      );
+      return reporting.every((m) => heard.has(`${m.schoolCode}/${m.deviceCode}`));
+    }, 2000);
     const jobs = serverUp ? platform.runJobs() : null;
     return { clock: clockView(), jobs };
   }
@@ -1014,19 +1036,20 @@ export function createLab(options = {}) {
   }
 
   /**
-   * Restart only the broker: its retained messages are lost, and the platform, which
-   * reconnects by itself, publishes them again. Resolves once the platform is back on.
+   * Restart only the broker: its retained messages are lost, and the platform, back on the new
+   * broker, publishes them again. The platform leaves first and reconnects at once (not on its
+   * own retry a second later), so no machine uploads to a broker nobody listens on.
    */
   function restartBroker() {
     return exclusive(async () => {
       requireRunning();
       requireServerUp();
+      await platform.disconnectMqtt();
       await closeBroker('restart');
-      const mark = events.lastSeq();
       await openBroker();
-      const back = await nextEvent((e) => e.type === 'mqtt.connect' && e.data?.username === 'platform', mark, 10_000);
-      emit('lab.action', { action: 'broker-restart', platformReconnected: Boolean(back) });
-      return { platformReconnected: Boolean(back), broker: brokerStatus() };
+      await platform.connectMqtt(broker.url);
+      emit('lab.action', { action: 'broker-restart' });
+      return { platformReconnected: platform.mqttStatus().subscribed, broker: brokerStatus() };
     });
   }
 

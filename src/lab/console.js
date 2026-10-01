@@ -217,7 +217,7 @@ export function createConsole(lab) {
           { title: 'VERSIONS' }, { title: 'UNSENT' }, { title: 'LOCATION' }],
         rows,
       ),
-      `${plural(rows.length, 'machine')} · versions: P prices, S settings, B block list · connect <school>/<DEVICE>`,
+      `${plural(rows.length, 'machine')}. VERSIONS: P prices, S settings, B block list. Log in: connect <school>/<DEVICE>`,
     ];
   }
 
@@ -275,7 +275,7 @@ export function createConsole(lab) {
           { title: 'ONLINE' }, { title: 'SALES TODAY' }, { title: 'WAITING' }, { title: 'DIFFS' }],
         rows,
       ),
-      `${plural(rows.length, 'school')} on one platform · ONLINE: machines heard from in the last 90 s`,
+      `${plural(rows.length, 'school')} on one platform. ONLINE: machines heard from in the last 90 s.`,
     ];
   }
 
@@ -330,7 +330,8 @@ export function createConsole(lab) {
       ];
     }
     return [
-      `Cloud server switched on: broker up at ${result.broker.url}, platform connected, settings republished.`,
+      `Cloud server switched on: broker up at ${result.broker.url}, platform connected.`,
+      'The platform sent every machine its prices, settings and block list again.',
       'Machines with a cable reconnect by themselves within a few seconds and upload what they kept.',
     ];
   }
@@ -340,8 +341,8 @@ export function createConsole(lab) {
     return [
       'MQTT broker restarted: its retained messages were lost.',
       result.platformReconnected
-        ? 'The platform reconnected and is publishing every retained setting again.'
-        : 'The platform has not reconnected yet; it keeps trying every second.',
+        ? 'The platform reconnected at once and published every retained setting again.'
+        : 'The platform is not listening on the new broker yet; it keeps trying every second.',
       'Machines with a cable reconnect by themselves within a few seconds.',
     ];
   }
@@ -569,7 +570,7 @@ export function createConsole(lab) {
 
   async function upload(key) {
     const result = await lab.upload(codes(key));
-    if (!result.connected) return `% Not connected to the broker: ${plural(result.unsent, 'record')} wait in the journal.`;
+    if (!result.connected) return `% Not connected to the broker: ${plural(result.unsent, 'record')} ${result.unsent === 1 ? 'waits' : 'wait'} in the journal.`;
     if (result.records === 0) return result.unsent === 0 ? 'Nothing to upload: every record is sent.' : `% The upload did not go through: ${result.unsent} unsent.`;
     return `Uploaded ${plural(result.records, 'record')} in ${plural(result.batches, 'batch', 'batches')}; ${result.unsent} unsent.`;
   }
@@ -578,7 +579,7 @@ export function createConsole(lab) {
     const file = lab.exportUsb(codes(key));
     return [
       `Journal copied to USB: ${plural(file.count, 'record')}, file ${file.format} signed by ${file.device}.`,
-      'Import it in the school office (reconciliation, import journal); the web lab console downloads the file.',
+      'Import the file in the school office (import journal); the web lab console downloads it.',
     ];
   }
 
@@ -625,7 +626,7 @@ export function createConsole(lab) {
     if (args.length === 0) return '% Incomplete command. Usage: tap <uid> [fault]';
     const fault = args[1]?.toLowerCase();
     if (args.length > 2 || (fault !== undefined && !KIOSK_FAULTS.includes(fault))) {
-      return `% Invalid input. Usage: tap <uid> [${KIOSK_FAULTS.join(' | ')}]`;
+      return ['% Invalid input. Usage: tap <uid> [fault]', `  fault: ${KIOSK_FAULTS.join(', ')}`];
     }
     const result = await lab.tap({ ...codes(key), uid: args[0], ...(fault ? { fault } : {}) });
     const lines = [`Screen: ${result.screen}`];

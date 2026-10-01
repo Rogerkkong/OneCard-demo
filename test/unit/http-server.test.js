@@ -1,6 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
+import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -397,12 +399,17 @@ describe('http server: errors and bodies', () => {
     assert.equal(evil.status, 403);
     assert.equal(JSON.parse(evil.text).error.code, 'CROSS_ORIGIN');
     assert.equal(evil.headers['set-cookie'], undefined);
-    const sameSiteOtherPort = await raw(url, { method: 'POST', path: '/api/operator/login', headers: { origin: 'http://127.0.0.1:1', 'content-type': 'application/json' }, body: '{}' });
-    assert.equal(sameSiteOtherPort.status, 403);
-    const nullOrigin = await raw(url, { method: 'POST', path: '/api/operator/login', headers: { origin: 'null', 'content-type': 'application/json' }, body: '{}' });
-    assert.equal(nullOrigin.status, 403);
-    const same = await raw(url, { method: 'POST', path: '/api/operator/login', headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json' }, body: '{}' });
-    assert.equal(same.status, 200);
+    const post = (headers) => raw(url, { method: 'POST', path: '/api/operator/login', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+    assert.equal((await post({ origin: 'http://127.0.0.1:1' })).status, 403, 'another port of the same host');
+    // what browsers say themselves: another site, or the same site on another port
+    assert.equal((await post({ 'sec-fetch-site': 'cross-site', origin: 'http://evil.example' })).status, 403);
+    assert.equal((await post({ 'sec-fetch-site': 'same-site', origin: 'http://127.0.0.1:1' })).status, 403);
+    assert.equal((await post({ 'sec-fetch-site': 'same-site' })).status, 403, 'a body-less beacon from a sibling port');
+    assert.equal((await post({ origin: `http://127.0.0.1:${port}` })).status, 200);
+    assert.equal((await post({ 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}` })).status, 200);
+    // with our Referrer-Policy (no-referrer) a browser's own form post says Origin: null
+    assert.equal((await post({ 'sec-fetch-site': 'same-origin', origin: 'null' })).status, 200);
+    assert.equal((await post({ origin: 'null' })).status, 200, 'no origin to judge');
     // reading is not changing anything
     const read = await raw(url, { path: '/api/admin/staff-options', headers: { origin: 'http://evil.example' } });
     assert.equal(read.status, 200);
@@ -587,6 +594,36 @@ describe('http server: the lab event stream (server-sent events)', () => {
     assert.equal(live, 1);
     stream.close();
     await waitFor(() => live === 0, { message: 'the subscription to end' });
+  });
+
+  test('a client that stops reading is dropped instead of buffered for ever', async (t) => {
+    const { url, ctx } = await startLab(t);
+    const bus = ctx.events;
+    let live = 0;
+    ctx.events = {
+      ...bus,
+      subscribe(fn) {
+        live += 1;
+        const off = bus.subscribe(fn);
+        return () => {
+          live -= 1;
+          off();
+        };
+      },
+    };
+    const { hostname, port } = new URL(url);
+    const socket = net.connect(Number(port), hostname);
+    t.after(() => socket.destroy());
+    await once(socket, 'connect');
+    socket.write('GET /api/lab/events HTTP/1.1\r\nHost: lab\r\n\r\n');
+    socket.pause(); // never reads a byte
+    await waitFor(() => live === 1, { message: 'the stream to start' });
+    const big = 'x'.repeat(100_000);
+    for (let i = 0; i < 400 && live === 1; i++) {
+      bus.emit('lab.action', { big }, null);
+      await new Promise((r) => setImmediate(r));
+    }
+    await waitFor(() => live === 0, { message: 'the lagging stream to be dropped' });
   });
 
   test('a lab that replaces its event bus ends the stream, so the browser reconnects to the new one', async (t) => {

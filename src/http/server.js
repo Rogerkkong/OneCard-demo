@@ -37,7 +37,7 @@ export const EVENTS_PATH = '/api/lab/events';
 const AUTHS = new Set(['none', 'operator', 'staff', 'parent', 'kiosk']);
 const BODY_KINDS = new Set(['json', 'form', 'none']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
-/** Methods that change something: a cross-origin page must not send them with our cookies. */
+/** Methods that change nothing; any other must not come from a page of another origin (checkOrigin). */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const KIOSK_CLOCK_SKEW_MS = 5 * MINUTE; // DESIGN §3: more than 5 minutes from the lab clock is refused
 const NONCE_RE = /^[\x21-\x7e]{16,64}$/; // printable ASCII, no spaces (DESIGN §3: 16-64 chars)
@@ -315,6 +315,13 @@ const PAGE_TITLES = {
   503: 'Server unavailable',
 };
 
+/** 'no such page' -> 'No such page.': LabError messages are lower case, a page shows a sentence. */
+function sentence(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return '';
+  return `${t[0].toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? '' : '.'}`;
+}
+
 /** A plain error page for the routes people open in a browser (no scripts: the CSP forbids inline ones anyway). */
 function errorPage(status, code, message) {
   const title = PAGE_TITLES[status] ?? STATUS_CODES[status] ?? 'Error';
@@ -338,7 +345,7 @@ function errorPage(status, code, message) {
 <body>
 <main>
   <h1>${escapeHtml(title)}</h1>
-  <p>${escapeHtml(message)}</p>
+  <p>${escapeHtml(sentence(message))}</p>
   <p class="code">${status} · ${escapeHtml(code)}</p>
   <p><a href="/">OneCard Lab home</a></p>
 </main>
@@ -356,7 +363,7 @@ function errorPage(status, code, message) {
  *   the lab: ctx and platform are read on every request (the lab may replace them on reset);
  *   `server.up` false switches the product off (503 SERVER_DOWN)
  * @param {string} [options.webRoot]  folder of the web apps (default: the repository's web/)
- * @param {number} [options.heartbeatMs]  comment line sent on idle event streams (default 15 s)
+ * @param {number} [options.heartbeatMs]  how often event streams get a comment line, so proxies keep them open (default 15 s)
  * @returns {{ listen(port?: number, host?: string): Promise<{ url: string, port: number }>,
  *   close(): Promise<void>, readonly url: string|null }}
  *   `url` is the address the server can reach itself on (the mock bank posts its callbacks there)
@@ -508,9 +515,12 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     return { school: found.school, device: found.device };
   }
 
-  /** Who is asking, as the route's `auth` requires. Routes with auth 'none' get whoever is signed in. */
-  function identify(route, req, rawPath, rawBody) {
-    const who = { operator: null, staff: null, school: null, parent: null, kiosk: null };
+  /**
+   * Who is asking, as the route's `auth` requires, filled in on the handler's request (`who`).
+   * Routes with auth 'none' get whoever is signed in, looked up only if the handler reads it:
+   * the lab's own routes never do, and must not depend on the product's database to answer.
+   */
+  function identify(route, req, rawPath, rawBody, who) {
     switch (route.auth) {
       case 'operator':
         who.operator = operatorOf(req.headers);
@@ -541,16 +551,27 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
         break;
       }
       default: {
-        who.operator = operatorOf(req.headers);
-        const found = staffOf(req.headers);
-        if (found) {
-          who.staff = found.staff;
-          who.school = found.school;
-        }
-        who.parent = parentOf(req.headers);
+        const once = (fn) => {
+          let done = false;
+          let value = null;
+          return () => {
+            if (!done) {
+              value = fn();
+              done = true;
+            }
+            return value;
+          };
+        };
+        const staff = once(() => staffOf(req.headers));
+        const lazy = {
+          operator: once(() => operatorOf(req.headers)),
+          staff: () => staff()?.staff ?? null,
+          school: () => staff()?.school ?? null,
+          parent: once(() => parentOf(req.headers)),
+        };
+        for (const [name, get] of Object.entries(lazy)) Object.defineProperty(who, name, { get, enumerable: true, configurable: true });
       }
     }
-    return who;
   }
 
   // ---- bodies ----------------------------------------------------------------------------
@@ -619,11 +640,24 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     return value;
   }
 
-  /** A browser page of another origin must not change anything with our cookies (SameSite=Lax lets same-site pages through). */
+  /**
+   * A page of another origin must not change anything with our cookies. SameSite=Lax keeps
+   * them off cross-site requests, but another port of the same host is the same "site", and a
+   * POST without a body needs no content type. Browsers say where a request comes from in
+   * Sec-Fetch-Site; without it, a real Origin must be ours. `Origin: null` alone proves nothing:
+   * our own Referrer-Policy (no-referrer) makes browsers send it on same-origin form posts.
+   */
   function checkOrigin(req) {
     if (SAFE_METHODS.has(req.method)) return;
+    const refuse = () => new LabError('CROSS_ORIGIN', 'requests from another web site are not accepted', 403);
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined) {
+      // 'none': the person did it themselves (typed, bookmarked); anything else came from another page
+      if (site === 'same-origin' || site === 'none') return;
+      throw refuse();
+    }
     const origin = req.headers.origin;
-    if (origin === undefined) return; // not a browser (the kiosk, the bank's callback, tests)
+    if (origin === undefined || origin === 'null') return; // not a browser (the kiosk, the bank's callback, tests), or no origin to judge
     let ok = false;
     try {
       const u = new URL(origin);
@@ -631,7 +665,7 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     } catch {
       ok = false;
     }
-    if (!ok) throw new LabError('CROSS_ORIGIN', 'requests from another web site are not accepted', 403);
+    if (!ok) throw refuse();
   }
 
   // ---- answers ---------------------------------------------------------------------------
@@ -768,24 +802,26 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     });
     let open = true;
     let last = after;
-    let idle = 0;
+    let sinceBeat = 0;
     let timer = null;
     let unsubscribe = () => {};
     const stream = {
-      end() {
+      /** `abort`: cut the connection instead of finishing it (a client that is not reading). */
+      end(abort = false) {
         if (!open) return;
         open = false;
         clearInterval(timer);
         unsubscribe();
         streams.delete(stream);
-        res.end();
+        if (abort) res.destroy();
+        else res.end();
       },
     };
     const write = (text) => {
       if (!open) return;
       res.write(text);
       // a client that stopped reading is dropped rather than buffered for ever; it reconnects and replays
-      if (res.writableLength > MAX_STREAM_BACKLOG) stream.end();
+      if (res.writableLength > MAX_STREAM_BACKLOG) stream.end(true);
     };
     const deliver = (event) => {
       if (!open || !event || event.seq <= last) return;
@@ -797,12 +833,12 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
         return; // not JSON (never from the lab's own services): skip it rather than break the stream
       }
       last = event.seq;
-      idle = 0;
       write(`id: ${event.seq}\ndata: ${data}\n\n`);
     };
 
     streams.add(stream);
     res.on('close', () => stream.end());
+    res.on('error', () => stream.end(true)); // the socket went away mid-write: nothing left to tell
     write('retry: 2000\n\n');
     // Replay and subscribe in one synchronous step: no event can slip in between.
     for (const event of bus.since(after, school)) deliver(event);
@@ -812,9 +848,9 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
     timer = setInterval(() => {
       // the lab replaced its event bus (reset): end, so the browser reconnects to the new one
       if (ctx()?.events !== bus) return stream.end();
-      idle += tick;
-      if (idle >= heartbeatMs) {
-        idle = 0;
+      sinceBeat += tick;
+      if (sinceBeat >= heartbeatMs) {
+        sinceBeat = 0;
         write(': heartbeat\n\n');
       }
     }, tick);
@@ -875,19 +911,22 @@ export function createHttpServer({ lab, webRoot = DEFAULT_WEB_ROOT, heartbeatMs 
       }
       const raw = await readBody(req);
       const rawBody = raw.length === 0 ? '' : raw.toString('utf8');
-      const body = parseBody(route, req, raw);
-      const who = identify(route, req, rawPath, rawBody);
-      const result = await route.handler({
+      const request = {
         method: req.method,
         path: url.pathname,
         params,
         query: queryObject(url.searchParams),
-        body,
+        body: parseBody(route, req, raw),
         rawBody,
         headers: req.headers,
-        ...who,
-      });
-      return sendResult(res, result);
+        operator: null,
+        staff: null,
+        school: null,
+        parent: null,
+        kiosk: null,
+      };
+      identify(route, req, rawPath, rawBody, request);
+      return sendResult(res, await route.handler(request));
     } catch (err) {
       return fail(req, res, asPage, err);
     }
