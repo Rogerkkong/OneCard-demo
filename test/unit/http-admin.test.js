@@ -314,6 +314,17 @@ describe('admin: members and cards', () => {
     const cards = await office.get('/api/admin/cards');
     assert.equal(cards.data.length, 9);
     assert.equal(cards.data.find((c) => c.uid === '04AABBCCDDEE02').memberName, 'Badrul Sampel');
+    // the card digest is for machines only: no office answer carries it
+    assert.equal('digest' in card.data, false);
+    assert.ok(cards.data.every((c) => !('digest' in c)));
+    const page = await office.get(`/api/admin/members/${again.data.member.id}`);
+    assert.ok(page.data.cards.length === 1 && !('digest' in page.data.cards[0]));
+    const lost = await office.post('/api/admin/cards/04AABBCCDDEE02/report-lost', {});
+    assert.equal(lost.status, 200);
+    assert.deepEqual([lost.data.status, 'digest' in lost.data], ['LOST', false]);
+    const replaced = await office.post(`/api/admin/members/${again.data.member.id}/replace-card`, { newUid: '04AABBCCDDEE03' });
+    assert.equal(replaced.status, 200);
+    assert.deepEqual([replaced.data.reportedLost, 'digest' in replaced.data.oldCard, 'digest' in replaced.data.newCard], [false, false, false]);
   });
 
   test('a member\'s page: balances, waiting orders, orders, purchases, cards and parent links', async (t) => {

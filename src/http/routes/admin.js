@@ -59,6 +59,9 @@ function waitingSenOf(ledger, schoolId) {
     .reduce((sum, a) => sum + a.balanceSen, 0);
 }
 
+/** A card as the office sees it: everything but the card digest, which only machines need. */
+const officeCard = ({ digest: _digest, ...card }) => card;
+
 /** A difference with the plain explanation of its kind (EN and 中文) for the office. */
 const explained = (d) => ({ ...d, explanation: Object.hasOwn(DIFFERENCE_KINDS, d.kind) ? { ...DIFFERENCE_KINDS[d.kind] } : null });
 
@@ -167,30 +170,31 @@ export function routes(deps) {
         waitingOrders: summary.waitingOrders,
         orders: topups.listOrders({ schoolId: sid, memberId: member.id, limit: 100 }),
         purchases: settlement.listPurchases(sid, { memberId: member.id, limit: 100 }),
-        cards: schools.listCards(sid).filter((c) => c.memberId === member.id),
+        cards: schools.listCards(sid).filter((c) => c.memberId === member.id).map(officeCard),
         links: schools.listLinks(sid).filter((l) => l.memberId === member.id),
       };
     }),
-    staffRoute('POST', '/api/admin/members/:id/replace-card', OFFICE, (req) =>
-      deps.platform.replaceCard({ schoolId: req.school.id, memberId: req.params.id, newUid: req.body.newUid, actor: actorOf(req.staff) }),
-    ),
+    staffRoute('POST', '/api/admin/members/:id/replace-card', OFFICE, async (req) => {
+      const out = await deps.platform.replaceCard({ schoolId: req.school.id, memberId: req.params.id, newUid: req.body.newUid, actor: actorOf(req.staff) });
+      return { ...out, oldCard: out.oldCard && officeCard(out.oldCard), newCard: officeCard(out.newCard) };
+    }),
     staffRoute('GET', '/api/admin/cards', OFFICE, (req) => {
       const { schools } = services();
       const members = new Map(schools.listMembers(req.school.id).map((m) => [m.id, m]));
       return schools.listCards(req.school.id).map((c) => {
         const m = members.get(c.memberId);
-        return { ...c, memberName: m?.name ?? null, memberNo: m?.memberNo ?? null };
+        return { ...officeCard(c), memberName: m?.name ?? null, memberNo: m?.memberNo ?? null };
       });
     }),
     staffRoute('POST', '/api/admin/cards', OFFICE, (req) => {
       const card = deps.platform.issueCard({ schoolId: req.school.id, memberId: req.body.memberId, uid: req.body.uid, actor: actorOf(req.staff) });
-      return { status: 201, body: card };
+      return { status: 201, body: officeCard(card) };
     }),
-    staffRoute('POST', '/api/admin/cards/:uid/report-lost', OFFICE, (req) =>
-      deps.platform.reportCardLost({ schoolId: req.school.id, uid: req.params.uid, actor: actorOf(req.staff) }),
+    staffRoute('POST', '/api/admin/cards/:uid/report-lost', OFFICE, async (req) =>
+      officeCard(await deps.platform.reportCardLost({ schoolId: req.school.id, uid: req.params.uid, actor: actorOf(req.staff) })),
     ),
-    staffRoute('POST', '/api/admin/cards/:uid/found', OFFICE, (req) =>
-      deps.platform.markCardFound({ schoolId: req.school.id, uid: req.params.uid, actor: actorOf(req.staff) }),
+    staffRoute('POST', '/api/admin/cards/:uid/found', OFFICE, async (req) =>
+      officeCard(await deps.platform.markCardFound({ schoolId: req.school.id, uid: req.params.uid, actor: actorOf(req.staff) })),
     ),
 
     // ---- parents ---------------------------------------------------------------------------

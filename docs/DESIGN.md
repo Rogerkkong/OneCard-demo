@@ -520,7 +520,7 @@ Builds every service: `platform.services = { schools, devices, configs, ledger, 
 - Orchestrations (each also writes audit and emits events):
   `async reportCardLost({ schoolId, uid, actor })` → card (mark LOST, block, store `lostListVersion`, publish snapshot + delta);
   `async markCardFound({ schoolId, uid, actor })` → card (unblock, publish);
-  `async replaceCard({ schoolId, memberId, newUid, actor })` → `{ oldCard, newCard, transferOrder }` (old ACTIVE card reported lost first; new card issued; transfer of the mirror balance);
+  `async replaceCard({ schoolId, memberId, newUid, actor })` → `{ oldCard, reportedLost, newCard, transferOrder, published }` (old ACTIVE card reported lost first, `reportedLost: true`; with no ACTIVE card, `oldCard` is the newest earlier card and `reportedLost: false`; new card issued; transfer of the mirror balance);
   `async publishPrices({ schoolId, content, actor })`, `async publishSettings({ schoolId, content, actor })` → config (store + publish);
   `async setDeviceStatus({ schoolId, code, status, actor })` → device (kick it from the broker when not ACTIVE);
   `async setSchoolStatus({ schoolId, status, actor })` (operator only; kick all its devices when SUSPENDED; emits `school.status`);

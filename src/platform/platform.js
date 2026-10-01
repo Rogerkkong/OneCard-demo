@@ -558,9 +558,11 @@ export function createPlatform(ctx, deps = {}) {
    * Give a member a new card: the old ACTIVE card is reported lost first (blocked), the new one
    * issued, and the member's whole mirror balance moved into a TRANSFER order that waits at
    * the kiosk for the new card. One transaction; then the block list is published.
-   * `oldCard` is the card reported lost now, or else the member's newest earlier card (null if none).
+   * `oldCard` is the card reported lost now (`reportedLost: true`), or else the member's newest
+   * earlier card, already lost before (`reportedLost: false`; null if the member never had one).
+   * `published` is true when nothing needed sending.
    * Codes: SCHOOL_NOT_FOUND, MEMBER_NOT_FOUND (404), CARD_UID_INVALID, CARD_UID_TAKEN (409).
-   * @returns {Promise<{ oldCard: object|null, newCard: object, transferOrder: object|null, published: boolean }>}
+   * @returns {Promise<{ oldCard: object|null, reportedLost: boolean, newCard: object, transferOrder: object|null, published: boolean }>}
    */
   async function replaceCard({ schoolId, memberId, newUid, actor } = {}) {
     const school = requireSchool(schoolId);
@@ -591,7 +593,7 @@ export function createPlatform(ctx, deps = {}) {
       return { oldCard, newCard, transferOrder, change };
     });
     const published = out.change ? await publishBlockListChange(school.id, out.change) : true;
-    return { oldCard: out.oldCard, newCard: out.newCard, transferOrder: out.transferOrder, published };
+    return { oldCard: out.oldCard, reportedLost: out.change !== null, newCard: out.newCard, transferOrder: out.transferOrder, published };
   }
 
   async function publishKind(kind, { schoolId, content, effectiveFrom, actor } = {}) {

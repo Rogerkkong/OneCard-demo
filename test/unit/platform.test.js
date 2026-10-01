@@ -571,7 +571,7 @@ describe('cards', () => {
     const aina = world.a.members.aina;
     fund(env, world.a, 'aina', 1500);
     const out = await platform.replaceCard({ schoolId: world.a.id, memberId: aina.id, newUid: '04F0E0D0C0B0A0', actor: 'staff:office' });
-    assert.deepEqual([out.oldCard.uid, out.oldCard.status, out.oldCard.lostListVersion], [aina.uid, 'LOST', 2]);
+    assert.deepEqual([out.oldCard.uid, out.oldCard.status, out.oldCard.lostListVersion, out.reportedLost], [aina.uid, 'LOST', 2, true]);
     assert.deepEqual([out.newCard.uid, out.newCard.status, out.newCard.memberId], ['04F0E0D0C0B0A0', 'ACTIVE', aina.id]);
     assert.deepEqual(
       [out.transferOrder.kind, out.transferOrder.status, out.transferOrder.amountSen, out.transferOrder.addBy],
@@ -599,7 +599,7 @@ describe('cards', () => {
     const badrul = world.a.members.badrul;
     await platform.reportCardLost({ schoolId: world.a.id, uid: badrul.uid, actor: 'office' });
     const again = await platform.replaceCard({ schoolId: world.a.id, memberId: badrul.id, newUid: '04F1E1D1C1B1A1', actor: 'office' });
-    assert.deepEqual([again.oldCard.uid, again.transferOrder, again.published], [badrul.uid, null, true]);
+    assert.deepEqual([again.oldCard.uid, again.reportedLost, again.transferOrder, again.published], [badrul.uid, false, null, true]);
     assert.equal(env.configs.currentBlockList(world.a.id).version, 3);
     await assert.rejects(platform.replaceCard({ schoolId: world.a.id, memberId: 'mem_nope', newUid: '04F2E2D2C2B2A2' }), labError('MEMBER_NOT_FOUND', 404));
     // a taken UID rolls the whole replacement back
