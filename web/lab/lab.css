@@ -582,6 +582,14 @@ h4 { margin: 0; line-height: 1.25; }
   html { scroll-padding-top: 12px; }
 }
 @media (max-width: 560px) {
+  /* message rows: time and type, then school and machine, then the summary */
+  .ev__btn {
+    grid-template-columns: 4.9em minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: 'time type type' 'school school machine' 'summary summary summary';
+  }
+  .ev__school, .ev__machine { font-size: 11.5px; color: var(--ink-2); }
+  .insp__head { display: flex; justify-content: flex-end; }
+  .insp__head > span[data-key] { display: none; }
   .layout { padding: 12px; }
   .lab-header__inner { padding: 10px 12px; }
   .banners { padding: 0 12px; }

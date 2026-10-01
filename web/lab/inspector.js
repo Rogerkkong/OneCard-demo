@@ -4,10 +4,11 @@
 
 import { formatKL, formatTimeKL, h } from '/shared/api.js';
 import { KINDS, explain, isHeartbeat, isTrouble, kindOf, machineOf, summarize } from './describe.js';
-import { prefs, setAttr, setHidden, setText } from './util.js';
+import { prefs, reducedMotion, setAttr, setHidden, setText } from './util.js';
 
 const MAX_ITEMS = 1500; // events kept in memory
 const MAX_ROWS = 400; // rows in the list at once
+const narrow = window.matchMedia('(max-width: 1023px)');
 
 export function createInspector(app, root) {
   const { t } = app;
@@ -216,7 +217,9 @@ export function createInspector(app, root) {
     detail._item = item;
     fillDetail();
     setHidden(detail, false);
-    if (fromKeyboard) detailTitle.focus();
+    // on a narrow screen the details sit below the list, out of sight
+    if (narrow.matches) detail.scrollIntoView({ block: 'nearest', behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+    if (fromKeyboard) detailTitle.focus({ preventScroll: narrow.matches });
   }
 
   function fillDetail() {

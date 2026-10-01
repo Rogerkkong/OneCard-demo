@@ -103,6 +103,8 @@ function who(username, t) {
 }
 
 const money = (sen) => (Number.isSafeInteger(sen) ? formatRM(sen) : '—');
+/** A reference with a 64-hex card digest in it, shortened for one line (the details show it whole). */
+const shortRef = (ref) => String(ref).replace(/\b([0-9a-f]{8})[0-9a-f]{56}\b/g, '$1…');
 const sep = (t) => t('list.sep');
 
 function packsText(packs, t) {
@@ -231,7 +233,10 @@ export function summarize(e, t, lang) {
         status: translatedOr(t, `topup.${d.status}`, d.status ?? ''),
       });
     case 'topup.refunded':
-      return t('ev.topup.refunded', { kind: translatedOr(t, `order.${d.kind}`, d.kind ?? ''), amount: money(d.amountSen) });
+      return t(d.kind === 'TOPUP' ? 'ev.topup.refunded' : 'ev.topup.returned', {
+        kind: translatedOr(t, `order.${d.kind}`, d.kind ?? ''),
+        amount: money(d.amountSen),
+      });
     case 'config.published':
       return t('ev.config', { kind: translatedOr(t, `kind.${d.kind}`, d.kind ?? ''), version: d.version });
     case 'card.issued':
@@ -258,7 +263,7 @@ export function summarize(e, t, lang) {
       return t('ev.admin.applied', { applied: n('APPLIED'), already: n('ALREADY_APPLIED'), rejected: n('REJECTED') });
     }
     case 'difference.opened':
-      return `${t('ev.diff.opened', { kind: translatedOr(t, `diff.${d.kind}`, d.kind ?? '') })}${d.ref ? ` · ${d.ref}` : ''}`;
+      return `${t('ev.diff.opened', { kind: translatedOr(t, `diff.${d.kind}`, d.kind ?? '') })}${d.ref ? ` · ${shortRef(d.ref)}` : ''}`;
     case 'difference.resolved':
       return `${t('ev.diff.resolved', { kind: translatedOr(t, `diff.${d.kind}`, d.kind ?? '') })}${d.by ? ` · ${d.by}` : ''}`;
     case 'audit':
