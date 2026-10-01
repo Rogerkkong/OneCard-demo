@@ -6,6 +6,7 @@
 //   LAB_HTTP_PORT   web apps and APIs (default 8080)
 //   LAB_MQTT_PORT   MQTT broker (default 1883)
 //   LAB_HOST        address to listen on (default 127.0.0.1, this computer only)
+//   LAB_CONSOLE_PORT  machine and server consoles for PuTTY/telnet (default 2323, 0 = off)
 //   LAB_MQTT_TLS_CERT, LAB_MQTT_TLS_KEY, LAB_MQTT_TLS_PORT (default 8883)
 //                   optional TLS listener; make lab certificates with scripts/make-lab-certs.sh
 import { readFileSync } from 'node:fs';
@@ -25,6 +26,7 @@ function port(name, fallback) {
 const options = {
   httpPort: port('LAB_HTTP_PORT', 8080),
   mqttPort: port('LAB_MQTT_PORT', 1883),
+  consolePort: port('LAB_CONSOLE_PORT', 2323),
   host: env.LAB_HOST || '127.0.0.1',
 };
 
@@ -56,7 +58,10 @@ OneCard Lab is running (lab data only — nothing here is real).
   Read-only login ${viewer.username} / ${viewer.password}
   Watch traffic   mosquitto_sub -h 127.0.0.1 -p ${mqttPortShown} -u ${viewer.username} -P ${viewer.password} -t 'lab/v1/#' -v
                   (or MQTT Explorer with the same login)
-${options.host !== '127.0.0.1' && options.host !== 'localhost' ? `
+${started.consoleAddress ? `
+  Machine consoles PuTTY (Telnet) or: telnet ${started.consoleAddress.replace(':', ' ')}
+                  then: machines · connect smk-contoh/CANTEEN-01 · show status
+` : ''}${options.host !== '127.0.0.1' && options.host !== 'localhost' ? `
   Note: listening on ${options.host}. Other computers on your network can reach the lab,
   and the lab has no passwords. Only do this on a network you trust.
 ` : ''}

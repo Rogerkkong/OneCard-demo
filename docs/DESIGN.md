@@ -639,6 +639,33 @@ school in the operator console gives you its machines and cards in the lab conso
 
 `state()` → `{ clock, server: { up }, broker: { up, url, clients }, schools: [{ code, name, status, devices: [machine state + location + online], cards: [{ uid, member, balanceSen, cardSeq, platformStatus, copy? }], adminCard }] }`.
 
+### Machine and server consoles (PuTTY-style)
+
+Every virtual machine, and the virtual cloud server, has a text console, like logging in to a switch. Reach it
+three ways: the **Console** tab in the lab console (web), **PuTTY** (connection type *Telnet* or *Raw*, host
+`127.0.0.1`, port `2323`), or `telnet 127.0.0.1 2323` / `nc 127.0.0.1 2323` on Mac and Linux.
+
+- `src/lab/console.js` — `createConsole(lab)` → `{ run(session, line) → { output, prompt } }`, plain text in and
+  out (lines ≤ 100 characters). `session` is `{ target: null | 'server' | '<school>/<DEVICE>' }` and is updated by
+  `connect`/`disconnect`. Unknown commands answer `% Unknown command. Type help.`, like a switch.
+- `src/lab/telnet.js` — `startConsoleServer(lab, { host, port = 2323 })` → `{ port, close() }`: a line-based TCP
+  server that ignores Telnet negotiation bytes (so PuTTY in Telnet mode works), prints a banner and prompts such as
+  `onecard>`, `server#` and `smk-contoh/CANTEEN-01>`. `createLab` takes `consolePort` (default 2323, `0` turns it
+  off; env `LAB_CONSOLE_PORT`) and `start()` also returns `consoleAddress` (`'127.0.0.1:2323'`).
+- `POST /api/lab/console { line, target }` → `{ output, target, prompt }` for the web Console tab.
+
+Commands (case-insensitive; `?` or `help` lists what works at the current prompt):
+
+| Where | Commands |
+|---|---|
+| Anywhere | `help`, `machines` (every machine of every school, online or not), `connect server`, `connect <school>/<DEVICE>`, `disconnect`, `clock`, `exit` |
+| `server#` | `show schools`, `show clients` (broker connections per school), `show status`, `server down`, `server up`, `broker restart`, `clock advance <n>m|h|d`, `jobs run` |
+| Any machine | `show status`, `show config`, `show prices`, `show blocklist`, `show journal [n]` (sent/unsent), `show log [n]` (the platform's device log for it), `cable plug`, `cable unplug`, `heartbeat`, `upload`, `export usb`, `reboot` (counters survive) |
+| Canteen reader | `tap <uid> <ITEM>[*qty] …` — e.g. `tap 04A13B5C7D2E80 NASI-LEMAK TEH-TARIK*2` |
+| Water machine | `pour <uid> <ml>` |
+| Kiosk | `tap <uid>`, `admin-card load`, `admin-card upload` |
+| Reader or water machine | `admin-card tap` |
+
 Faults: `clone-card {schoolCode, uid}` (creates a copy with uid suffix shown as "copy"), `tamper-card {schoolCode, uid, balanceSen}`,
 `duplicate-upload {schoolCode, deviceCode}` (re-sends the last record), `sequence-rollback {schoolCode, deviceCode}`,
 `forged-message {schoolCode, deviceCode}` (bad signature), `cross-device-publish {schoolCode, deviceCode}` (tries another device's topic; the broker refuses),

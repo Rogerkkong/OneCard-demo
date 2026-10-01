@@ -46,6 +46,57 @@ schools from the operator console.
 
 With Docker instead of Node: `docker compose up --build`.
 
+## What you need on your computer
+
+| Tool | What it is for | Needed? |
+|---|---|---|
+| [Node.js](https://nodejs.org/) 22 LTS, **or** [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Runs the whole lab: the virtual cloud server, the broker and every virtual machine | Yes, one of the two |
+| A web browser (Chrome, Edge, Safari) | Lab console, operator console, school office, parent app | Yes |
+| Git, or *Code → Download ZIP* on GitHub | Getting the code | Yes |
+| [PuTTY](https://www.putty.org/) (Windows) or Terminal (Mac/Linux) | Logging in to a machine's or the server's console, like a switch | Optional |
+| [MQTT Explorer](https://mqtt-explorer.com/) | Watching every device message live, like Wireshark | Optional |
+
+Nothing else: no real cards, readers, kiosk or cloud account.
+
+## Operating the virtual hardware
+
+**In the browser (lab console, `/lab/`).** Each school's machines are drawn as a topology
+under the cloud server. Pick a card from the tray and tap it on a machine; choose food at a
+canteen reader or a volume at a water machine; unplug or plug a machine's network cable;
+load the admin card at the kiosk and tap it on offline machines; switch the server off. Each
+machine shows its own screen, just like the real one would.
+
+**Like PuTTY into a switch.** Every machine and the server has a text console on port 2323:
+
+1. PuTTY → *Host Name* `127.0.0.1`, *Port* `2323`, *Connection type* **Telnet** → *Open*
+   (Mac/Linux: `telnet 127.0.0.1 2323`, or `nc 127.0.0.1 2323`).
+2. Type `machines` to list them, then for example:
+
+```text
+onecard> connect smk-contoh/CANTEEN-01
+smk-contoh/CANTEEN-01> show status
+smk-contoh/CANTEEN-01> tap 04A13B5C7D2E80 NASI-LEMAK TEH-TARIK
+smk-contoh/CANTEEN-01> cable unplug
+smk-contoh/CANTEEN-01> show journal
+smk-contoh/CANTEEN-01> disconnect
+onecard> connect server
+server# show schools
+server# server down
+```
+
+The same console is also in the lab console's **Console** tab.
+
+**Watch the messages like Wireshark.** MQTT Explorer → host `127.0.0.1`, port `1883`,
+username `viewer`, password `viewer` → *Connect*. The topic tree shows `lab/v1/<school>/<machine>/…`
+and every message as it happens.
+
+**On your phone.** The parent app is made for phone browsers. If the lab runs on your laptop,
+start it with `LAB_HOST=0.0.0.0 npm start` and open `http://<laptop-IP>:8080/parent/` on a
+phone on the same Wi-Fi. The lab has no passwords, so only do this on a network you trust.
+
+**PuTTY and the real server.** When the real system goes onto a cloud server, PuTTY (SSH) is
+how you log in to that server. In the lab the server is virtual, so you use its console above.
+
 ## Watch the device messages
 
 The broker listens on port 1883 with a read-only login (`viewer` / `viewer`; the terminal
@@ -92,6 +143,7 @@ that the broker's name is in the certificate — the same checks a real terminal
 |---|---|---|
 | `LAB_HTTP_PORT` | 8080 | web apps and APIs |
 | `LAB_MQTT_PORT` | 1883 | MQTT broker |
+| `LAB_CONSOLE_PORT` | 2323 | machine and server consoles for PuTTY / telnet (`0` turns them off) |
 | `LAB_HOST` | 127.0.0.1 | listen address; anything else exposes the lab (which has no passwords) to your network |
 | `LAB_MQTT_TLS_CERT`, `LAB_MQTT_TLS_KEY`, `LAB_MQTT_TLS_PORT` | — , — , 8883 | optional TLS listener |
 
@@ -126,6 +178,28 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 - 平台运营后台 http://localhost:8080/operator/ ：SaaS 运营方看所有学校、开通新学校（连机器一起）、停用或恢复学校
 - 学校后台 http://localhost:8080/admin/ ：单一学校的职员：学生和卡、挂失、机器、价格、充值、账本、对账
 - 家长网页 http://localhost:8080/parent/ ：邀请码绑定、看余额、用模拟银行充值
+
+**电脑上要装什么：**
+- Node.js 22 LTS，或者 Docker Desktop（二选一）：跑整个实验室，包括虚拟云端服务器、broker 和所有虚拟机器
+- 浏览器（Chrome、Edge、Safari 都可以）
+- Git，或在 GitHub 上按 *Code → Download ZIP* 下载代码
+- （可选）PuTTY（Windows）或 Mac 的 Terminal：像登录交换机一样登录机器或服务器的控制台
+- （可选）MQTT Explorer：像 Wireshark 一样实时看每一条设备消息
+
+不需要真的卡、刷卡机、充值机或云端账号。
+
+**怎么操作虚拟硬件：**
+- **浏览器（实验室控制台 `/lab/`）：** 每所学校的机器画成拓扑图，挂在云端服务器下面。从卡盒拿一张卡，在机器上刷；
+  食堂机选食物、饮水机选水量；拔插机器的网线；在充值机装参数卡，再到离线机器上刷；也可以关掉服务器。
+  每台机器都有自己的屏幕，跟真机器一样。
+- **像用 PuTTY 登录交换机：** PuTTY → Host Name `127.0.0.1`，Port `2323`，Connection type 选 **Telnet** → Open
+  （Mac：`telnet 127.0.0.1 2323`）。输入 `machines` 看所有机器，`connect smk-contoh/CANTEEN-01` 连到一台，
+  `show status`、`tap <卡号> NASI-LEMAK`、`cable unplug`、`show journal`；`connect server` 再 `server down` 就是关服务器。
+  控制台的 **Console** 页签里也有一样的东西。
+- **像 Wireshark 一样看消息：** MQTT Explorer → host `127.0.0.1`，port `1883`，用户名 `viewer`，密码 `viewer`。
+- **用手机看家长网页：** 实验室在你电脑上跑时，用 `LAB_HOST=0.0.0.0 npm start` 启动，手机连同一个 Wi-Fi，
+  打开 `http://<电脑IP>:8080/parent/`。实验室没有密码，只在信任的网络里这样做。
+- **PuTTY 和真服务器：** 等真系统上了云端服务器，PuTTY（SSH）是用来登录那台服务器的；实验室里服务器是虚拟的，用上面的控制台就行。
 
 **看设备消息：** 用 MQTT Explorer 或 `mosquitto_sub`，只读账号 `viewer` / `viewer`，订阅 `lab/v1/#`。
 
