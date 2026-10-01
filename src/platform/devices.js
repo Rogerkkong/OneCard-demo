@@ -252,7 +252,8 @@ export function createDevices(ctx) {
         // a log row must name a device of its own school, or the office would see another school's device
         if (schoolId == null || !rowById(schoolId, deviceId)) throw new LabError('DEVICE_NOT_FOUND', 'no such device in this school', 404);
       }
-      const text = String(message ?? REFUSAL[code] ?? code).slice(0, MAX_LOG_MESSAGE);
+      const fallback = Object.hasOwn(REFUSAL, code) ? REFUSAL[code] : code;
+      const text = String(message ?? fallback).slice(0, MAX_LOG_MESSAGE);
       const { lastInsertRowid } = db.run(
         'INSERT INTO device_log (school_id, device_id, at, level, code, message, detail) VALUES (?, ?, ?, ?, ?, ?, ?)',
         schoolId ?? null, deviceId ?? null, clock.now(), level, code, text, detail == null ? null : JSON.stringify(detail),

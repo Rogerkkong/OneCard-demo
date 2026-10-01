@@ -446,7 +446,7 @@ export function createSchools(ctx) {
       return db.tx(() => {
         const row = requireCardByUid(schoolId, uid);
         if (row.status !== 'ACTIVE') throw new LabError('CARD_NOT_ACTIVE', `card is ${row.status}, not ACTIVE`, 409);
-        db.run("UPDATE card SET status = 'LOST', lost_at = ?, lost_list_version = NULL WHERE id = ?", clock.now(), row.id);
+        db.run("UPDATE card SET status = 'LOST', lost_at = ?, lost_list_version = NULL WHERE school_id = ? AND id = ?", clock.now(), schoolId, row.id);
         audit(schoolId, actor, 'card.lost', { cardId: row.id, last4: row.uid.slice(-4), memberId: row.member_id });
         return cardDto(cardRowById(schoolId, row.id));
       });
@@ -473,7 +473,7 @@ export function createSchools(ctx) {
           throw new LabError('MEMBER_HAS_ACTIVE_CARD', 'the member already has a replacement card', 409);
         }
         // the lost-report fields only mean something while the card is LOST; the audit trail keeps the history
-        db.run("UPDATE card SET status = 'ACTIVE', lost_at = NULL, lost_list_version = NULL WHERE id = ?", row.id);
+        db.run("UPDATE card SET status = 'ACTIVE', lost_at = NULL, lost_list_version = NULL WHERE school_id = ? AND id = ?", schoolId, row.id);
         audit(schoolId, actor, 'card.found', { cardId: row.id, last4: row.uid.slice(-4), memberId: row.member_id });
         return cardDto(cardRowById(schoolId, row.id));
       });
