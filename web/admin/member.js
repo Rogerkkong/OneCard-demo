@@ -82,11 +82,11 @@ export async function renderMember(ctx, el, memberId) {
           h('button', { type: 'button', class: 'btn btn--danger', onclick: async () => reload(await reportLost(ctx, { uid: active.uid, last4: active.last4, memberName: member.name })) }, t('card.lostButton')),
           h('button', { type: 'button', class: 'btn', onclick: async () => reload(await replaceCard(ctx, member, active, balances.mirrorBalanceSen)) }, t('card.replaceButton')),
         );
+      } else if (lost.length) {
+        // after a lost card the balance must move with the new card, so only "replace" is offered
+        cardActions.push(h('button', { type: 'button', class: 'btn btn--primary', onclick: async () => reload(await replaceCard(ctx, member, null, balances.mirrorBalanceSen)) }, t('card.replaceButton')));
       } else {
         cardActions.push(h('button', { type: 'button', class: 'btn btn--primary', onclick: async () => reload(await issueCard(ctx, member)) }, t('card.issueButton')));
-        if (lost.length) {
-          cardActions.push(h('button', { type: 'button', class: 'btn', onclick: async () => reload(await replaceCard(ctx, member, null, balances.mirrorBalanceSen)) }, t('card.replaceButton')));
-        }
       }
       for (const c of lost) {
         if (!active) {

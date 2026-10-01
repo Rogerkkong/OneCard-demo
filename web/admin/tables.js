@@ -3,6 +3,9 @@
 import { h, formatRM, formatKL } from '/shared/api.js';
 import { dataTable, pill } from './kit.js';
 
+/** 'Tan Wei Ming (stf_…)' -> 'Tan Wei Ming': decisions name the person, the audit log keeps the id. */
+const personName = (actor) => String(actor ?? '—').replace(/ \(stf_[A-Za-z0-9]+\)$/, '');
+
 const ORDER_TONES = { CREATED: '', PAID: 'info', ADDED: 'good', PARKED: 'warn', REFUNDED: '', CANCELLED: '', FAILED: 'bad', EXPIRED: 'warn' };
 
 export const orderPill = (t, status) => pill(t(`orderStatus.${status}`), ORDER_TONES[status] ?? '');
@@ -20,13 +23,13 @@ export function orderDetail(t, o) {
       else text = o.addBy ? t('order.addBy', { at: formatKL(o.addBy) }) : t('order.noDeadline');
       break;
     case 'ADDED':
-      text = o.resolvedBy ? t('order.markedAdded', { by: o.resolvedBy }) : t('order.added', { at: formatKL(o.addedAt), device: o.addedByDevice ?? '—' });
+      text = o.resolvedBy ? t('order.markedAdded', { by: personName(o.resolvedBy) }) : t('order.added', { at: formatKL(o.addedAt), device: o.addedByDevice ?? '—' });
       break;
     case 'PARKED':
       text = t('order.parked', { at: formatKL(o.writeAttemptAt) });
       break;
     case 'REFUNDED':
-      text = o.resolvedBy ? t('order.refundedBy', { by: o.resolvedBy }) : t('order.refunded');
+      text = o.resolvedBy ? t('order.refundedBy', { by: personName(o.resolvedBy) }) : t('order.refunded');
       break;
     default:
       text = t(`order.${o.status}`);

@@ -178,6 +178,10 @@ export function createFaults(app, root) {
       if (!machine) return showResult(r, t('fault.needMachine'), 'warn');
       body.schoolCode = machine.school.code;
       body.deviceCode = machine.m.code;
+      // what the lab would refuse anyway, said at once (the lab stays the judge of the rest)
+      if (f.type === 'cross-device-publish' && !app.state?.server?.up) return showResult(r, t('err.SERVER_DOWN'), 'bad');
+      if (f.type !== 'cross-device-publish' && !machine.m.connected) return showResult(r, t('err.MACHINE_OFFLINE'), 'bad');
+      if (f.type === 'duplicate-upload' && (machine.m.journal?.total ?? 0) === 0) return showResult(r, t('err.NOTHING_TO_SEND'), 'bad');
     }
     if (f.needs === 'kiosk') {
       const kiosk = card.school.devices.find((d) => d.type === 'KIOSK');

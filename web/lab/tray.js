@@ -72,10 +72,7 @@ export function createTrays(app) {
         r.meta,
         h('span', { class: 'chipcard__tags' }, r.status, r.copy, r.tamper, r.staff),
       );
-      r.button.addEventListener('click', () => {
-        const key = cardKey(school, c.uid);
-        app.select(app.selected === key ? null : key);
-      });
+      r.button.addEventListener('click', () => app.select(cardKey(school, c.uid)));
       const li = h('li', {}, r.button);
       li._r = r;
       return li;

@@ -279,13 +279,10 @@ function drawTenants(rows, bySchool) {
     { label: t('tn.school'), class: 'col-school' },
     t('tn.status'),
     { label: t('tn.members'), num: true },
-    { label: t('tn.cards'), num: true },
     { label: t('tn.machines'), num: true },
-    { label: t('tn.broker'), num: true },
     { label: t('tn.sales'), num: true },
     { label: t('tn.waiting'), num: true },
     { label: t('tn.differences'), num: true },
-    { label: t('tn.since'), nowrap: true },
     t('tn.action'),
   ];
   swap(
@@ -297,16 +294,18 @@ function drawTenants(rows, bySchool) {
       rows: rows.map((s) => {
         const active = s.status === 'ACTIVE';
         return [
-          h('span', { class: 'who' }, h('strong', {}, s.name), h('code', { class: 'chip' }, s.code)),
+          h('span', { class: 'who' }, h('strong', {}, s.name), h('code', { class: 'chip' }, s.code), h('span', { class: 'muted small' }, t('tn.sinceAt', { at: formatKL(s.createdAt) }))),
           pill(t(`school.${s.status}`), active ? 'good' : 'bad'),
-          String(s.members),
-          String(s.cards),
-          h('span', { class: s.devices.online < s.devices.total ? 'muted' : undefined }, t('tn.machinesValue', { online: s.devices.online, total: s.devices.total })),
-          String(bySchool[s.code] ?? 0),
+          h('span', { class: 'cell-2' }, h('span', {}, String(s.members)), h('span', { class: 'muted small' }, t('tn.cardsN', { n: s.cards }))),
+          h(
+            'span',
+            { class: 'cell-2' },
+            h('span', {}, t('tn.machinesValue', { online: s.devices.online, total: s.devices.total })),
+            h('span', { class: 'muted small' }, t('tn.brokerN', { n: bySchool[s.code] ?? 0 })),
+          ),
           formatRM(s.todaySalesSen),
           formatRM(s.waitingSen),
           s.openDifferences > 0 ? pill(String(s.openDifferences), 'warn') : '0',
-          formatKL(s.createdAt),
           active
             ? h('button', { type: 'button', class: 'btn btn--small btn--danger', onclick: () => setStatus(s, 'SUSPENDED') }, t('tn.suspend'))
             : h('button', { type: 'button', class: 'btn btn--small btn--primary', onclick: () => setStatus(s, 'ACTIVE') }, t('tn.reactivate')),

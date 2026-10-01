@@ -411,7 +411,7 @@ export function dataTable({ label, head, rows, empty, compact }) {
     : [h('tr', {}, h('td', { colspan: cols.length, class: 'empty' }, empty ?? ''))];
   const table = h(
     'table',
-    { class: compact ? 'table--compact' : undefined },
+    { class: [compact ? 'table--compact' : null, `cols-${cols.length}`].filter(Boolean).join(' ') },
     h('thead', {}, h('tr', {}, cols.map((c) => cell('th', c, c.label)))),
     h('tbody', {}, body),
   );

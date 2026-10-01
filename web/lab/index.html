@@ -124,19 +124,20 @@
         <span class="insp__live" role="status"><span class="insp__livedot" aria-hidden="true"></span><span class="insp__livetext"></span></span>
       </div>
       <div class="insp__filters">
-        <div class="insp__filter">
-          <label for="insp-school">School</label>
-          <select id="insp-school"></select>
+        <div class="insp__row">
+          <div class="insp__filter">
+            <label for="insp-school">School</label>
+            <select id="insp-school"></select>
+          </div>
+          <div class="insp__tools">
+            <label class="insp__hb"><input type="checkbox" id="insp-hb"> <span class="insp__hb-text">Heartbeats</span></label>
+            <button type="button" class="btn btn--small" data-role="pause" aria-pressed="false">Pause</button>
+            <button type="button" class="btn btn--small" data-role="clear">Clear</button>
+          </div>
         </div>
         <div class="insp__kinds" role="group" aria-labelledby="insp-kinds-label">
           <span class="insp__kindslabel" id="insp-kinds-label">Show</span>
           <span class="insp__kinds-list"></span>
-        </div>
-        <div class="insp__tools">
-          <label class="insp__hb"><input type="checkbox" id="insp-hb"> <span class="insp__hb-text">Heartbeats</span></label>
-          <button type="button" class="btn btn--small" data-role="pause" aria-pressed="false">Pause</button>
-          <button type="button" class="btn btn--small" data-role="clear">Clear</button>
-          <span class="insp__count muted num"></span>
         </div>
       </div>
       <div class="insp__head" aria-hidden="true">
@@ -144,7 +145,7 @@
         <span data-key="insp.col.school">School</span>
         <span data-key="insp.col.machine">Machine</span>
         <span data-key="insp.col.type">Type</span>
-        <span class="insp__head-summary" data-key="insp.col.summary">Summary</span>
+        <span class="insp__count num"></span>
       </div>
       <ol class="insp__list" aria-labelledby="insp-title"></ol>
       <p class="insp__empty muted"></p>

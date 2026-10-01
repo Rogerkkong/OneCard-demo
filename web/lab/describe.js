@@ -406,11 +406,13 @@ export function kioskResult(fault, r, t, lang) {
   }
   if (!r.ok) return { tone: 'bad', text: t('fr.kiosk.refused', { screen, reason: reasonText(r.reason, t) }) };
   const added = Array.isArray(r.added) ? r.added : [];
-  if (fault && added.length === 0) return { tone: 'warn', text: t('fr.kiosk.nothing') };
+  const again = (Array.isArray(r.reconfirmed) ? r.reconfirmed : []).map((x) => x.kioskTxn).filter(Boolean);
+  const tail = again.length ? ` ${t('fr.kiosk.reconfirmed', { txn: again.join(t('list.sep')) })}` : '';
+  if (fault && added.length === 0 && !again.length) return { tone: 'warn', text: t('fr.kiosk.nothing') };
   if (fault === 'confirm-timeout' && added[0]) {
-    return { tone: 'good', text: t('fr.kiosk.timeout', { txn: added[0].kioskTxn, amount: money(added[0].amountSen) }) };
+    return { tone: 'good', text: t('fr.kiosk.timeout', { txn: added[0].kioskTxn, amount: money(added[0].amountSen) }) + tail };
   }
-  return { tone: added.length ? 'good' : 'info', text: screen };
+  return { tone: added.length || again.length ? 'good' : 'info', text: screen + tail };
 }
 
 // ---- errors -------------------------------------------------------------------------------------

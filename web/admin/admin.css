@@ -131,7 +131,17 @@ input[type='file'] { padding: 6px; }
 .count { margin: 0 0 8px; }
 
 /* tables */
-.table-wrap { border-radius: 8px; }
+/* positioned, so visually hidden labels inside stay inside the scroll box instead of widening the page;
+   the edge shades show that a table goes on sideways (they appear only while there is more to scroll) */
+.table-wrap {
+  --wrap-bg: var(--surface);
+  position: relative; border-radius: 8px;
+  background:
+    linear-gradient(to right, var(--wrap-bg) 40%, transparent) left center / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--wrap-bg) 40%, transparent) right center / 32px 100% no-repeat local,
+    linear-gradient(to right, var(--line), transparent) left center / 14px 100% no-repeat scroll,
+    linear-gradient(to left, var(--line), transparent) right center / 14px 100% no-repeat scroll;
+}
 .table-wrap:focus-visible { outline-offset: 0; }
 td.empty { color: var(--ink-2); text-align: center; padding: 18px 10px; }
 tbody tr:hover > td { background: var(--surface-2); }
@@ -208,7 +218,7 @@ td.num, td .num, td.nw, td .mono { white-space: nowrap; }
 body.is-signed-in .shell { grid-template-columns: 220px minmax(0, 1fr); align-items: start; }
 .main { min-width: 0; }
 .nav { position: sticky; top: 12px; }
-.nav__list { list-style: none; margin: 0; padding: 6px; display: grid; gap: 2px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.nav__list { position: relative; list-style: none; margin: 0; padding: 6px; display: grid; gap: 2px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .nav__item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border-radius: 8px;
   color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px;
@@ -247,7 +257,7 @@ body.is-signed-in .shell { grid-template-columns: 220px minmax(0, 1fr); align-it
 .tenant-note h3 { color: var(--teal); }
 
 /* students and cards */
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs { position: relative; display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tab { padding: 8px 14px; margin-bottom: -1px; border-bottom: 3px solid transparent; color: var(--ink-2); font-weight: 600; text-decoration: none; white-space: nowrap; }
 .tab:hover { color: var(--ink); }
 .tab[aria-current='page'] { color: var(--ink); border-bottom-color: var(--pandan); }
@@ -263,7 +273,7 @@ body.is-signed-in .shell { grid-template-columns: 220px minmax(0, 1fr); align-it
 .balances { display: grid; gap: 12px; }
 .balances__pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .stat--waiting { background: var(--kunyit-soft); }
-.stat--waiting .stat__label { color: var(--kunyit-ink); }
+.stat--waiting .stat__label { color: var(--warn); }
 .card-now { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .card-now__id { font-size: 22px; font-weight: 700; }
 .invite-done { display: grid; gap: 8px; }
@@ -349,6 +359,9 @@ label.check input { width: 18px; height: 18px; min-height: 0; margin: 0; accent-
   .member-top { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 640px) {
+  /* on a phone, wide tables keep readable columns and scroll inside their box */
+  .table-wrap > table.cols-5, .table-wrap > table.cols-6 { min-width: 560px; }
+  .table-wrap > table.cols-7, .table-wrap > table.cols-8, .table-wrap > table.cols-9 { min-width: 680px; }
   .band__who { justify-items: start; text-align: left; }
   .band__person { justify-content: flex-start; }
   .band__name { font-size: 23px; }

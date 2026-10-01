@@ -144,9 +144,9 @@ export function createInspector(app, root) {
   function updateCount() {
     setText(countEl, t('insp.count', { shown: matching, total: items.length }));
     const none = list.children.length === 0;
-    setText(emptyEl, items.length === 0 ? t('insp.empty') : t('insp.emptyFiltered'));
+    const onlyHeartbeats = items.length > 0 && !filters.heartbeats && items.every((x) => x.hb || !visible({ ...x, hb: false }));
+    setText(emptyEl, items.length === 0 ? t('insp.empty') : onlyHeartbeats ? t('insp.onlyHeartbeats') : t('insp.emptyFiltered'));
     setHidden(emptyEl, !none);
-    setHidden(headEl, none);
   }
 
   function rebuild() {

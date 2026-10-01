@@ -37,7 +37,7 @@ function differenceCard(ctx, d, names, onResolve) {
       : null,
     d.status === 'OPEN'
       ? h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn btn--primary btn--small', onclick: () => onResolve(d, title) }, t('rc.resolve')))
-      : h('p', { class: 'resolved small' }, t('rc.resolvedBy', { at: formatKL(d.resolvedAt), by: d.resolvedBy ?? '—' }), d.note ? h('span', { class: 'note-quote' }, `“${d.note}”`) : null),
+      : h('p', { class: 'resolved small' }, t('rc.resolvedBy', { at: formatKL(d.resolvedAt), by: String(d.resolvedBy ?? '—').replace(/ \(stf_[A-Za-z0-9]+\)$/, '') }), d.note ? h('span', { class: 'note-quote' }, `“${d.note}”`) : null),
   );
 }
 
