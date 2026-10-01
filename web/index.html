@@ -10,7 +10,7 @@
   header.top { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
   header.top h1 { font-size: 28px; }
   .lede { font-size: 17px; color: var(--ink-2); max-width: 62ch; }
-  .apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
   .app { display: grid; gap: 8px; align-content: start; text-decoration: none; color: inherit; padding: 18px; }
   .app:hover { border-color: var(--pandan); }
   .app .tag { font: 600 12px/1 var(--mono); color: var(--teal); letter-spacing: 0.04em; }
@@ -30,13 +30,18 @@
     <div id="lang"></div>
   </header>
 
-  <p class="lede" data-i18n="lede">A virtual school card system you can try before any hardware exists: virtual cards, canteen readers, water machines and a top-up kiosk talk to the platform through a real MQTT broker.</p>
+  <p class="lede" data-i18n="lede">A virtual school card system, run as SaaS for many schools, that you can try before any hardware exists. Everything is virtual, including the cloud server: cards, canteen readers, water machines and top-up kiosks talk to the platform through a real MQTT broker.</p>
 
   <section class="apps" aria-label="Apps">
     <a class="panel app" href="/lab/">
       <span class="tag">/lab/</span>
       <h2 data-i18n="labTitle">Lab console</h2>
       <p data-i18n="labText">Tap cards on machines, pull network cables, carry the admin card, inject faults and watch every message.</p>
+    </a>
+    <a class="panel app" href="/operator/">
+      <span class="tag">/operator/</span>
+      <h2 data-i18n="operatorTitle">Operator console</h2>
+      <p data-i18n="operatorText">The SaaS owner's view: every school on the platform, onboard a new school with its machines, suspend or reactivate one.</p>
     </a>
     <a class="panel app" href="/admin/">
       <span class="tag">/admin/</span>
@@ -62,9 +67,11 @@
   const i18n = createI18n({
     en: {
       ribbon: 'LAB · not real money',
-      lede: 'A virtual school card system you can try before any hardware exists: virtual cards, canteen readers, water machines and a top-up kiosk talk to the platform through a real MQTT broker.',
+      lede: 'A virtual school card system, run as SaaS for many schools, that you can try before any hardware exists. Everything is virtual, including the cloud server: cards, canteen readers, water machines and top-up kiosks talk to the platform through a real MQTT broker.',
       labTitle: 'Lab console',
       labText: 'Tap cards on machines, pull network cables, carry the admin card, inject faults and watch every message.',
+      operatorTitle: 'Operator console',
+      operatorText: "The SaaS owner's view: every school on the platform, onboard a new school with its machines, suspend or reactivate one.",
       adminTitle: 'School office',
       adminText: 'Students and cards, lost cards, machines, prices, top-ups, the books and reconciliation.',
       parentTitle: 'Parent app',
@@ -75,9 +82,11 @@
     },
     zh: {
       ribbon: '实验室 · 不是真钱',
-      lede: '在任何硬件到货之前就能试的虚拟校园一卡通：虚拟卡、食堂刷卡机、饮水机和充值机，通过真正的 MQTT broker 和平台通信。',
+      lede: '在任何硬件到货之前就能试的虚拟校园一卡通，以 SaaS 方式服务很多学校。全部都是虚拟的，包括云端服务器：卡、食堂刷卡机、饮水机和充值机，通过真正的 MQTT broker 和平台通信。',
       labTitle: '实验室控制台',
       labText: '在机器上刷卡、拔网线、带参数卡、制造故障，看每一条消息。',
+      operatorTitle: '平台运营后台',
+      operatorText: 'SaaS 运营方的视角：平台上所有学校，开通新学校（连机器一起），停用或恢复学校。',
       adminTitle: '学校后台',
       adminText: '学生和卡、挂失、机器、价格、充值、账本和对账。',
       parentTitle: '家长网页',

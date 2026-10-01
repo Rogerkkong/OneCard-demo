@@ -7,6 +7,15 @@ It is for trying the flows, testing failure cases and demonstrating the system b
 any real hardware exists — the way Packet Tracer lets you build a network before
 touching a switch.
 
+Two things shape everything below:
+
+- **It is SaaS: one system, many schools.** Each school is a tenant with its own data, staff, cards, machines,
+  prices, keys and settings, all served by one platform. The platform operator (the company running the SaaS)
+  onboards new schools, watches every tenant and can suspend one; school staff only ever see their own school.
+- **Everything is virtual, including the server.** The cloud server (platform, database and MQTT broker — what
+  would run on one cloud machine) is a node in the lab you can switch off or restart, just like the school
+  machines and cards. Nothing needs real hardware or a real cloud account.
+
 This lab is an independent, public reference implementation. It follows the public
 description of the OneCard flows (canteen, water, parent top-up, lost card, prices and
 heartbeat, device security, record catch-up). Its protocol, keys and data are its own
@@ -101,6 +110,39 @@ The virtual devices run in the same process but behave like separate machines: t
 only reach the platform through the broker (MQTT over TCP) and, for the kiosk, through
 signed HTTP. Anyone can watch the traffic with MQTT Explorer or `mosquitto_sub` using the
 read-only `viewer` account.
+
+### The virtual topology
+
+```
+ School site: smk-contoh            School site: sjkc-contoh         (more schools: onboarded by the operator)
+  cards · CANTEEN-01/02 · WATER-01    cards · CANTEEN-01 · WATER-01
+  KIOSK-01 · admin card               KIOSK-01 · admin card
+        │ school network / 4G             │
+        └──────────────┬──────────────────┘
+                       │ internet
+        ┌──────────────┴────────────────────────────┐
+        │ Virtual cloud server (one per lab)        │
+        │   MQTT broker · platform · database        │
+        │   web: operator, school office, parent    │
+        └───────────────────────────────────────────┘
+```
+
+The lab can switch the **cloud server off** (`server-down`): the broker stops and the platform's APIs answer
+503 `SERVER_DOWN`, for every school at once. Readers and water machines keep selling offline; the kiosk adds
+nothing; parents cannot pay; records wait in the machines' journals until the server is back (`server-up`),
+then they upload and the platform republishes every retained setting. `broker-restart` restarts only the broker
+(retained messages are lost, so the platform republishes them when it reconnects).
+
+### Tenancy (SaaS)
+
+| Layer | How schools are kept apart |
+|---|---|
+| Data | Every school-owned row has `school_id`; every query filters by it; the admin API takes the school from the staff session only |
+| People | Staff belong to one school. Parents are platform-wide but see a child only through an APPROVED link that school issued. The operator account sees every school but cannot act as a school's staff |
+| Cards | Each school has its own card key, so the same card UID gives a different card digest in each school, and a card from one school is refused by another school's machines |
+| Machines | Device codes are unique per school; each machine logs in to the broker as `<school>.<DEVICE>` and the ACL limits it to its own topics; kiosk requests are signed with that machine's own secret |
+| Settings | Prices, device settings, block lists and their version numbers, top-up limits and windows are all per school |
+| Lifecycle | The operator onboards a school (staff, machines, default prices and settings) and can suspend it: a suspended school's machines are disconnected, its uploads refused and its staff and parents blocked, without touching other schools |
 
 ### Money model (card as wallet)
 
@@ -473,8 +515,16 @@ Builds every service: `platform.services = { schools, devices, configs, ledger, 
   `async replaceCard({ schoolId, memberId, newUid, actor })` → `{ oldCard, newCard, transferOrder }` (old ACTIVE card reported lost first; new card issued; transfer of the mirror balance);
   `async publishPrices({ schoolId, content, actor })`, `async publishSettings({ schoolId, content, actor })` → config (store + publish);
   `async setDeviceStatus({ schoolId, code, status, actor })` → device (kick it from the broker when not ACTIVE);
-  `async setSchoolStatus({ schoolId, status, actor })` (kick all its devices when SUSPENDED);
-  `registerDevice(...)` (pass-through); `runJobs()` → topups.runJobs + reconcile.run for every school.
+  `async setSchoolStatus({ schoolId, status, actor })` (operator only; kick all its devices when SUSPENDED; emits `school.status`);
+  `async registerDevice({ schoolId, code, type, location, actor })` → `{ device, secret }` (emits `device.registered` with `{ code, type, location }`, then publishes the current retained settings to it);
+  `issueCard({ schoolId, memberId, uid, actor })` → card (emits `card.issued`);
+  `async createTenant({ code, name, staff = [], devices = [], demoMembers = 0, actor })` → `{ school, staff, devices: [{ device, secret }], members }` —
+  onboards a school in one go: school, staff accounts, the default price list and settings, its machines (each emitting
+  `device.registered`) and optionally `demoMembers` fictional members with new cards (random 7-byte UIDs starting `04`,
+  each emitting `card.issued`). Emits `tenant.created` `{ code, name }`;
+  `operatorOverview()` → one row per school: `{ id, code, name, status, members, cards, devices:{ total, online }, todaySalesSen, waitingSen, openDifferences, createdAt }`;
+  `runJobs()` → topups.runJobs + reconcile.run for every ACTIVE school.
+- After (re)connecting to the broker, the platform republishes every retained setting for every ACTIVE device of every ACTIVE school (a restarted broker has lost them).
 - Emits `card.issued` `{ uid, memberId }` when a card is issued through the facade (the lab listens to create the physical virtual card), and `card.lost`, `card.found`.
 
 ---
@@ -531,22 +581,29 @@ Builds every service: `platform.services = { schools, devices, configs, ledger, 
 
 `createHttpServer({ lab })` → `{ listen(port, host) → Promise<{url,port}>, close() }`. JSON in and out, max body 1 MB.
 
-Route modules live in `src/http/routes/{admin,parent,pay,kiosk,lab}.js`. Each exports `routes(deps)` returning
+Route modules live in `src/http/routes/{operator,admin,parent,pay,kiosk,lab}.js`. Each exports `routes(deps)` returning
 `[{ method, path, auth, roles?, handler }]`, where `deps = { lab, platform: lab.platform, ctx: lab.ctx }`, `path` uses
-`:param` segments (e.g. `'/api/admin/members/:id'`), `auth` is `'none' | 'staff' | 'parent' | 'kiosk'`, and
-`handler(req)` receives `{ params, query, body, rawBody, headers, staff, school, parent, kiosk }` (the session or
+`:param` segments (e.g. `'/api/admin/members/:id'`), `auth` is `'none' | 'operator' | 'staff' | 'parent' | 'kiosk'`, and
+`handler(req)` receives `{ params, query, body, rawBody, headers, operator, staff, school, parent, kiosk }` (the session or
 kiosk identity filled in by the server for the route's `auth`) and returns a JSON-able value (200), or
 `{ status, body, headers }` for anything else (e.g. 201, redirects, HTML pages). `server.js` owns parsing, sessions,
 kiosk signature checks, error mapping, static files under `web/` and the SSE stream; route files own the endpoints.
 Errors: `{ error: { code, message, detail? } }` with the LabError status (500 + code `INTERNAL` for bugs).
-Sessions: in-memory, HTTP-only cookies `lab_staff` and `lab_parent`. **Lab only: there are no passwords; you
-pick who you are.** The admin API takes the school from the staff session, never from the request.
+Sessions: in-memory, HTTP-only cookies `lab_operator`, `lab_staff` and `lab_parent`. **Lab only: there are no
+passwords; you pick who you are.** The admin API takes the school from the staff session, never from the request.
+
+While the lab's cloud server is switched off, every route except `/api/lab/*` and static files answers 503
+`SERVER_DOWN`. Staff of a SUSPENDED school get 403 `SCHOOL_SUSPENDED` from the admin API; parents get the same for
+that school's children (other schools' children keep working).
 
 Roles: OFFICE (members, cards, invites, links, devices, prices/settings, journal import), FINANCE (top-ups,
-parked orders, subsidies, ledger, differences, reports), ADMIN (everything, plus school status). Others → 403 `FORBIDDEN`.
+parked orders, subsidies, ledger, differences, reports), ADMIN (everything in the school). Others → 403 `FORBIDDEN`.
+Suspending or reactivating a school is an **operator** action, not a school action.
 
 | Area | Endpoints |
 |---|---|
+| Operator session | `POST /api/operator/login` (the lab's one operator account), `POST /api/operator/logout`, `GET /api/operator/me` |
+| Operator (SaaS owner) | `GET /api/operator/schools` (`platform.operatorOverview()`), `POST /api/operator/schools {code, name, staff, devices, demoMembers}` → `{ school, devices:[{ code, type, secret }] }` (secrets shown once), `POST /api/operator/schools/:code/status {status}`, `GET /api/operator/health` → `{ server, broker:{ clients, bySchool }, schools }` |
 | Staff session | `GET /api/admin/staff-options`, `POST /api/admin/login {staffId}`, `POST /api/admin/logout`, `GET /api/admin/me` |
 | Overview | `GET /api/admin/overview` → `{ school, today:{ salesSen, purchases }, devices:{ total, online }, waitingSen, openDifferences, parkedOrders }` |
 | Members & cards | `GET/POST /api/admin/members`, `GET /api/admin/members/:id` (with balances, orders, purchases), `GET/POST /api/admin/cards`, `POST /api/admin/cards/:uid/report-lost`, `POST /api/admin/cards/:uid/found`, `POST /api/admin/members/:id/replace-card {newUid}` |
@@ -556,7 +613,7 @@ parked orders, subsidies, ledger, differences, reports), ADMIN (everything, plus
 | Top-ups | `GET /api/admin/topups`, `GET /api/admin/topups/parked`, `POST /api/admin/topups/:id/resolve {decision, note}`, `POST /api/admin/subsidies {memberId, amountSen, note}` |
 | Books | `GET /api/admin/ledger/trial-balance`, `GET /api/admin/ledger/postings`, `GET /api/admin/purchases`, `GET /api/admin/reports/sales?day=` |
 | Reconciliation | `GET /api/admin/differences?status=`, `POST /api/admin/differences/:id/resolve {note}`, `POST /api/admin/imports/journal` (USB file) |
-| Other | `GET /api/admin/audit`, `POST /api/admin/school/status {status}` (ADMIN), `POST /api/admin/jobs/run` |
+| Other | `GET /api/admin/audit`, `POST /api/admin/jobs/run` |
 | Parent session | `GET /api/parent/options`, `POST /api/parent/login {parentId}`, `POST /api/parent/register {email, name}`, `POST /api/parent/logout`, `GET /api/parent/me` |
 | Parent | `POST /api/parent/invites/redeem {code}`, `GET /api/parent/children` (+ pending links), `GET /api/parent/children/:schoolId/:memberId/balance` → `{ mirrorBalanceSen, waitingSen, asOf }`, `GET …/history` → `{ topups, purchases }`, `POST …/topups {amountSen}` (header `Idempotency-Key`) → `{ order, payUrl }`, `GET /api/parent/topups` |
 | Mock payment provider | `GET /pay/:orderId` (bank page), `POST /api/pay/:orderId/complete {result}` → provider sends a signed callback to `POST /api/payments/callback` |
@@ -572,11 +629,21 @@ parked orders, subsidies, ledger, differences, reports), ADMIN (everything, plus
 `terminals` (Map `'<school>/<DEVICE>'` → machine), `cards` (Map `'<school>/<UID>'` → VirtualCard), `adminCards` (Map school code → AdminCard),
 and the actions used by `/api/lab/*`: `tap({ schoolCode, deviceCode, uid, items, ml, fault })`, `setCable({ schoolCode, deviceCode, plugged })`,
 `adminCardLoad({ schoolCode })`, `adminCardTap({ schoolCode, deviceCode })`, `adminCardUpload({ schoolCode })`, `exportUsb({ schoolCode, deviceCode })`,
-`fault({ type, … })`, `advanceClock(ms)`, `state()`, `async reset()`.
+`fault({ type, … })`, `advanceClock(ms)`, `setServer({ up })`, `restartBroker()`, `state()`, `async reset()`.
+
+The lab follows the platform's events so new tenants come alive without a restart: on `device.registered` it builds
+and starts the virtual machine (kiosks and canteen readers plugged in, water machines not; machines without a
+network are provisioned with the current settings, recorded with `via 'PROVISION'`), on `card.issued` it makes the
+physical virtual card (balance 0), and on `tenant.created` it gives the school an admin card. So onboarding a third
+school in the operator console gives you its machines and cards in the lab console straight away.
+
+`state()` → `{ clock, server: { up }, broker: { up, url, clients }, schools: [{ code, name, status, devices: [machine state + location + online], cards: [{ uid, member, balanceSen, cardSeq, platformStatus, copy? }], adminCard }] }`.
 
 Faults: `clone-card {schoolCode, uid}` (creates a copy with uid suffix shown as "copy"), `tamper-card {schoolCode, uid, balanceSen}`,
 `duplicate-upload {schoolCode, deviceCode}` (re-sends the last record), `sequence-rollback {schoolCode, deviceCode}`,
-`forged-message {schoolCode, deviceCode}` (bad signature), `cross-device-publish {schoolCode, deviceCode}` (tries another device's topic; the broker refuses), and the kiosk faults passed to `tap`.
+`forged-message {schoolCode, deviceCode}` (bad signature), `cross-device-publish {schoolCode, deviceCode}` (tries another device's topic; the broker refuses),
+`cross-school-card {schoolCode, uid, toSchoolCode, deviceCode}` (taps one school's card on another school's machine; refused),
+`server-down` / `server-up` (the whole cloud server), `broker-restart`, and the kiosk faults passed to `tap`.
 
 Seed (`src/lab/seed.js`): two fictional schools — `smk-contoh` ("SMK Seri Contoh") and `sjkc-contoh` ("SJK(C) Contoh") —
 with staff (OFFICE, FINANCE, ADMIN), 6+ members with cards, three demo parents (one with children in both schools),
@@ -595,7 +662,7 @@ and prints the URLs and broker accounts.
 `mqtt.connect`, `mqtt.disconnect`, `mqtt.denied`, `mqtt.publish`, `intake.accepted`, `intake.duplicate`, `intake.refused`,
 `purchase.received`, `ledger.posting`, `topup.status`, `topup.refunded`, `config.published`, `card.issued`, `card.lost`, `card.found`,
 `card.write`, `device.screen`, `device.cable`, `admin-card.loaded`, `admin-card.applied`, `difference.opened`, `difference.resolved`,
-`audit`, `lab.action`, `lab.clock`.
+`audit`, `lab.action`, `lab.clock`, `tenant.created`, `school.status`, `device.registered`, `server.status`, `broker.status`.
 
 ---
 
@@ -603,8 +670,11 @@ and prints the URLs and broker accounts.
 
 Plain HTML, CSS and JavaScript modules, no build step, served by the lab server. English by default with Chinese
 (中文) available. `web/shared/` holds the API helper, i18n helper and base styles; each app keeps its own strings.
-- `web/lab/` — the lab console: topology of a school's machines and the cloud, card tray, tap with item/volume
-  choice, cable switches, admin-card loading and tapping, faults, lab clock, live message inspector.
+- `web/lab/` — the lab console: the whole virtual topology — the cloud server node (switch it off, restart the
+  broker) and every school's site with its machines — plus the card tray, tap with item/volume choice, cable
+  switches, admin-card loading and tapping, faults, lab clock and the live message inspector (filter by school).
+- `web/operator/` — the SaaS operator console: every tenant with its status and health, onboard a new school
+  (staff, machines, demo members), suspend or reactivate a school, broker connections per school.
 - `web/admin/` — school office: overview, members and cards, parents, devices, prices and settings, top-ups,
   books, reconciliation, audit.
 - `web/parent/` — parent app, phone first: sign in or register with an invitation code, balance and waiting amount

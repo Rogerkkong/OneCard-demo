@@ -138,3 +138,36 @@ Use the fault panel in the lab console:
 1. School office → reconciliation shows every open difference with an explanation.
 2. Move the clock forward a day: machines still on an old block list are flagged.
 3. Resolve each difference with a note; it stays in the history.
+
+## 14. One system, many schools (SaaS tenants)
+
+1. Operator console (`/operator/`): every school is listed with its own status, machines,
+   sales and open differences — one platform serving them all.
+2. **Onboard a third school**: give it a code and name, its first staff, a canteen reader, a
+   water machine and a kiosk, and a few demo students. It gets the default prices and settings.
+3. Lab console: the new school's site appears with its machines and cards straight away.
+   Tap a card there — it works like the other schools, on the same server.
+4. Try to cross the line:
+   - Sign in to the school office as SMK Seri Contoh staff: nothing from the other schools
+     is visible, not even by guessing an id in the URL.
+   - Tap an SJK(C) Contoh card on an SMK Seri Contoh reader → **Card unavailable** (each
+     school has its own card key, so the card means nothing to another school's machines).
+   - Fault panel: a machine tries to publish to another school's topic → the broker refuses it.
+   - Lee Kah Seng (parent) sees his two children in two different schools, and nobody else's.
+5. Operator console: **suspend** one school. Its machines are disconnected and its uploads
+   refused, its staff and parents are blocked — and the other schools carry on untouched.
+   Reactivate it and its machines send what they kept.
+
+## 15. The cloud server goes down
+
+The whole server — broker, platform and database — is virtual too, so you can switch it off.
+
+1. Lab console: switch the **cloud server off**. Every school loses it at the same moment.
+2. Canteen readers and water machines keep selling (the money is on the cards); their
+   records wait in their journals.
+3. The kiosk adds nothing ("cannot reach the platform"); parents cannot pay; the school
+   office cannot load. This is what one server means for every tenant.
+4. Switch the server back on: machines reconnect and upload what they kept, and the
+   platform sends every machine its current prices, settings and block list again.
+5. **Restart only the broker**: retained messages are lost with it, and the platform puts
+   them back as soon as it reconnects — check a machine's versions in the school office.
