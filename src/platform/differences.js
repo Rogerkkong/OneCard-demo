@@ -20,6 +20,17 @@ export const DIFFERENCE_KINDS = Object.freeze({
   DOUBLE_ADD_SUSPECTED: { en: 'The same top-up was reported added by a different write', zh: '同一笔充值被另一次写卡回报已加' },
 });
 
+/** Who resolved it, as text (the same rule as the audit trail). */
+function actorText(actor) {
+  if (typeof actor === 'string' && actor.trim()) return actor.trim().slice(0, 120);
+  if (actor && typeof actor === 'object' && (actor.id || actor.name)) {
+    return [actor.name, actor.id && `(${actor.id})`].filter(Boolean).join(' ').slice(0, 120);
+  }
+  return 'system';
+}
+
+const MAX_LIST = 1000;
+
 export function createDifferences(ctx) {
   const { db, clock, events } = ctx;
   const schoolCode = (schoolId) => db.get('SELECT code FROM school WHERE id = ?', schoolId)?.code ?? null;
@@ -41,7 +52,10 @@ export function createDifferences(ctx) {
 
     /** @returns {{difference: object, created: boolean}} */
     open({ schoolId, kind, ref, detail = {} }) {
-      if (!(kind in DIFFERENCE_KINDS)) throw new LabError('DIFFERENCE_KIND_INVALID', `unknown difference kind ${kind}`, 500);
+      // own properties only: 'toString' is not a kind
+      if (typeof kind !== 'string' || !Object.hasOwn(DIFFERENCE_KINDS, kind)) {
+        throw new LabError('DIFFERENCE_KIND_INVALID', `unknown difference kind ${kind}`, 500);
+      }
       const existing = db.get('SELECT * FROM difference WHERE school_id = ? AND kind = ? AND ref = ?', schoolId, kind, String(ref));
       if (existing) return { difference: toDto(existing), created: false };
       const id = newId('dif');
@@ -58,13 +72,15 @@ export function createDifferences(ctx) {
       return toDto(db.get('SELECT * FROM difference WHERE school_id = ? AND id = ?', schoolId, id)) ?? null;
     },
 
+    /** Newest first. `limit` is 1–1000 (anything else means 200); filters must be strings. */
     list(schoolId, { status, kind, limit = 200 } = {}) {
       const where = ['school_id = ?'];
-      const params = [schoolId];
-      if (status) { where.push('status = ?'); params.push(status); }
-      if (kind) { where.push('kind = ?'); params.push(kind); }
+      const params = [typeof schoolId === 'string' ? schoolId : null];
+      if (typeof status === 'string' && status) { where.push('status = ?'); params.push(status); }
+      if (typeof kind === 'string' && kind) { where.push('kind = ?'); params.push(kind); }
+      const max = Number.isSafeInteger(limit) && limit >= 1 ? Math.min(limit, MAX_LIST) : 200;
       return db
-        .all(`SELECT * FROM difference WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id LIMIT ?`, ...params, limit)
+        .all(`SELECT * FROM difference WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id LIMIT ?`, ...params, max)
         .map(toDto);
     },
 
@@ -72,16 +88,27 @@ export function createDifferences(ctx) {
       return db.get("SELECT count(*) AS n FROM difference WHERE school_id = ? AND status = 'OPEN'", schoolId).n;
     },
 
-    resolve({ schoolId, id, actor, note = '' }) {
-      const row = db.get('SELECT * FROM difference WHERE school_id = ? AND id = ?', schoolId, id);
-      if (!row) throw new LabError('DIFFERENCE_NOT_FOUND', 'no such difference', 404);
-      if (row.status === 'RESOLVED') throw new LabError('DIFFERENCE_ALREADY_RESOLVED', 'this difference is already resolved', 409);
-      db.run(
-        "UPDATE difference SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, note = ? WHERE id = ?",
-        clock.now(), actor, String(note).slice(0, 500), id,
-      );
-      events.emit('difference.resolved', { id, kind: row.kind, by: actor }, schoolCode(schoolId));
-      return toDto(db.get('SELECT * FROM difference WHERE id = ?', id));
+    /**
+     * Mark a difference RESOLVED with who did it and a note (at most 500 characters). The
+     * caller writes the audit entry (schools.audit) in the same transaction.
+     * Codes: DIFFERENCE_NOT_FOUND (404, also for another school's id), DIFFERENCE_ALREADY_RESOLVED (409).
+     */
+    resolve({ schoolId, id, actor, note = '' } = {}) {
+      const who = actorText(actor);
+      return db.tx(() => {
+        const row = db.get(
+          'SELECT * FROM difference WHERE school_id = ? AND id = ?',
+          typeof schoolId === 'string' ? schoolId : null, typeof id === 'string' ? id : null,
+        );
+        if (!row) throw new LabError('DIFFERENCE_NOT_FOUND', 'no such difference', 404);
+        if (row.status === 'RESOLVED') throw new LabError('DIFFERENCE_ALREADY_RESOLVED', 'this difference is already resolved', 409);
+        db.run(
+          "UPDATE difference SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, note = ? WHERE id = ?",
+          clock.now(), who, String(note ?? '').slice(0, 500), row.id,
+        );
+        events.emit('difference.resolved', { id: row.id, kind: row.kind, by: who }, schoolCode(row.school_id));
+        return toDto(db.get('SELECT * FROM difference WHERE id = ?', row.id));
+      });
     },
   };
 }
