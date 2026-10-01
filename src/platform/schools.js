@@ -351,7 +351,8 @@ export function createSchools(ctx) {
 
     addMember({ schoolId, memberNo, name, className = '', group = 'STUDENT' } = {}) {
       requireSchool(schoolId);
-      const no = text(memberNo, { code: 'MEMBER_NO_INVALID', field: 'member number', max: 32 });
+      // member numbers are text ('S1001'); a whole number from a spreadsheet import is accepted as text too
+      const no = text(Number.isSafeInteger(memberNo) ? String(memberNo) : memberNo, { code: 'MEMBER_NO_INVALID', field: 'member number', max: 32 });
       const cleanName = text(name, { code: 'NAME_INVALID', field: 'member name' });
       const cls = text(className ?? '', { code: 'CLASS_NAME_INVALID', field: 'class name', min: 0, max: 40 });
       if (!MEMBER_GROUPS.includes(group)) throw new LabError('MEMBER_GROUP_INVALID', `group must be one of ${MEMBER_GROUPS.join(', ')}`);

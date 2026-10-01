@@ -354,7 +354,9 @@ export function createLedger(ctx) {
    * `memberId` keeps only postings that touch one of that member's accounts.
    */
   function postings(schoolId, { limit = 50, memberId } = {}) {
-    const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 50;
+    // Routes may pass the query string's text ('20'); anything unusable falls back to 50.
+    const asked = Number(limit);
+    const n = Number.isSafeInteger(asked) && asked > 0 ? Math.min(asked, 1000) : 50;
     const rows = memberId
       ? db.all(
           `SELECT p.* FROM posting p
