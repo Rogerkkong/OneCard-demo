@@ -7,6 +7,7 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.js",
+    "start:lan": "node --disable-warning=ExperimentalWarning src/main.js --lan",
     "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
     "test:unit": "node --disable-warning=ExperimentalWarning --test \"test/unit/**/*.test.js\"",
     "test:scenarios": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/scenarios/**/*.test.js\""

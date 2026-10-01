@@ -202,7 +202,7 @@ School codes are lower-case (`smk-contoh`), device codes upper-case (`CANTEEN-01
 |---|---|---|---|---|
 | Platform | `platform` | `ctx.settings.platformBrokerPassword` | `lab/v1/+/+/commands/#` | `lab/v1/+/+/records`, `lab/v1/+/+/status` |
 | Device | `<school>.<DEVICE>` (client id must equal the username) | `brokerPassword(device.secret)` | only its own `records` and `status` | only its own `commands/#` |
-| Viewer | `ctx.settings.viewer.username` | `ctx.settings.viewer.password` | nothing | `lab/v1/#` |
+| Viewer | `ctx.settings.viewer.username` | `ctx.settings.viewer.password` | nothing | `lab/v1/#`, or `#` (the same traffic, since nothing is published elsewhere; MQTT Explorer's default); never `$SYS` |
 
 Anonymous logins, `$SYS/#`, `#` and any other topic are refused. A device whose status
 is not `ACTIVE`, or whose school is `SUSPENDED`, cannot log in, and is disconnected

@@ -697,12 +697,14 @@ test('the platform subscribes to records and status only', NET, async (t) => {
   assert.equal(await alive(platform), true);
 });
 
-test('the viewer watches lab/v1/# but cannot publish anything', NET, async (t) => {
+test('the viewer watches lab/v1/# (or #, MQTT Explorer\'s default) but cannot publish anything', NET, async (t) => {
   const { ctx, as, connect } = await setup(t);
   const viewer = await connect(as.viewer());
   assert.deepEqual(await grants(viewer, ['lab/v1/#']), [1]);
   assert.deepEqual(await grants(viewer, [`lab/v1/${A}/#`, 'lab/v1/+/+/status', `${topicOf(CANTEEN_B, 'commands')}/+`]), [1, 1, 1]);
-  const refused = ['#', '$SYS/#', 'lab/#', '+/v1/#'];
+  // nothing can be published outside lab/v1, so '#' shows the same traffic
+  assert.deepEqual(await grants(viewer, ['#', 'lab/#', '+/v1/#']), [1, 1, 1]);
+  const refused = ['$SYS/#', '$SYS/+/clients/total'];
   for (const filter of refused) assert.deepEqual(await grants(viewer, [filter]), [128], filter);
 
   const seen = inbox(viewer);
@@ -712,6 +714,8 @@ test('the viewer watches lab/v1/# but cannot publish anything', NET, async (t) =
   await platform.publishAsync(topicOf(CANTEEN_B, 'commands/control'), 'a command', { qos: 1 });
   const saw = (payload) => seen.some((m) => m.payload === payload);
   await waitFor(() => saw('a record') && saw('a command'), { message: 'traffic both ways' });
+  // '#' never matches the broker's own $SYS topics (it announced the two logins above)
+  assert.deepEqual(seen.filter((m) => m.topic.startsWith('$')), []);
 
   const cutOff = onClose(viewer);
   viewer.publish(topicOf(CANTEEN_A, 'records'), 'fake record', { qos: 1 });

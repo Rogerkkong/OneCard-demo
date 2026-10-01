@@ -1,18 +1,29 @@
 // Start the whole lab: platform, MQTT broker, virtual machines and the web apps.
 //
-//   npm start
+//   npm start            this computer only
+//   npm run start:lan    also reachable from phones and computers on your network (--lan)
 //
 // Settings (environment variables):
 //   LAB_HTTP_PORT   web apps and APIs (default 8080)
 //   LAB_MQTT_PORT   MQTT broker (default 1883)
-//   LAB_HOST        address to listen on (default 127.0.0.1, this computer only)
+//   LAB_HOST        address to listen on (default 127.0.0.1, this computer only; --lan means 0.0.0.0)
 //   LAB_CONSOLE_PORT  machine and server consoles for PuTTY/telnet (default 2323, 0 = off)
 //   LAB_MQTT_TLS_CERT, LAB_MQTT_TLS_KEY, LAB_MQTT_TLS_PORT (default 8883)
 //                   optional TLS listener; make lab certificates with scripts/make-lab-certs.sh
 import { readFileSync } from 'node:fs';
-import { createLab } from './lab/lab.js';
+import { networkInterfaces } from 'node:os';
+
+// Checked before anything loads node:sqlite, which older versions do not have.
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major < 22 || (major === 22 && minor < 13)) {
+  console.error(`OneCard Lab needs Node.js 22.13 or newer; this computer has ${process.versions.node}.
+Install the LTS version from https://nodejs.org/ and run npm start again.`);
+  process.exit(1);
+}
+const { createLab } = await import('./lab/lab.js');
 
 const env = process.env;
+const lan = process.argv.includes('--lan');
 
 function port(name, fallback) {
   const value = Number(env[name] ?? fallback);
@@ -27,7 +38,7 @@ const options = {
   httpPort: port('LAB_HTTP_PORT', 8080),
   mqttPort: port('LAB_MQTT_PORT', 1883),
   consolePort: port('LAB_CONSOLE_PORT', 2323),
-  host: env.LAB_HOST || '127.0.0.1',
+  host: lan ? '0.0.0.0' : env.LAB_HOST || '127.0.0.1',
 };
 
 if (env.LAB_MQTT_TLS_CERT || env.LAB_MQTT_TLS_KEY) {
@@ -46,11 +57,22 @@ const lab = createLab(options);
 const started = await lab.start();
 const viewer = lab.ctx.settings.viewer;
 const mqttPortShown = new URL(started.mqttUrl).port;
+const httpPortShown = new URL(started.httpUrl).port;
+const localOnly = options.host === '127.0.0.1' || options.host === 'localhost';
+
+/** This computer's own network addresses, for opening the lab on a phone. */
+function lanAddresses() {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((a) => a && a.family === 'IPv4' && !a.internal)
+    .map((a) => a.address);
+}
 
 console.log(`
 OneCard Lab is running (lab data only — nothing here is real).
 
   Lab console     ${started.httpUrl}/lab/
+  Operator        ${started.httpUrl}/operator/
   School office   ${started.httpUrl}/admin/
   Parent app      ${started.httpUrl}/parent/
 
@@ -61,10 +83,11 @@ OneCard Lab is running (lab data only — nothing here is real).
 ${started.consoleAddress ? `
   Machine consoles PuTTY (Telnet) or: telnet ${started.consoleAddress.replace(':', ' ')}
                   then: machines · connect smk-contoh/CANTEEN-01 · show status
-` : ''}${options.host !== '127.0.0.1' && options.host !== 'localhost' ? `
+` : ''}${localOnly ? '' : `
+  On a phone on the same Wi-Fi: ${lanAddresses().map((ip) => `http://${ip}:${httpPortShown}/parent/`).join('  or  ') || '(no network address found)'}
   Note: listening on ${options.host}. Other computers on your network can reach the lab,
   and the lab has no passwords. Only do this on a network you trust.
-` : ''}
+`}
 Press Ctrl+C to stop.`);
 
 let stopping = false;

@@ -7,7 +7,8 @@ import { DEVICE_CODE_RE, SCHOOL_CODE_RE, TOPIC_ROOT, parseTopic, topicFor } from
 // The lab's MQTT broker (aedes 1.x). The platform, every machine and a read-only viewer
 // log in with their own account, and each account may use only its own topics
 // (docs/DESIGN.md §3, "Topics and broker accounts"). Everything else is refused:
-// anonymous logins, $SYS, '#', and any topic outside an account's list.
+// anonymous logins, $SYS, '#' (except for the read-only viewer), and any topic outside an
+// account's list.
 //
 // What a refused client sees (MQTT 3.1.1 has no other way to say no):
 // - login: CONNACK 2 (wrong client id, or one whose live or kept session is another
@@ -74,8 +75,10 @@ function platformAccount() {
   };
 }
 
+// The viewer may also use '#': nobody can publish outside lab/v1, so it carries the same
+// traffic, and it is what MQTT Explorer subscribes to by default. $SYS stays refused.
 function viewerAccount(username) {
-  return { role: 'viewer', username, schoolCode: null, subscribe: [`${TOPIC_ROOT}/#`] };
+  return { role: 'viewer', username, schoolCode: null, subscribe: [`${TOPIC_ROOT}/#`, '#'] };
 }
 
 function deviceAccount(username, { schoolCode, deviceCode }) {
