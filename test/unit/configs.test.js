@@ -868,6 +868,46 @@ describe('blockCard(), unblockCard() and currentBlockList()', () => {
   });
 });
 
+describe('ensureBlockList()', () => {
+  test('gives a school with no block list an empty one as version 1', () => {
+    assert.deepEqual(configs.ensureBlockList({ schoolId: A, actor: 'seed' }), { version: 1, changed: true });
+    assert.deepEqual(configs.currentBlockList(A), { version: 1, entries: [] });
+    assert.deepEqual(configs.current(A, 'blocklist').content, { entries: [], added: [], removed: [] });
+    assert.deepEqual(published(ctx), [['smk-contoh', { kind: 'blocklist', version: 1 }]]);
+    assert.deepEqual(audits.map((a) => [a[0], a[1], a[2], a[3]]), [[A, 'seed', 'blocklist.start', { version: 1 }]]);
+  });
+
+  test('does nothing when the school already has a block list', () => {
+    configs.ensureBlockList({ schoolId: A });
+    assert.deepEqual(configs.ensureBlockList({ schoolId: A }), { version: 1, changed: false });
+    block('crd_a1');
+    assert.deepEqual(configs.ensureBlockList({ schoolId: A }), { version: 2, changed: false });
+    assert.equal(count(ctx, "config_version WHERE school_id = ? AND kind = 'blocklist'", A), 2);
+    assert.equal(eventsOf(ctx, 'config.published').length, 2);
+  });
+
+  test('then blocking a card goes on from version 1, and the pack lets offline machines sell', () => {
+    configs.ensureBlockList({ schoolId: A });
+    const pack = configs.packs(A).find((p) => p.kind === 'blocklist');
+    assert.deepEqual(pack.content, { entries: [] });
+    assert.equal(pack.version, 1);
+    assert.equal(pack.checksum, sha256hex(canonicalJson({ entries: [] })));
+    assert.deepEqual(block('crd_a1'), { version: 2, changed: true });
+    assert.deepEqual(configs.blockListDelta(A, 1), { fromVersion: 1, toVersion: 2, added: [entry('crd_a1')], removed: [] });
+  });
+
+  test('each school gets its own list; another school is untouched', () => {
+    configs.ensureBlockList({ schoolId: A });
+    assert.deepEqual(configs.currentBlockList(B), { version: 0, entries: [] });
+    assert.deepEqual(configs.ensureBlockList({ schoolId: B }), { version: 1, changed: true });
+  });
+
+  test('an unknown school is SCHOOL_NOT_FOUND', () => {
+    rejects(() => configs.ensureBlockList({ schoolId: 'sch_nope' }), 'SCHOOL_NOT_FOUND', 404);
+    rejects(() => configs.ensureBlockList(), 'SCHOOL_NOT_FOUND', 404);
+  });
+});
+
 describe('blockListDelta()', () => {
   test('with no list at all: from 0 to 0, nothing changed', () => {
     assert.deepEqual(configs.blockListDelta(A, 0), { fromVersion: 0, toVersion: 0, added: [], removed: [] });

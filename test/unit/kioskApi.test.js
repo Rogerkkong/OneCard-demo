@@ -375,17 +375,30 @@ describe('kiosk API errors', () => {
     await assert.rejects(api.packs(), (err) => apiError('HTTP_400', 400)(err) && err.message === 'no code');
   });
 
-  test('a 2xx answer that is not JSON is BAD_RESPONSE', async () => {
-    platform.respond = () => ({ status: 200, text: 'OK' });
-    await assert.rejects(api.packs(), apiError('BAD_RESPONSE', 200));
-    platform.respond = () => ({ status: 200, text: '' });
-    await assert.rejects(api.packs(), apiError('BAD_RESPONSE', 200));
+  // The error may reach an API response (it is a LabError), so its status is never a success:
+  // an answer that is not one is 502, with what the platform really answered in the detail.
+  test('a 2xx answer that is not JSON is BAD_RESPONSE (502, httpStatus in the detail)', async () => {
+    for (const [status, text] of [[200, 'OK'], [200, ''], [201, '<html></html>']]) {
+      platform.respond = () => ({ status, text });
+      await assert.rejects(api.packs(), (err) => {
+        apiError('BAD_RESPONSE', 502)(err);
+        assert.deepEqual(err.detail, { httpStatus: status });
+        return true;
+      });
+    }
   });
 
-  test('redirects are not followed (the signature is for this path only)', async () => {
+  test('redirects are not followed (the signature is for this path only): HTTP_302, status 502', async () => {
     platform.respond = () => ({ status: 302, headers: { location: '/somewhere-else' } });
-    await assert.rejects(api.packs(), apiError('HTTP_302', 302));
-    assert.equal(platform.requests.length, 1);
+    await assert.rejects(api.packs(), (err) => {
+      apiError('HTTP_302', 502)(err);
+      assert.deepEqual(err.detail, { httpStatus: 302 });
+      return true;
+    });
+    // A redirect from lookup is not "never recorded" either.
+    await assert.rejects(api.lookup('KIOSK-01-000015'), apiError('HTTP_302', 502));
+    assert.equal(platform.requests.length, 2);
+    assert.deepEqual(platform.requests.map((r) => r.url), ['/api/kiosk/packs', '/api/kiosk/confirm/KIOSK-01-000015']);
   });
 
   test('no answer within timeoutMs is NETWORK (timedOut), also for lookup', async () => {

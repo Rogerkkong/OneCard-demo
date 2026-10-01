@@ -82,8 +82,9 @@ export const START_PLAN = [
 ];
 
 /**
- * Write the demo schools, staff, members, cards, parents, links, devices and the first
- * price list and settings. Uses the platform services so every rule and audit entry applies.
+ * Write the demo schools, staff, members, cards, parents, links, devices, the first price
+ * list and settings, and an empty block list. Uses the platform services so every rule and
+ * audit entry applies.
  *
  * @param {object} platform  from createPlatform(ctx)
  * @returns {{ schools: Array<{ id, code, name, cardKey, staff, members, devices }>, parents: Array<{ id, email, name }> }}
@@ -113,6 +114,8 @@ export function seedDemo(platform) {
     });
     configs.publish({ schoolId: school.id, kind: 'prices', content: DEFAULT_PRICES, actor });
     configs.publish({ schoolId: school.id, kind: 'settings', content: DEFAULT_SETTINGS, actor });
+    // machines refuse every card until they hold a block list, so start with an empty one
+    configs.ensureBlockList({ schoolId: school.id, actor });
     out.schools.push({
       id: school.id,
       code: school.code,

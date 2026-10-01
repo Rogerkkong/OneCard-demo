@@ -452,6 +452,28 @@ export function createConfigs(ctx, { schools } = {}) {
     return changeBlockList(args, false);
   }
 
+  /**
+   * Give a school its first block list: an empty list as version 1. Terminals refuse
+   * every card until they hold some block list (version 0 means "never received one"),
+   * so a new school needs this before its machines can sell. Does nothing if the school
+   * already has a block list.
+   * Codes: SCHOOL_NOT_FOUND (404).
+   * @param {{ schoolId: string, actor?: unknown }} args
+   * @returns {{ version: number, changed: boolean }}
+   */
+  function ensureBlockList({ schoolId, actor } = {}) {
+    const result = db.tx(() => {
+      const school = requireSchool(schoolId);
+      const latest = latestRow(schoolId, 'blocklist');
+      if (latest) return { school, version: latest.version, changed: false };
+      const version = insertVersion(schoolId, 'blocklist', { entries: [], added: [], removed: [] }, clock.now(), actor);
+      audit(schoolId, actor, 'blocklist.start', { version });
+      return { school, version, changed: true };
+    });
+    if (result.changed) events.emit('config.published', { kind: 'blocklist', version: result.version }, result.school.code);
+    return { version: result.version, changed: result.changed };
+  }
+
   /** @returns {{ version: number, entries: BlockEntry[] }} version 0 and no entries before the first block */
   function currentBlockList(schoolId) {
     const row = latestRow(schoolId, 'blocklist');
@@ -607,6 +629,7 @@ export function createConfigs(ctx, { schools } = {}) {
     history,
     blockCard,
     unblockCard,
+    ensureBlockList,
     currentBlockList,
     blockListDelta,
     packs,

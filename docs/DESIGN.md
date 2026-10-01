@@ -37,7 +37,8 @@ separately fit together.
   millilitres (`ml`).
 - **Time comes only from the lab clock** (`ctx.clock.now()`, ms since epoch). Never call `Date.now()` in platform
   or device logic. Days and months for limits are Kuala Lumpur days (`shared/time.js`, UTC+8). Timestamps in
-  messages and APIs are ISO-8601 strings; in the database they are integer ms.
+  device messages, card memory and files are ISO-8601 strings; in the database and in service DTOs (and so in the
+  JSON the HTTP API returns) they are integer ms of the lab clock — the web apps format them.
 - **Every query on school data filters by `school_id`.** A school id never comes from a request body or URL in the
   admin API — it comes from the signed-in staff session.
 - Expected failures throw `LabError(code, message, status, detail?)` (`shared/errors.js`). Codes are listed per
@@ -434,6 +435,8 @@ Exports `DEFAULT_PRICES`, `DEFAULT_SETTINGS`, `validatePrices(content)`, `valida
 - Block list (stored as a full snapshot per version: `{ entries:[{card,last4}], added:[{card,last4}], removed:[card] }`):
   `blockCard({ schoolId, cardId, actor })` → `{ version, changed }` (no new version if already listed);
   `unblockCard({ schoolId, cardId, actor })` → `{ version, changed }`;
+  `ensureBlockList({ schoolId, actor })` → `{ version, changed }` — gives a school with no block list an empty one as
+  version 1 (machines refuse every card until they hold *some* list, so every new school needs this; does nothing if a list exists);
   `currentBlockList(schoolId)` → `{ version, entries }`;
   `blockListDelta(schoolId, fromVersion)` → `{ fromVersion, toVersion, added, removed }` (net change), or null if `fromVersion` is unknown.
 - Admin card: `packs(schoolId)` → `[{ kind, version, content, checksum }]` for `blocklist` (content `{entries}`), `prices`, `settings` (only kinds that have a version); `nextAdminCardToken(schoolId)` → integer (stored, strictly increasing).
@@ -519,7 +522,7 @@ Builds every service: `platform.services = { schools, devices, configs, ledger, 
   `async registerDevice({ schoolId, code, type, location, actor })` → `{ device, secret }` (emits `device.registered` with `{ code, type, location }`, then publishes the current retained settings to it);
   `issueCard({ schoolId, memberId, uid, actor })` → card (emits `card.issued`);
   `async createTenant({ code, name, staff = [], devices = [], demoMembers = 0, actor })` → `{ school, staff, devices: [{ device, secret }], members }` —
-  onboards a school in one go: school, staff accounts, the default price list and settings, its machines (each emitting
+  onboards a school in one go: school, staff accounts, the default price list and settings, an empty block list (`ensureBlockList`), its machines (each emitting
   `device.registered`) and optionally `demoMembers` fictional members with new cards (random 7-byte UIDs starting `04`,
   each emitting `card.issued`). Emits `tenant.created` `{ code, name }`;
   `operatorOverview()` → one row per school: `{ id, code, name, status, members, cards, devices:{ total, online }, todaySalesSen, waitingSen, openDifferences, createdAt }`;
