@@ -183,12 +183,21 @@ export const store = {
 /** The order we sent the parent to the bank for. The bank sends them back to /parent/ with no reference. */
 export const PENDING_PAYMENT = 'pending-payment';
 
-/** Remember the order, then open the bank's page (only ever a page of this same site). */
+/**
+ * Remember the order, then open the bank's page. Only ever a bank page of this same site: any
+ * other address from the API is ignored in favour of the order's own /pay/<id>.
+ */
 export function goToBank(order, payUrl) {
-  const url = new URL(payUrl ?? order.payUrl ?? `/pay/${order.id}`, location.href);
-  if (url.origin !== location.origin || !url.pathname.startsWith('/pay/')) throw new Error('unexpected payment address');
+  const own = `/pay/${encodeURIComponent(order.id)}`;
+  let path = own;
+  try {
+    const url = new URL(payUrl ?? own, location.href);
+    if (url.origin === location.origin && url.pathname.startsWith('/pay/')) path = url.pathname;
+  } catch {
+    // not an address at all: use our own
+  }
   store.set(PENDING_PAYMENT, { orderId: order.id, schoolId: order.schoolId, memberId: order.memberId, amountSen: order.amountSen });
-  location.assign(url.pathname);
+  location.assign(path);
 }
 
 // ---- words for statuses, kinds and purchases ------------------------------------------------
@@ -197,7 +206,7 @@ const STATUS_TONE = {
   CREATED: '',
   PAID: 'warn',
   ADDED: 'good',
-  PARKED: 'info',
+  PARKED: '', // not pill--info: its teal text is below 4.5:1 on the light theme
   EXPIRED: '',
   REFUNDED: '',
   FAILED: 'bad',
@@ -230,7 +239,7 @@ export function litresText(ml) {
 export const when = (value) => formatKL(value).replace(' ', '\u00a0');
 
 /** 'RM 12.50' that never breaks between 'RM' and the number. */
-export const money = (sen) => formatRM(sen).replace(' ', ' ');
+export const money = (sen) => formatRM(sen).replace(' ', '\u00a0');
 
 export const minus = (sen) => `−${money(Math.abs(sen))}`;
 

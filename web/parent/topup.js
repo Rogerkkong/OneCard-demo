@@ -56,7 +56,7 @@ export async function topupView(view, [schoolId, memberId]) {
   const back = h('nav', { class: 'crumbs', 'aria-label': t('backToChildren') },
     h('a', { class: 'back', href: child ? childPath(child) : '#/' }, icon('back'), child ? child.name : t('backToChildren')));
   if (!child) {
-    view.main.replaceChildren(back, h('div', { class: 'narrow stack' },
+    view.main.replaceChildren(h('div', { class: 'narrow stack' }, back,
       h('h1', { tabindex: '-1' }, t('notLinkedTitle')), notice('warn', null, t('notLinkedText'))));
     return;
   }
@@ -68,13 +68,13 @@ export async function topupView(view, [schoolId, memberId]) {
       h('p', { class: 'muted' }, t('topupFor', vars))));
 
   if (child.schoolStatus !== 'ACTIVE') {
-    view.main.replaceChildren(back, h('div', { class: 'narrow stack' }, head,
+    view.main.replaceChildren(h('div', { class: 'narrow stack' }, back, head,
       notice('warn', t('suspendedTitle', { school: child.schoolName }), t('suspendedText', { child: child.name }))));
     return;
   }
   if (!child.card || child.card.status !== 'ACTIVE') {
     const lost = child.card?.status === 'LOST';
-    view.main.replaceChildren(back, h('div', { class: 'narrow stack' }, head,
+    view.main.replaceChildren(h('div', { class: 'narrow stack' }, back, head,
       notice(lost ? 'bad' : 'warn',
         t(lost ? 'lostCardTitle' : child.card ? 'retiredCardTitle' : 'noCardTitle', vars),
         t(lost ? 'lostCardText' : child.card ? 'retiredCardText' : 'noCardText', vars))));
@@ -99,15 +99,16 @@ export async function topupView(view, [schoolId, memberId]) {
   const submit = h('button', { type: 'submit', class: 'btn btn--primary btn--lg btn--block' });
   const nowBox = h('div', { class: 'topup-now' });
 
+  const amounts = h('fieldset', { class: 'amounts' },
+    h('legend', {}, t('howMuch')),
+    h('div', { class: 'chips' }, ...chips),
+    h('div', { class: 'field other' },
+      h('label', { for: 'other-amount' }, t('otherAmount')),
+      h('div', { class: 'money-input' }, h('span', { 'aria-hidden': 'true' }, 'RM'), other),
+      h('p', { class: 'hint', id: 'other-hint' }, t('otherAmountHint'))),
+    limitsLine);
   const form = h('form', { class: 'form topup', novalidate: true },
-    h('fieldset', { class: 'amounts' },
-      h('legend', {}, t('howMuch')),
-      h('div', { class: 'chips' }, ...chips),
-      h('div', { class: 'field other' },
-        h('label', { for: 'other-amount' }, t('otherAmount')),
-        h('div', { class: 'money-input' }, h('span', { 'aria-hidden': 'true' }, 'RM'), other),
-        h('p', { class: 'hint', id: 'other-hint' }, t('otherAmountHint'))),
-      limitsLine),
+    amounts,
     h('section', { class: 'steps', 'aria-labelledby': 'steps-h' },
       h('h2', { id: 'steps-h' }, t('nextTitle')),
       h('ol', {},
@@ -118,7 +119,7 @@ export async function topupView(view, [schoolId, memberId]) {
     submit,
     h('p', { class: 'hint center' }, t('leaveNote')));
 
-  view.main.replaceChildren(back, h('div', { class: 'narrow stack' }, head, nowBox, h('div', { class: 'panel' }, form)));
+  view.main.replaceChildren(h('div', { class: 'narrow stack' }, back, head, nowBox, h('div', { class: 'panel' }, form)));
 
   for (const r of radios) {
     r.addEventListener('change', () => {
@@ -198,20 +199,20 @@ export async function topupView(view, [schoolId, memberId]) {
   async function start(sen, retried) {
     inFlight = true;
     const restore = busy(submit, t('starting'));
+    amounts.disabled = true; // the amount being sent can't change half way
     const attempt = attemptFor(schoolId, memberId, sen);
+    let res;
     try {
-      const res = await call(`${base}/topups`, {
+      res = await call(`${base}/topups`, {
         method: 'POST',
         body: { amountSen: sen },
         headers: { 'Idempotency-Key': attempt.key },
       });
-      store.del(ATTEMPT);
-      formMemory.delete(key);
-      submit.lastChild.textContent = t('goingToBank'); // stays disabled while the bank page opens
-      goToBank(res.order, res.payUrl);
     } catch (err) {
       inFlight = false;
+      amounts.disabled = false;
       restore();
+      update();
       if (!view.alive()) return;
       if (err.code === 'IDEMPOTENCY_KEY_REUSED' && !retried) {
         // only a stale key from another request gives this: drop it and ask once more with a new one
@@ -228,7 +229,18 @@ export async function topupView(view, [schoolId, memberId]) {
       }
       store.del(ATTEMPT);
       refused(err, sen);
+      return;
     }
+    // the platform has the order: this attempt is over, a new top-up gets a new key
+    store.del(ATTEMPT);
+    formMemory.delete(key);
+    if (res.order.status !== 'CREATED') {
+      // a retry handed back an order that is already settled (paid in another tab, say): show it
+      view.go(`#/payment/${encodeURIComponent(res.order.id)}`);
+      return;
+    }
+    submit.lastChild.textContent = t('goingToBank'); // stays disabled while the bank page opens
+    goToBank(res.order, res.payUrl);
   }
 
   /** The platform said no: say why in plain words and, when it helps, offer an amount that fits. */

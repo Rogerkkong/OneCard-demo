@@ -80,15 +80,17 @@ export async function childView(view, [schoolId, memberId]) {
   });
 
   let shown = { balance: '', history: '' };
-  let history = null;
+  let latest = null; // the last history answer
 
   async function load({ quiet = false, force = false } = {}) {
-    const [b, hst] = await Promise.allSettled([call(`${base}/balance`), call(`${base}/history`)]);
+    const [b, hst, fam] = await Promise.allSettled([call(`${base}/balance`), call(`${base}/history`), quiet || force ? loadFamily() : null]);
     if (!view.alive()) return;
     const failure = b.status === 'rejected' ? b.reason : hst.status === 'rejected' ? hst.reason : null;
-    if (failure && (failure.code === 'SCHOOL_SUSPENDED' || failure.code === 'CHILD_NOT_FOUND')) {
-      // the school was paused or the link removed while the page was open: start again
-      state.family = null;
+    const now = fam.status === 'fulfilled' && fam.value ? findChild(schoolId, memberId) : child;
+    if ((failure && (failure.code === 'SCHOOL_SUSPENDED' || failure.code === 'CHILD_NOT_FOUND'))
+      || JSON.stringify([now?.card, now?.schoolStatus]) !== JSON.stringify([child.card, child.schoolStatus])) {
+      // the school was paused, the link removed or the card changed while the page was open: draw it again
+      if (failure) state.family = null;
       view.refresh({ soft: true });
       return;
     }
@@ -103,8 +105,8 @@ export async function childView(view, [schoolId, memberId]) {
       moneyBox.replaceChildren(loadError(b.reason, () => load()));
     }
     if (hst.status === 'fulfilled') {
-      history = hst.value;
-      const sig = JSON.stringify(history);
+      latest = hst.value;
+      const sig = JSON.stringify(latest);
       if (force || sig !== shown.history) {
         shown.history = sig;
         drawUnpaid();
@@ -138,7 +140,7 @@ export async function childView(view, [schoolId, memberId]) {
   }
 
   function drawUnpaid() {
-    const unpaid = history.topups.filter((o) => o.status === 'CREATED' && o.mine && o.payUrl);
+    const unpaid = latest.topups.filter((o) => o.status === 'CREATED' && o.mine && o.payUrl);
     unpaidBox.replaceChildren(
       ...unpaid.map((o) =>
         notice('warn', t('unpaidTitle'),
@@ -151,7 +153,7 @@ export async function childView(view, [schoolId, memberId]) {
   }
 
   function drawHistory() {
-    const lists = { topups: history.topups, purchases: history.purchases };
+    const lists = { topups: latest.topups, purchases: latest.purchases };
     const ids = ['topups', 'purchases'];
     const tabs = ids.map((id) =>
       h('button', {
@@ -222,7 +224,7 @@ function topupItem(o) {
       break;
     case 'PAID':
       lines.push(funded);
-      if (o.addBy) lines.push(t('detailAddBy', { time: at(o.addBy) }));
+      if (o.addBy) lines.push(t(o.kind === 'SUBSIDY' ? 'detailAddBySubsidy' : 'detailAddBy', { time: at(o.addBy) }));
       break;
     case 'ADDED':
       lines.push(funded, t('detailAdded', { time: at(o.addedAt) }));

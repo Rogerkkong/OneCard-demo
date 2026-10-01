@@ -30,6 +30,8 @@ let cleanups = [];
 let onReconnect = null;
 /** false until the server has told us who is signed in (it may be off when the page opens). */
 let sessionKnown = false;
+/** false while the page is first opening: focus then stays at the top, so Tab reaches "Skip to content" first. */
+let booted = false;
 
 function match() {
   const hash = location.hash || '#/';
@@ -46,6 +48,7 @@ function setHash(hash) {
 
 async function render({ soft = false } = {}) {
   const gen = ++generation;
+  const moveFocus = !soft && booted;
   for (const fn of cleanups.splice(0)) {
     try {
       fn();
@@ -112,14 +115,14 @@ async function render({ soft = false } = {}) {
   if (!soft) window.scrollTo(0, 0);
   const running = found.route.view(view, found.params.map(decodeURIComponent));
   // a new page: move focus to its heading so screen readers announce it
-  if (!soft) requestAnimationFrame(() => view.alive() && focusHeading());
+  if (moveFocus) requestAnimationFrame(() => view.alive() && focusHeading());
   try {
     await running;
   } catch (err) {
     console.error(err);
     if (view.alive()) main.replaceChildren(loadError(err, () => render()));
   }
-  if (!soft && view.alive() && (document.activeElement === document.body || !document.activeElement || !main.contains(document.activeElement))) {
+  if (moveFocus && view.alive() && (document.activeElement === document.body || !document.activeElement || !main.contains(document.activeElement))) {
     focusHeading();
   }
 }
@@ -224,6 +227,24 @@ i18n.onChange(() => {
   render({ soft: true });
 });
 window.addEventListener('hashchange', () => render());
+// The session cookie is shared by every tab: if another tab signed in as someone else (or signed
+// out), catch up when this tab is looked at again instead of showing one parent's name with
+// another parent's children.
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !sessionKnown || !state.parent || state.offline) return;
+  try {
+    const { parent } = await call('/api/parent/me');
+    if (parent.id !== state.parent.id) {
+      state.parent = parent;
+      state.family = null;
+      store.clear();
+      setHash('#/');
+      render();
+    }
+  } catch {
+    // signed out elsewhere: call() has already gone back to the picker; offline: the banner says so
+  }
+});
 // coming back with the browser's Back button may restore this page from memory without reloading it
 window.addEventListener('pageshow', (e) => {
   if (!e.persisted) return;
@@ -235,3 +256,4 @@ render();
 await checkSession();
 if (sessionKnown) checkReturnFromBank();
 render();
+booted = true;
