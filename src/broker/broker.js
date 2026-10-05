@@ -24,6 +24,11 @@ import { DEVICE_CODE_RE, SCHOOL_CODE_RE, TOPIC_ROOT, parseTopic, topicFor } from
 // delivered (a machine marks the record sent), and a broker that closed in between would
 // lose it with the platform's queue. While it closes, a machine's new message is refused
 // without a PUBACK, so the machine keeps it and sends it again to the next broker.
+//
+// Simulation mode (docs/DESIGN.md §11.7): a login, a logout or a refusal happens on the
+// broker's own connections, which belong to no flow. The optional contextFor(username, event)
+// hook says whose flow it is part of (a cable plugged, the server switched on), and the event
+// is emitted in that flow.
 
 /** Username of the platform's own broker account. */
 export const PLATFORM_USERNAME = 'platform';
@@ -124,6 +129,14 @@ function passwordText(password) {
 
 const refusal = (code, reason) => ({ code, reason });
 
+/** The flow contextFor() names: a plain object with a trace id, or null for anything else. */
+function flowOf(answer) {
+  if (answer === null || typeof answer !== 'object' || Array.isArray(answer)) return null;
+  const proto = Object.getPrototypeOf(answer);
+  if (proto !== Object.prototype && proto !== null) return null; // a promise, a class instance
+  return typeof answer.trace === 'string' && answer.trace !== '' ? { trace: answer.trace } : null;
+}
+
 /** School code from 'lab/v1/<school>/...' (a topic or a filter), or null. */
 function schoolOfTopic(topic) {
   if (typeof topic !== 'string') return null;
@@ -175,6 +188,10 @@ function urlHost(host) {
  *   not ACTIVE or its school is SUSPENDED. May also return a promise. Without it no device can log in.
  * @param {string} [options.platformPassword]  default ctx.settings.platformBrokerPassword
  * @param {{username: string, password: string} | null} [options.viewer]  default ctx.settings.viewer; null turns it off
+ * @param {(username: string|null, event: 'connect'|'disconnect'|'denied') => ({trace: string}|null)} [options.contextFor]
+ *   the flow a login (mqtt.connect), logout (mqtt.disconnect) or refusal (mqtt.denied) belongs to
+ *   (DESIGN §11.7): that event is emitted inside it. Anything but `{ trace }`, or a hook that throws,
+ *   leaves the event as it was without one.
  * @returns {Promise<{url: string, port: number, tlsUrl: string|null, tlsPort: number|null, aedes: Aedes,
  *   kick: (username: string) => number, clients: () => Array<{clientId: string, username: string|null}>,
  *   close: () => Promise<void>}>}  kick() returns how many connections it closed.
@@ -186,8 +203,10 @@ export async function startBroker(ctx, {
   resolveDevice = () => null,
   platformPassword = ctx.settings?.platformBrokerPassword,
   viewer = ctx.settings?.viewer,
+  contextFor = null,
 } = {}) {
   if (typeof resolveDevice !== 'function') throw new TypeError('resolveDevice must be a function');
+  if (contextFor !== null && typeof contextFor !== 'function') throw new TypeError('contextFor must be a function (or left out)');
   if (tlsOptions && (!tlsOptions.key || !tlsOptions.cert)) throw new TypeError('tls needs a PEM key and cert');
   const { events } = ctx;
   const log = (level, message, meta) => {
@@ -216,6 +235,23 @@ export async function startBroker(ctx, {
   let aedes = null;
 
   /**
+   * Emit mqtt.connect, mqtt.disconnect or mqtt.denied in the flow contextFor names for it, or
+   * in none, as without the hook. The hook never stops a login: whatever it does, the event goes out.
+   */
+  function emitLogin(type, username, event, data, school) {
+    let flow = null;
+    if (contextFor) {
+      try {
+        flow = flowOf(contextFor(username, event));
+      } catch (err) {
+        log('warn', 'contextFor failed', { username, event, error: err?.message });
+      }
+    }
+    if (flow && typeof events.withContext === 'function') events.withContext(flow, () => events.emit(type, data, school));
+    else events.emit(type, data, school);
+  }
+
+  /**
    * Emit mqtt.denied (its school from the topic, else from a device username) and log why. A
    * refused publish of an envelope names its id (msgId), so the refusal joins the sender's flow.
    */
@@ -223,7 +259,7 @@ export async function startBroker(ctx, {
     const data = { username, action };
     if (topic !== undefined) data.topic = topic;
     if (typeof msgId === 'string') data.msgId = msgId;
-    events.emit('mqtt.denied', data, schoolOfTopic(topic) ?? parseDeviceUsername(username)?.schoolCode ?? null);
+    emitLogin('mqtt.denied', username, 'denied', data, schoolOfTopic(topic) ?? parseDeviceUsername(username)?.schoolCode ?? null);
     log('warn', `broker refused ${action}`, { username, clientId, topic, reason });
   }
 
@@ -357,7 +393,8 @@ export async function startBroker(ctx, {
   aedes.on('client', (client) => {
     const account = accounts.get(client);
     if (account && account.role !== 'viewer') sessionOwners.set(client.id, account);
-    events.emit('mqtt.connect', { username: account?.username ?? null, clientId: client.id }, account?.schoolCode ?? null);
+    const username = account?.username ?? null;
+    emitLogin('mqtt.connect', username, 'connect', { username, clientId: client.id }, account?.schoolCode ?? null);
     // kick() came after this login was checked but before aedes registered it (it was
     // setting up the session, or closing an older one with the same id): close it now.
     if (account && kickedSince(account)) client.close();
@@ -366,7 +403,8 @@ export async function startBroker(ctx, {
     const account = accounts.get(client);
     // a clean session ends with its connection; a clean:false one stays with its account
     if (client.clean && sessionOwners.get(client.id) === account) sessionOwners.delete(client.id);
-    events.emit('mqtt.disconnect', { username: account?.username ?? null, clientId: client.id }, account?.schoolCode ?? null);
+    const username = account?.username ?? null;
+    emitLogin('mqtt.disconnect', username, 'disconnect', { username, clientId: client.id }, account?.schoolCode ?? null);
   });
   // Fires once per published message, with the retain flag as sent. Messages from clients were
   // announced when authorizePublish accepted them; this covers the ones the server sends itself.

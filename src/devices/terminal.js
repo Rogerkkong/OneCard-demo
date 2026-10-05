@@ -66,6 +66,8 @@ const DEFAULT_ACK_TIMEOUT_MS = 10_000;
 // A plug, server-up or broker restart owns the next post-connect routine only if the link is
 // up within this long; a connection that comes much later is not that action's doing.
 const DEFAULT_CONNECT_TRACE_MS = 30_000;
+// A cable pull or switch-off owns the logout the broker reports for it if it comes within this long.
+const DISCONNECT_TRACE_MS = 5000;
 const CONNECT_TIMEOUT_MS = 5000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const COMMAND_IDS_KEPT = 1000; // envelope ids remembered to drop repeated commands
@@ -218,7 +220,10 @@ export class Terminal {
   #connecting = null; // first connection attempt of the current client, while it runs
   #online = Promise.resolve(); // what the machine does after each (re)connect
   #heartbeatTimer = null;
-  #connectContext = null; // { context, at }: the flow that owns the next post-connect routine
+  // { context, at, used }: the flow that owns the next connection (its post-connect routine, used
+  // once, and the broker's report of the login, linkContext('connect'))
+  #connectContext = null;
+  #disconnectContext = null; // { context, at }: the flow that pulled the cable or switched the machine off
 
   // Counters never go backwards for the life of the object (a reboot keeps them).
   #seq = 0;
@@ -356,6 +361,7 @@ export class Terminal {
   /** Switch the machine off: the connection ends at once. Counters and journal stay (a reboot). */
   async stop() {
     this.#started = false;
+    this.#keepDisconnectContext();
     await this.#disconnect();
   }
 
@@ -377,6 +383,7 @@ export class Terminal {
       if (!this.connected) this.#keepConnectContext();
       await this.#connect();
     } else {
+      this.#keepDisconnectContext();
       await this.#disconnect();
     }
   }
@@ -391,16 +398,51 @@ export class Terminal {
     this.#keepConnectContext();
   }
 
-  #keepConnectContext() {
-    const context = this.#context();
-    this.#connectContext = context ? { context, at: performance.now() } : null;
+  /**
+   * The flow a broker login or logout of this machine belongs to (DESIGN §11.7), for the
+   * broker's report of it (mqtt.connect, mqtt.disconnect):
+   * - 'connect': the flow kept for the next connection by a cable plug or traceNextConnect().
+   *   The post-connect routine does not use it up (the broker may report the login after it
+   *   started); it lasts until connectTraceMs is over, or until that connection is lost.
+   * - 'disconnect': the flow that pulled the cable or switched the machine off (setCable(false),
+   *   stop()), for DISCONNECT_TRACE_MS (5 s), and only until the machine is connected again.
+   * - anything else: null.
+   * @param {string} kind
+   * @returns {{ trace: string } | null} a copy
+   */
+  linkContext(kind) {
+    let kept = null;
+    if (kind === 'connect') {
+      kept = this.#connectContext;
+      if (kept && performance.now() - kept.at > this.#connectTraceMs) kept = null;
+    } else if (kind === 'disconnect') {
+      kept = this.#disconnectContext;
+      if (kept && performance.now() - kept.at > DISCONNECT_TRACE_MS) kept = null;
+    }
+    const trace = kept?.context?.trace;
+    return typeof trace === 'string' && trace !== '' ? { trace } : null;
   }
 
-  /** The kept flow for this post-connect routine, if still fresh. Used once either way. */
+  #keepConnectContext() {
+    const context = this.#context();
+    this.#connectContext = context ? { context, at: performance.now(), used: false } : null;
+  }
+
+  #keepDisconnectContext() {
+    const context = this.#context();
+    this.#disconnectContext = context ? { context, at: performance.now() } : null;
+  }
+
+  /**
+   * The kept flow for this post-connect routine, if still fresh, and only for the first
+   * routine after it was kept. It stays for linkContext('connect') until it expires or the
+   * connection ends (#onClose).
+   */
   #takeConnectContext() {
     const kept = this.#connectContext;
-    this.#connectContext = null;
-    return kept && performance.now() - kept.at <= this.#connectTraceMs ? kept.context : null;
+    if (!kept || kept.used) return null;
+    kept.used = true;
+    return performance.now() - kept.at <= this.#connectTraceMs ? kept.context : null;
   }
 
   #commandFilter() {
@@ -470,6 +512,8 @@ export class Terminal {
 
   /** The post-connect routine, in the flow kept for it (a fresh plug) or in none. */
   #afterConnect(client) {
+    // connected again: a later logout is not the doing of the pull or switch-off before this
+    this.#disconnectContext = null;
     const kept = this.#takeConnectContext();
     return this.#untraced(() => (kept ? this.#withContext(kept, () => this.#onConnect(client)) : this.#onConnect(client)));
   }
@@ -498,7 +542,12 @@ export class Terminal {
         // the client's store is already closed: nothing left to resend
       }
     }
-    if (client === this.#client) this.#stopHeartbeat();
+    if (client === this.#client) {
+      this.#stopHeartbeat();
+      // The connection a plug or traceNextConnect() kept its flow for is over: a later login
+      // (after a kick, say) is not that flow's doing (linkContext('connect')).
+      if (this.#connectContext?.used) this.#connectContext = null;
+    }
   }
 
   #startHeartbeat(client) {

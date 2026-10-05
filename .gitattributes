@@ -1,0 +1,6 @@
+# Line endings of the double-click launchers (docs/DESIGN.md §13), on every checkout and in the
+# ZIP that GitHub makes: Windows' cmd.exe misreads a .bat with bare LF line endings, and bash
+# fails on CR at line ends, which a Windows checkout would otherwise add to the shell scripts.
+*.bat text eol=crlf
+*.sh text eol=lf
+*.command text eol=lf

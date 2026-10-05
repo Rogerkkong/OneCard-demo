@@ -15,6 +15,9 @@ import { KIOSK_FAULTS } from '../devices/kiosk.js';
 // Simulation mode (DESIGN §11.5) is worked from onecard> and server#: switch it on, hold each
 // traced flow at every hop, let the next hop go, and read a flow back step by step. Commands
 // trace through the lab actions they call; a console line starts no trace of its own.
+//
+// The lab is built from onecard> too (DESIGN §12): add machine and add school do what the lab
+// console's device palette does.
 
 /** Longest line the console prints. */
 export const MAX_LINE = 100;
@@ -42,6 +45,13 @@ const SIM_HELP = Object.freeze([
   ['show traces', 'the most recent flows: every action starts one'],
   ['show trace <n>', 'one flow step by step, e.g. show trace 3'],
 ]);
+// Building the lab (DESIGN §12), at onecard>: what the lab console's device palette does.
+const ADD_HELP = Object.freeze([
+  ['add machine <school> <type> [CODE]', 'add a machine, its cable out; type: canteen, water or kiosk'],
+  ['add school <code> <name...>', 'add a school: 3 machines (cables out) and 5 students'],
+]);
+const ADD_MACHINE_USAGE = 'Usage: add machine <school> canteen|water|kiosk [CODE]';
+const ADD_SCHOOL_USAGE = 'Usage: add school <code> <name...>, e.g. add school smk-baru SMK Baru';
 // Where a held hop waits, in a word for show held.
 const WHERE_WORDS = Object.freeze({ machine: 'outbox', 'kiosk-http': 'kiosk call', platform: 'platform' });
 // The early answer of a held action, riding on the lines that describe it (heldLines -> run).
@@ -211,7 +221,7 @@ function stepText(e) {
     case 'device.step':
       return deviceStepText(d);
     case 'device.send':
-      return `${dev} sends ${d.type} (seq ${d.seq}${d.txn ? `, ${d.txn}` : ''})`;
+      return `${dev}${d.copiedLogin ? ' (a copied login)' : ''} sends ${d.type} (seq ${d.seq}${d.txn ? `, ${d.txn}` : ''})`;
     case 'device.acked':
       return d.ok ? `${dev}: the broker took ${d.type} (${d.ms} ms)` : `${dev}: ${d.type} not acknowledged (${d.reason})`;
     case 'device.received':
@@ -227,7 +237,11 @@ function stepText(e) {
     case 'mqtt.publish':
       return `the broker passes ${d.type ?? 'a message'} from ${d.from ?? '-'}${d.retained ? ' (retained)' : ''}`;
     case 'mqtt.denied':
-      return `the broker refuses ${d.action} by ${d.username ?? 'someone'}: ${d.reason ?? ''}`;
+      return `the broker refuses ${d.action} by ${d.username ?? 'someone'}${d.topic ? ` on ${d.topic}` : ''}`;
+    case 'mqtt.connect':
+      return `${d.username ?? 'someone'} logs in to the broker`;
+    case 'mqtt.disconnect':
+      return `${d.username ?? 'someone'} leaves the broker`;
     case 'intake.accepted': {
       const results = Array.isArray(d.results) && d.results.length > 0 ? `: ${recordResults(d.results)}` : '';
       const snap = d.snapshot?.checked ? (d.snapshot.match ? ', card = books' : `, card differs (${d.snapshot.code ?? 'mismatch'})`) : '';
@@ -252,7 +266,13 @@ function stepText(e) {
     case 'server.status':
       return `the cloud server is ${d.up ? 'on' : 'off'}`;
     case 'broker.status':
-      return `the MQTT broker is ${d.up ? 'up' : 'down'}`;
+      return `the MQTT broker is ${d.up ? 'up' : 'down'}${d.reason ? ` (${d.reason})` : ''}`;
+    case 'device.registered':
+      return `${d.code} (${TYPE_NAMES[d.type] ?? d.type}) registered on the platform`;
+    case 'tenant.created':
+      return `school ${d.code} onboarded: ${d.name}`;
+    case 'card.issued':
+      return `card ${d.uid} issued`;
     case 'lab.clock':
       return `the lab clock now shows ${when(d.now)}`;
     case 'lab.action':
@@ -327,6 +347,7 @@ export function createConsole(lab) {
           ['connect <school>/<DEVICE>', 'log in to a machine, e.g. connect smk-contoh/CANTEEN-01'],
           ['connect server', 'log in to the virtual cloud server'],
           ['clock', 'the lab clock'],
+          ...ADD_HELP,
           ...SIM_HELP,
           ['help or ?', 'this list'],
           ['exit', 'close this session'],
@@ -740,6 +761,44 @@ export function createConsole(lab) {
     return null;
   }
 
+  // ---- building the lab (DESIGN §12) ---------------------------------------------------------
+
+  async function addMachine(args) {
+    if (args.length < 2) return `% Incomplete command. ${ADD_MACHINE_USAGE}`;
+    const type = args[1].toLowerCase();
+    if (args.length > 3 || !['canteen', 'water', 'kiosk'].includes(type)) return `% Invalid input. ${ADD_MACHINE_USAGE}`;
+    const result = await lab.addDevice({ schoolCode: args[0], type: type.toUpperCase(), ...(args[2] ? { code: args[2] } : {}) });
+    const m = result.machine;
+    const key = `${m.school}/${m.code}`;
+    return [
+      `Added ${TYPE_NAMES[m.type]} ${key}.`,
+      'It is registered on the platform and installed with its cable out.',
+      `Plug it in: connect ${key}, then cable plug.`,
+    ];
+  }
+
+  async function addSchool(args) {
+    if (args.length < 2) return `% Incomplete command. ${ADD_SCHOOL_USAGE}`;
+    const result = await lab.addSchool({ code: args[0], name: args.slice(1).join(' ') });
+    const { code, name } = result.school;
+    const cards = lab.state().schools.find((x) => x.code === code)?.cards.length ?? 0;
+    return [
+      `Added the school ${name} (${code}).`,
+      `Its machines, cables out: ${result.machines.map((m) => m.code).join(', ') || 'none'}.`,
+      `In the tray: ${plural(cards, 'student card')} and the school's admin card.`,
+      `Plug a machine in: connect ${code}/<DEVICE>, then cable plug.`,
+    ];
+  }
+
+  function addCommand(words) {
+    const what = words[1]?.toLowerCase();
+    if (what === 'machine') return addMachine(words.slice(2));
+    if (what === 'school') return addSchool(words.slice(2));
+    return words.length === 1
+      ? '% Incomplete command. Usage: add machine <school> <type> [CODE] | add school <code> <name...>'
+      : '% Invalid input. Usage: add machine <school> <type> [CODE] | add school <code> <name...>';
+  }
+
   // ---- a machine's prompt ------------------------------------------------------------------
 
   function codes(key) {
@@ -1087,6 +1146,7 @@ export function createConsole(lab) {
       const answer = simCommand(words);
       if (answer !== null) return answer;
     }
+    if (session.target === null && cmd === 'add') return addCommand(words);
     if (session.target === 'server') return serverCommand(words);
     if (session.target) return machineCommand(session.target, words);
     return UNKNOWN_COMMAND;

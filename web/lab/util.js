@@ -142,6 +142,7 @@ const ICONS = {
   card: '<rect x="2.5" y="5.5" width="19" height="13" rx="2"/><rect x="5.5" y="9" width="4.5" height="3.6" rx="0.6"/>',
   terminal: '<rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="M6.5 9l3 3-3 3M11.5 15h5"/>',
   messages: '<path d="M4 5h16v10H9l-5 4V5z"/><path d="M8 9h8M8 12h5"/>',
+  plus: '<path d="M12 5.5v13M5.5 12h13"/>',
 };
 
 /** An inline SVG icon (decorative: hidden from assistive technology). */

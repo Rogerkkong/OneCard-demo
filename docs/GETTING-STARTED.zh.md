@@ -20,6 +20,9 @@
 
 ## 第 1 步：安装 Node.js（只需一次）
 
+> 不想装 Node.js？**桌面版**是一个文件，什么都包含在里面：看 README 里的
+> [桌面版（不用装 Node.js）](../README.md#中文简介)，然后直接跳到第 4 步。
+
 **Windows**
 1. 打开 <https://nodejs.org/>，下载 **LTS** 版本（Windows Installer，`.msi`）。
 2. 运行安装程序，全部用默认值（Next、Next、Install）。
@@ -40,6 +43,27 @@
 
 ## 第 3 步：启动实验室
 
+**最简单：双击（Mac 和 Windows）**
+
+1. 打开项目文件夹（解压后的文件夹，或 GitHub Desktop、Git 下载的文件夹）。
+2. 双击启动文件：
+   - Mac：**Start OneCard Lab.command**
+   - Windows：**Start OneCard Lab.bat**
+3. 会打开一个窗口（Mac 上是 Terminal）。第一次会先下载实验室用的两个库（需要网络，大约一分钟）。
+   然后实验室启动，**浏览器会自己打开实验室控制台**。
+
+只有第一次，电脑可能会先问你：
+
+- **Mac**，如果文件夹是从网上下载的 ZIP：macOS 会说无法检查这个文件。右键点启动文件 → **打开** → **打开**。
+  macOS 15（Sequoia）及以后：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
+  （用 Git 或 GitHub Desktop 拿到的文件夹不会这样。）
+- **Mac**：如果 macOS 问 Terminal 能不能访问"桌面"（或"文稿""下载"）文件夹里的文件，按 **允许**（或 **好**）：实验室的文件就在那里。
+- **Windows**：如果 SmartScreen 显示"Windows 已保护你的电脑"，按 **更多信息** → **仍要运行**。
+  要在*解压后*的文件夹里双击，不要在 ZIP 里面双击。
+- 如果没有 Node.js 或版本太旧，窗口会（用英文和中文）说明，并打开 Node.js 下载页：做完第 1 步，再双击一次启动文件。
+
+**用终端（Terminal）**
+
 1. 在**项目文件夹里**打开终端：
    - Windows：用文件资源管理器打开这个文件夹，点一下地址栏，输入 `powershell`，按 Enter。
    - Mac：在 Terminal 输入 `cd `（后面有一个空格），把文件夹拖进窗口，按 Enter。
@@ -51,6 +75,7 @@
    ```sh
    npm start
    ```
+   （`npm start -- --open` 会顺便在浏览器里打开实验室控制台。）
 4. 你会看到：
    ```text
    OneCard Lab is running (lab data only — nothing here is real).
@@ -62,7 +87,8 @@
      ...
    ```
 
-这个窗口不要关：**它就是服务器**。按 **Ctrl+C** 停止。每次启动都会回到同一份全新的示范资料，所以怎么玩都不会弄坏。
+不管用哪种方法，实验室的窗口都不要关：**它就是服务器**。关掉它，或在里面按 **Ctrl+C**，就会停止实验室。
+每次启动都会回到同一份全新的示范资料，所以怎么玩都不会弄坏。
 
 ## 第 4 步：刷第一张卡（浏览器）
 
@@ -146,7 +172,45 @@
 
 控制台（PuTTY / nc）也可以做一样的事：`simulation on`、`hold on`、`next`、`show held`、`show traces`、`show trace 1`。
 
-## 第 6 步：像登录交换机一样登录机器（PuTTY）
+## 第 6 步：用拖放自己建一所学校（像 Packet Tracer）
+
+在 Packet Tracer 里，你从设备栏拖一台交换机出来，再画上网线。实验室控制台标题下面的 **加到实验室** 栏也一样：
+**食堂刷卡机**、**饮水机**、**充值机** 和 **学校**（英文界面是 Add to the lab：Canteen reader、Water machine、
+Top-up kiosk、School）。
+
+**加一台食堂刷卡机**
+1. 把栏里的 **食堂刷卡机** 拖到 **SMK Seri Contoh** 上。拖的时候，可以放的地方会有虚线框，指针下面那个会变成实线。
+   在学校上面放开。
+2. 会打开一个小窗口，已经填好下一个空着的编号：**CANTEEN-03**。想的话可以填摆放位置（例如 *食堂柜台 C*），
+   再按 **加机器**。
+3. CANTEEN-03 出现在学校区块里（页面会自己卷到那里），状态是 **没有网络**：它的网线还没插上，网线头挂在学校网络线下面。
+
+不想拖？在学校区块按 **加机器**，或在栏里按一下 **食堂刷卡机**，再在窗口里选学校。手机上：按住项目再拖；左右滑是卷动这一栏。
+按 Escape，或在别的地方放开，就是取消。
+
+**画上它的网线**
+1. 按住 CANTEEN-03 上面的网线头，往上拖到 **学校网络线**（机器上方那条灰线）。网线头到了线上，线会亮起来；放开。
+2. CANTEEN-03 变成 **已连线**。跟第 4 步一样，在它上面刷卡买一个 *Nasi lemak*：屏幕显示 **Paid RM 3.50** 和新余额。
+   新机器跟其他机器一样能用：加进来的时候，它已经拿到学校的价格和设置。
+3. 要拔网线：把网线头拖离网络线（或按 **拔网线**）。**插上网线** 按钮也照样能用。
+
+**加一所学校**
+1. 把 **学校** 拖到 **互联网** 线（左边往下的那条线）或云端服务器上。（或在栏里按 **加学校**。）
+2. 输入名称，例如 *SMK Bukit Indah*：学校代码 *smk-bukit-indah* 会从名称自动产生。演示学生选 **3** 位，三种机器都保持打勾。
+   按 **加学校**。
+3. 它的区块出现了：CANTEEN-01、KIOSK-01 和 WATER-01，网线都是拔掉的；卡片托盘里有三张新卡（Aina Contoh、
+   Boon Keat Contoh、Chitra Contoh，每张 RM 0.00）；还有它自己的参数卡。它也会有三位虚构的员工：Puan Deepa a/p Murugan
+   （办公室）、Encik Lim Chee Keong（财务）和 Cikgu Aminah binti Yusof（管理员）。
+4. 给学生一点钱：在 **学校后台** 用 **Encik Lim Chee Keong**（SMK Bukit Indah）登录，打开 **充值**，给 Aina Contoh
+   **发放补助** RM 5.00。画上新 **KIOSK-01** 的网线，再在它上面刷 Aina 的卡：**Added RM 5.00 · Balance RM 5.00**。
+   画上新 **CANTEEN-01** 的网线，卖给她一个 Roti canai 和一杯 Teh tarik：**Paid RM 3.30 · Balance RM 1.70**。
+
+**在模拟模式里看：** 切到 **模拟**，再加一台饮水机，勾上 **现在就插上网线**。新的流程会显示：平台登记这台机器、
+把价格和设置发给它、插上网线、机器登录 broker，还有它的第一次心跳。
+
+控制台也可以做：`add machine smk-contoh water` 和 `add school smk-baru SMK Baru`。按 **重置演示…** 就会把你加的东西全部清掉。
+
+## 第 7 步：像登录交换机一样登录机器（PuTTY）
 
 每一台虚拟机器，还有服务器本身，都有一个文字控制台，就像交换机的 CLI。
 
@@ -189,7 +253,7 @@ onecard> exit
   这样一次刷卡绝不会被扣两次。
 - 在任何提示符下输入 `?` 或 `help`，就会列出那里能用的命令。实验室控制台的 **Console** 页签里也有一样的控制台。
 
-## 第 7 步：看机器的消息（MQTT Explorer）
+## 第 8 步：看机器的消息（MQTT Explorer）
 
 就像 Wireshark，不过看的是机器和服务器之间的消息。
 
@@ -201,7 +265,7 @@ onecard> exit
 `viewer` 这个账号只能看。每台机器都有自己的账号，只能用自己的 topic；其他的服务器一律拒绝
 （[SCENARIOS.md](SCENARIOS.md) 的练习 10 会示范）。
 
-## 第 8 步：用手机看家长网页
+## 第 9 步：用手机看家长网页
 
 1. 先停掉实验室（Ctrl+C），改用 `npm run start:lan` 启动。
 2. 它会印出一行，例如 `On a phone on the same Wi-Fi: http://192.168.1.20:8080/parent/`。
@@ -209,10 +273,10 @@ onecard> exit
 
 只在你信任的网络里这样做：实验室没有密码。
 
-## 第 9 步：练习
+## 第 10 步：练习
 
-[SCENARIOS.md](SCENARIOS.md) 有 16 个带预期结果的练习：离线消费、挂失、充值机断电、复制卡、
-开通第三所学校、整台云端服务器停机等等。
+[SCENARIOS.md](SCENARIOS.md) 有 17 个带预期结果的练习：离线消费、挂失、充值机断电、复制卡、
+开通第三所学校、整台云端服务器停机、用拖放建一所学校等等。
 
 ## 遇到问题？
 
@@ -220,7 +284,11 @@ onecard> exit
 |---|---|
 | `node` 不是内部或外部命令 | 装好 Node.js 后关掉 PowerShell 再重新打开（或重启 Windows）。 |
 | `OneCard Lab needs Node.js 22.13 or newer` | 到 nodejs.org 装最新的 LTS。 |
-| `EADDRINUSE`／端口被占用 | 有别的程序在用 8080、1883 或 2323。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。 |
+| `Port 1883 (the MQTT broker) is already in use`（或 8080、2323；Windows 上也可能是 `cannot be used on this computer`）／端口被占用 | 有别的程序在用这个端口（Windows 上也可能是 Hyper-V、WSL 或 Docker 占着它）。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。双击启动和桌面版会自己换一个空的端口。 |
+| `OneCard Lab is already running` | 另一个窗口里已经开着实验室：用那一个就好（双击启动会直接在浏览器里打开它），或先关掉那个窗口。 |
+| Mac："无法打开"、"Apple 无法验证……" | 右键 → **打开** → **打开**。macOS 15 及以后：先试一次，再到 **系统设置 → 隐私与安全性** → **仍要打开**。 |
+| Windows："Windows 已保护你的电脑" | **更多信息** → **仍要运行**。 |
+| 启动文件说文件不全 | 你是在 ZIP 里面打开的。先把文件夹解压（Windows：右键点 ZIP → **全部解压缩**），再在解压后的文件夹里双击启动文件。 |
 | PuTTY 显示 "Connection refused" | 实验室没在跑，或选了 SSH 而不是 **Telnet**，或端口不是 2323。 |
 | PuTTY 每个字出现两次 | PuTTY → *Terminal*，把 *Local echo* 设为 **Auto**。 |
 | MQTT Explorer 什么都没有 | 检查端口 1883 和账号 `viewer` / `viewer`；去刷一张卡制造一些消息。 |

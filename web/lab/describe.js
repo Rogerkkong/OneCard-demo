@@ -135,12 +135,14 @@ function recordResults(results, t) {
   return `${t('colon')}${t('ev.records', { n: results.length, list })}`;
 }
 
-// Why the lab stopped its broker (src/lab/lab.js, closeBroker): the known reasons in the page's language.
-const BROKER_REASONS = { 'server switched off': 'serverOff', restart: 'restart', reset: 'reset', 'lab stopped': 'labStopped' };
-
-/** The broker's stop reason in plain words (a reason this page does not know stays as the lab wrote it). */
-export function brokerReason(reason, t) {
-  return Object.hasOwn(BROKER_REASONS, reason ?? '') ? t(`st.broker.reason.${BROKER_REASONS[reason]}`) : String(reason ?? '');
+/**
+ * Why the broker started or stopped (broker.status `code`, DESIGN §11.7) in plain words; for a
+ * code this page does not know, the lab's own English `reason` ('' when it gave none).
+ */
+export function brokerReason(data, t) {
+  const code = data?.code;
+  if (typeof code === 'string' && hasKey(`broker.code.${code}`)) return t(`broker.code.${code}`);
+  return typeof data?.reason === 'string' ? data.reason : '';
 }
 
 /** How far the clock moved, in plain words. */
@@ -173,6 +175,10 @@ function labAction(d, t, lang) {
       return t('ev.lab.brokerRestart');
     case 'reset':
       return t('ev.lab.reset');
+    case 'add-device':
+      return t(d.cablePlugged ? 'ev.lab.addDevicePlugged' : 'ev.lab.addDevice', { code: d.device ?? '', type: translatedOr(t, `type.${d.type}`, d.type ?? '') });
+    case 'add-school':
+      return t('ev.lab.addSchool', { code: d.school ?? '', machines: d.machines ?? 0, students: d.students ?? 0 });
     case 'fault': {
       let s = t('ev.lab.fault', { name: translatedOr(t, `fault.${d.type}.title`, d.type) });
       const bits = [d.device, d.uid, d.copy && `→ ${d.copy}`, d.txn, d.messageType, d.topic, d.platform].filter(Boolean);
@@ -294,8 +300,11 @@ export function summarize(e, t, lang) {
     }
     case 'server.status':
       return t(d.up ? 'ev.server.up' : 'ev.server.down');
-    case 'broker.status':
-      return d.up ? t('ev.broker.up', { url: d.url ?? '' }) : t('ev.broker.down', { reason: brokerReason(d.reason, t) });
+    case 'broker.status': {
+      const reason = brokerReason(d, t);
+      if (d.up) return t(reason ? 'ev.broker.upWhy' : 'ev.broker.up', { url: d.url ?? '', reason });
+      return t(reason ? 'ev.broker.down' : 'ev.broker.downPlain', { reason });
+    }
     default:
       return '';
   }

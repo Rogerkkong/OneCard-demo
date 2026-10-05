@@ -48,11 +48,84 @@ schools from the operator console.
 
 With Docker instead of Node: `docker compose up --build`.
 
+`npm start -- --open` also opens the lab console in your browser, and `npm start -- --help` lists every
+option and setting. Rather not use Terminal? [Double-click a launcher](#start-it-without-terminal), or take
+the [desktop app](#desktop-app-no-nodejs-needed), which needs no Node.js at all.
+
+## Start it without Terminal
+
+In the project folder, double-click the launcher for your computer:
+
+| Computer | Double-click |
+|---|---|
+| Mac | `Start OneCard Lab.command` |
+| Windows | `Start OneCard Lab.bat` |
+| Linux | `start-onecard-lab.sh` (or run `./start-onecard-lab.sh` in a terminal) |
+
+A window opens, and once the lab is up the lab console opens in your web browser. Keep the window
+open while you use the lab: close it, or press Ctrl+C in it, to stop the lab.
+
+What happens the first time:
+
+- It needs [Node.js](https://nodejs.org/en/download) 22.13 or newer. If Node.js is missing or too old, the
+  window says so in English and 中文 and opens the download page: install the LTS version, then
+  double-click again.
+- It downloads the two libraries the lab uses (needs the internet, about a minute). After an update
+  (a `git pull`, or a newer download) it does this again by itself.
+- **Mac**, if the folder came as a ZIP from the internet: macOS may say it cannot check the launcher.
+  Right-click it → **Open** → **Open**. On macOS 15 (Sequoia) and later: double-click it once, close the
+  message, then **System Settings → Privacy & Security** → **Open Anyway**. (A folder from `git clone` or
+  GitHub Desktop opens straight away.) If macOS asks whether Terminal may access files in your Desktop,
+  Documents or Downloads folder, click **Allow** (or **OK**).
+- **Windows**: unzip the folder first (right-click the ZIP → **Extract All**); a launcher inside the ZIP
+  cannot find the rest. If SmartScreen says "Windows protected your PC": **More info** → **Run anyway**.
+
+If another program already uses port 8080, 1883 or 2323, the lab takes a free port instead and says so in
+the window. If a OneCard Lab is already running, the browser opens that one.
+
+## Desktop app (no Node.js needed)
+
+The desktop app is one file with the whole lab and Node.js inside: nothing to install. Download it:
+
+- **Release** (for everyone): on the GitHub page, **Releases** → the newest one → **Assets** → the ZIP for
+  your computer.
+- **GitHub Actions run** (the newest build, for testing; you must be signed in to GitHub):
+  **Actions** → **Desktop app** → a run with a green tick → **Artifacts** at the bottom of the page.
+
+| Your computer | File |
+|---|---|
+| Mac with Apple silicon (M1, M2, M3, M4…) | `onecard-lab-mac-arm64` |
+| Mac with an Intel processor | `onecard-lab-mac-x64` |
+| Windows (64-bit) | `onecard-lab-win-x64.exe` |
+| Linux (64-bit) | `onecard-lab-linux-x64` |
+
+Which Mac? Apple menu → **About This Mac**: "Chip: Apple M…" is Apple silicon, "Processor: … Intel" is Intel.
+
+Unzip it and double-click the file. A window opens (Terminal on a Mac) and the lab console opens in your
+browser; close the window to stop the lab. The first start unpacks the web apps into the computer's
+temporary folder. The ports and settings are the same as `npm start` (`--help` lists them).
+
+The apps are not signed, so the first time:
+
+- **macOS 15 (Sequoia) and later**: double-click the file once and close the message, then open
+  **System Settings → Privacy & Security**, scroll down, click **Open Anyway** and confirm. Or in Terminal:
+  `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64` (your file's name and folder).
+- **macOS 14 and earlier**: right-click the file → **Open** → **Open**.
+- If macOS asks whether Terminal may access files in your Downloads (or Desktop, Documents) folder, click
+  **Allow** (or **OK**).
+- **Windows**: if SmartScreen says "Windows protected your PC", click **More info** → **Run anyway**.
+- A Mac or Linux file from an **Actions run** loses its "can run" mark in the download (Release ZIPs keep
+  it). In Terminal: `chmod +x ~/Downloads/onecard-lab-mac-arm64`.
+
+To check the app on a computer, start it in a terminal with `--self-test`: it starts the lab on free
+ports, checks the web apps answer, stops, and says whether it passed. To build it yourself for your own
+computer: `npm install`, then `npm run build:app` (the file lands in `dist/`).
+
 ## What you need on your computer
 
 | Tool | What it is for | Needed? |
 |---|---|---|
-| [Node.js](https://nodejs.org/) 22 LTS, **or** [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Runs the whole lab: the virtual cloud server, the broker and every virtual machine | Yes, one of the two |
+| [Node.js](https://nodejs.org/) 22 LTS, **or** [Docker Desktop](https://www.docker.com/products/docker-desktop/), **or** the [desktop app](#desktop-app-no-nodejs-needed) | Runs the whole lab: the virtual cloud server, the broker and every virtual machine | Yes, one of the three |
 | A web browser (Chrome, Edge, Safari) | Lab console, operator console, school office, parent app | Yes |
 | Git, or *Code → Download ZIP* on GitHub | Getting the code | Yes |
 | [PuTTY](https://www.putty.org/) (Windows) or Terminal (Mac/Linux) | Logging in to a machine's or the server's console, like a switch | Optional |
@@ -67,6 +140,13 @@ under the cloud server. Pick a card from the tray and tap it on a machine; choos
 canteen reader or a volume at a water machine; unplug or plug a machine's network cable;
 load the admin card at the kiosk and tap it on offline machines; switch the server off. Each
 machine shows its own screen, just like the real one would.
+
+**Build it like Packet Tracer.** The **Add to the lab** bar under the lab console's header holds a canteen
+reader, a water machine, a top-up kiosk and a school. Drag a machine onto a school, or a school onto the
+internet line, fill in the small window and press **Add machine** or **Add school**. The platform registers it as it would a real one,
+and it arrives with its cable unplugged. Then draw the cable: drag the machine's cable end onto the school
+network line. Every drag has a button too (**Add machine** on each school, **Add school** in the bar), and the
+text console has `add machine <school> canteen|water|kiosk` and `add school <code> <name>`.
 
 **Like PuTTY into a switch.** Every machine and the server has a text console on port 2323:
 
@@ -135,11 +215,12 @@ broker refuses everything else.
 
 ## Exercises
 
-[docs/SCENARIOS.md](docs/SCENARIOS.md) has 16 guided exercises with expected results:
+[docs/SCENARIOS.md](docs/SCENARIOS.md) has 17 guided exercises with expected results:
 online and offline canteen sales, water by the litre, parent top-ups, refunds of money
 never added, lost cards and the window before offline machines know, replacement cards,
 new prices, device security, kiosk power cuts, copied cards, reconciliation, onboarding
-more schools (SaaS tenants), switching the whole cloud server off, and Simulation mode.
+more schools (SaaS tenants), switching the whole cloud server off, Simulation mode, and
+building a school by drag and drop.
 
 ## What is simulated, and what is not
 
@@ -188,6 +269,11 @@ that the broker's name is in the certificate — the same checks a real terminal
 | `LAB_HOST` | 127.0.0.1 | listen address; anything else exposes the lab (which has no passwords) to your network (`npm run start:lan` = `0.0.0.0`) |
 | `LAB_MQTT_TLS_CERT`, `LAB_MQTT_TLS_KEY`, `LAB_MQTT_TLS_PORT` | — , — , 8883 | optional TLS listener |
 
+Options (after `npm start --`, or after the desktop app's name): `--open` opens the lab console in your
+browser (the launchers and the desktop app do this; `--no-open` turns it off), `--lan` is what
+`npm run start:lan` does, `--self-test` starts on free ports, checks the web apps and stops (exit code 0
+when it works), `--help` lists everything.
+
 ## How it is built
 
 One Node.js process, two dependencies (`aedes` for the broker, `mqtt` for clients), and
@@ -198,6 +284,7 @@ model, the device protocol, every module's contract and the HTTP API.
 
 ```sh
 npm test            # unit tests and end-to-end scenarios
+npm run build:app   # the single-file desktop app for this computer, in dist/
 ```
 
 ---
@@ -222,8 +309,43 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 - 学校后台 http://localhost:8080/admin/ ：单一学校的职员：学生和卡、挂失、机器、价格、充值、账本、对账
 - 家长网页 http://localhost:8080/parent/ ：邀请码绑定、看余额、用模拟银行充值
 
+**不用 Terminal 启动：** 在项目文件夹里双击你电脑的启动文件：Mac 用 `Start OneCard Lab.command`，Windows 用
+`Start OneCard Lab.bat`（Linux：`start-onecard-lab.sh`，或在终端输入 `./start-onecard-lab.sh`）。会打开一个窗口，实验室起来后，
+浏览器会自动打开实验室控制台。用实验室的时候不要关这个窗口；关掉它，或在里面按 Ctrl+C，就会停止实验室。第一次：
+- 要有 Node.js 22.13 或更新的版本。没有或太旧的话，窗口会用英文和中文说明，并打开 Node.js 下载页：装好 LTS 版本后再双击一次。
+- 它会下载实验室用的两个库（需要网络，大约一分钟）。以后更新了（`git pull` 或下载了新版本），它会自己再装一次。
+- **Mac**：如果文件夹是从网上下载的 ZIP，macOS 可能说无法检查这个启动文件。右键点它 → **打开** → **打开**。macOS 15（Sequoia）
+  及以后：先双击一次、关掉提示，再到 **系统设置 → 隐私与安全性** → **仍要打开**。（用 `git clone` 或 GitHub Desktop 拿到的文件夹不会这样。）
+  如果 macOS 问 Terminal 能不能访问"桌面""文稿"或"下载"文件夹里的文件，按 **允许**（或 **好**）。
+- **Windows**：先把 ZIP 解压（右键点 ZIP → **全部解压缩**），在 ZIP 里面直接双击会找不到其他文件。如果 SmartScreen 显示
+  "Windows 已保护你的电脑"：按 **更多信息** → **仍要运行**。
+
+如果 8080、1883 或 2323 端口已经被别的程序占用，实验室会自己换一个空的端口，并在窗口里说明。如果已经有一个 OneCard Lab 在跑，
+浏览器会直接打开那一个。
+
+**桌面版（不用装 Node.js）：** 一个文件就包含整个实验室和 Node.js，什么都不用装。下载：
+- **Release**（给所有人用）：在 GitHub 页面按 **Releases** → 最新的版本 → **Assets** → 选你电脑的 ZIP。
+- **GitHub Actions 运行**（最新的测试版，要先登录 GitHub）：**Actions** → **Desktop app** → 一次打绿勾的运行 → 页面最下面的 **Artifacts**。
+
+哪个文件：Apple 芯片的 Mac（M1、M2、M3、M4……）用 `onecard-lab-mac-arm64`，Intel 处理器的 Mac 用 `onecard-lab-mac-x64`，
+Windows（64 位）用 `onecard-lab-win-x64.exe`，Linux（64 位）用 `onecard-lab-linux-x64`。不知道是哪种 Mac？苹果菜单 → **关于本机**：
+写"芯片：Apple M……"的是 Apple 芯片，写"处理器：……Intel"的是 Intel。
+
+解压后双击这个文件：会打开一个窗口（Mac 上是 Terminal），浏览器会打开实验室控制台；关掉窗口就停止实验室。第一次启动会把网页文件
+解压到电脑的暂存文件夹。端口和设置跟 `npm start` 一样（`--help` 会全部列出）。这些文件没有签名，所以第一次：
+- **macOS 15（Sequoia）及以后**：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
+  或在 Terminal 输入 `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64`（换成你的文件名和文件夹）。
+- **macOS 14 及更早**：右键点这个文件 → **打开** → **打开**。
+- 如果 macOS 问 Terminal 能不能访问"下载"（或"桌面""文稿"）文件夹里的文件，按 **允许**（或 **好**）。
+- **Windows**：如果 SmartScreen 显示"Windows 已保护你的电脑"，按 **更多信息** → **仍要运行**。
+- 从 **Actions 运行** 下载的 Mac 和 Linux 文件会丢掉"可以运行"的标记（Release 的 ZIP 不会）。在 Terminal 输入
+  `chmod +x ~/Downloads/onecard-lab-mac-arm64`。
+
+想检查桌面版在一台电脑上能不能用：在终端用 `--self-test` 启动它，它会在空的端口上启动实验室、检查网页能打开、再停止，并说明结果。
+自己打包：`npm install`，再 `npm run build:app`（文件在 `dist/` 里）。
+
 **电脑上要装什么：**
-- Node.js 22 LTS，或者 Docker Desktop（二选一）：跑整个实验室，包括虚拟云端服务器、broker 和所有虚拟机器
+- Node.js 22 LTS，或者 Docker Desktop，或者桌面版（三选一）：跑整个实验室，包括虚拟云端服务器、broker 和所有虚拟机器
 - 浏览器（Chrome、Edge、Safari 都可以）
 - Git，或在 GitHub 上按 *Code → Download ZIP* 下载代码
 - （可选）PuTTY（Windows）或 Mac 的 Terminal：像登录交换机一样登录机器或服务器的控制台
@@ -235,6 +357,10 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 - **浏览器（实验室控制台 `/lab/`）：** 每所学校的机器画成拓扑图，挂在云端服务器下面。从卡盒拿一张卡，在机器上刷；
   食堂机选食物、饮水机选水量；拔插机器的网线；在充值机装参数卡，再到离线机器上刷；也可以关掉服务器。
   每台机器都有自己的屏幕，跟真机器一样。
+- **像 Packet Tracer 一样搭建：** 实验室控制台标题下面的 **加到实验室** 栏里有食堂刷卡机、饮水机、充值机和学校。
+  把机器拖到一所学校上，或把学校拖到互联网线上，填好小窗口再按 **加机器** 或 **加学校**。平台会像登记真机器一样登记它，装好时网线是拔掉的；
+  再把机器的网线头拖到学校网络线上，就插上了。每个拖放都有按钮可以代替（每所学校的 **加机器**、栏里的 **加学校**），
+  文字控制台也有 `add machine <学校> canteen|water|kiosk` 和 `add school <代码> <名称>`。
 - **像用 PuTTY 登录交换机：** PuTTY → Host Name `127.0.0.1`，Port `2323`，Connection type 选 **Telnet** → Open
   （Mac：`telnet 127.0.0.1 2323`）。输入 `machines` 看所有机器，`connect smk-contoh/CANTEEN-01` 连到一台，
   `show status`、`tap <卡号> NASI-LEMAK`、`cable unplug`、`show journal`；`connect server` 再 `server down` 就是关服务器。
@@ -252,8 +378,8 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 
 **看设备消息：** 用 MQTT Explorer 或 `mosquitto_sub`，只读账号 `viewer` / `viewer`，订阅 `lab/v1/#`。
 
-**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 16 个带预期结果的练习，从在线、离线消费，到挂失窗口、
-充值机断电、复制卡、对账、新增学校（多租户）和整台云端服务器停机。
+**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 17 个带预期结果的练习，从在线、离线消费，到挂失窗口、
+充值机断电、复制卡、对账、新增学校（多租户）、整台云端服务器停机，还有用拖放建一所学校。
 
 **安全须知：** 实验室只适合在你自己的电脑或信任的网络里用：它**没有密码**，登录页会列出所有示范人物，实验室控制台可以关掉任何东西或整个重置。默认只听 `127.0.0.1`；`npm run start:lan` 才开放给局域网。它只回应 `localhost` 和 IP 地址，所以你浏览的网站没法把自己的域名指到你的电脑来操控实验室（DNS rebinding）；要用别的名字就设 `LAB_ALLOWED_HOSTS`。不要放到公网上。
 

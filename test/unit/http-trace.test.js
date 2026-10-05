@@ -13,7 +13,10 @@ import { signRequest } from '../../src/shared/crypto.js';
 // fake here: the server only needs has(id) and run(meta, fn). Schools, staff and parents are
 // the fictional demo seed.
 
-/** A tracer as the server sees it: runs `fn` in a new trace, and knows the traces it started (or was told of). */
+/**
+ * A tracer as the server sees it: runs `fn` in a new trace, and knows the traces it started (or
+ * was told of).
+ */
 function fakeTracer(events) {
   let n = 0;
   const known = new Set();
@@ -110,7 +113,9 @@ describe('request traces', () => {
     const office = browser(url);
     assert.equal((await office.post('/api/admin/login', { staffId: staff('smk-contoh', 'FINANCE').id })).status, 200);
     // signing in: no staff session yet, so no school
-    assert.deepEqual(tracer.runs.map((r) => r.meta), [{ kind: 'request', title: 'School office: POST /api/admin/login' }]);
+    assert.deepEqual(tracer.runs.map((r) => r.meta), [
+      { kind: 'request', title: 'School office: POST /api/admin/login', subject: { area: 'admin', method: 'POST', path: '/api/admin/login' } },
+    ]);
     assert.equal((await office.get('/api/admin/me')).status, 200);
     assert.equal(tracer.runs.length, 1, 'reading starts no trace');
 
@@ -118,7 +123,12 @@ describe('request traces', () => {
     const grant = await office.post('/api/admin/subsidies', { memberId: member('smk-contoh', 'S1001').id, amountSen: 500, note: 'trip' });
     assert.equal(grant.status, 201);
     const run = tracer.runs.at(-1);
-    assert.deepEqual(run.meta, { kind: 'request', title: 'School office: POST /api/admin/subsidies', school: 'smk-contoh' });
+    assert.deepEqual(run.meta, {
+      kind: 'request',
+      title: 'School office: POST /api/admin/subsidies',
+      school: 'smk-contoh',
+      subject: { area: 'admin', method: 'POST', path: '/api/admin/subsidies', school: 'smk-contoh' },
+    });
     // everything the request caused carries its trace
     const caused = tracesSince(ctx, mark);
     assert.ok(caused.some(([type]) => type === 'ledger.posting') && caused.some(([type]) => type === 'topup.status'), JSON.stringify(caused));
@@ -129,14 +139,40 @@ describe('request traces', () => {
 
     const operator = browser(url);
     assert.equal((await operator.post('/api/operator/login')).status, 200);
-    assert.deepEqual(tracer.runs.at(-1).meta, { kind: 'request', title: 'Operator console: POST /api/operator/login' });
+    assert.deepEqual(tracer.runs.at(-1).meta, {
+      kind: 'request',
+      title: 'Operator console: POST /api/operator/login',
+      subject: { area: 'operator', method: 'POST', path: '/api/operator/login' },
+    });
     const smk = school('smk-contoh');
     assert.equal((await operator.post(`/api/operator/schools/${smk.code}/status`, { status: 'SUSPENDED' })).status, 200);
-    assert.deepEqual(tracer.runs.at(-1).meta, { kind: 'request', title: 'Operator console: POST /api/operator/schools/smk-contoh/status' });
+    assert.deepEqual(tracer.runs.at(-1).meta, {
+      kind: 'request',
+      title: 'Operator console: POST /api/operator/schools/smk-contoh/status',
+      subject: { area: 'operator', method: 'POST', path: '/api/operator/schools/smk-contoh/status' },
+    });
     const parent = browser(url);
     await parent.post('/api/parent/login', { parentId: 'par_nobody' });
-    assert.deepEqual(tracer.runs.at(-1).meta, { kind: 'request', title: 'Parent app: POST /api/parent/login' });
+    assert.deepEqual(tracer.runs.at(-1).meta, {
+      kind: 'request',
+      title: 'Parent app: POST /api/parent/login',
+      subject: { area: 'parent', method: 'POST', path: '/api/parent/login' },
+    });
     assert.equal(tracer.runs.length, 5);
+  });
+
+  test('the subject\'s path has no query string and fits a subject', async (t) => {
+    const { url, tracer, staff } = await startLab(t);
+    const office = browser(url);
+    await office.post('/api/admin/login?next=%2Fadmin%2F&x=1', { staffId: staff('smk-contoh', 'FINANCE').id });
+    assert.deepEqual(tracer.runs.at(-1).meta.subject, { area: 'admin', method: 'POST', path: '/api/admin/login' });
+    const long = `/api/admin/${'x'.repeat(200)}`;
+    assert.equal((await office.post(long, {})).status, 404, 'no such route: no trace');
+    const deep = `/api/admin/members/${'m'.repeat(150)}/replace-card`;
+    await office.post(deep, { newUid: '04AABBCCDDEEFF' });
+    const { path } = tracer.runs.at(-1).meta.subject;
+    assert.equal(path.length, 120);
+    assert.equal(path, `${deep.slice(0, 119)}…`);
   });
 
   test('a refused request is still the person\'s action and gets its trace; a switched-off server answers before any', async (t) => {

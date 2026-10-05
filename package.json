@@ -4,10 +4,13 @@
   "private": true,
   "description": "OneCard virtual lab: a self-contained simulation of the OneCard school card system (virtual cards, canteen readers, water machines, top-up kiosk, MQTT broker and platform) for testing and demos before real hardware.",
   "type": "module",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.js",
     "start:lan": "node --disable-warning=ExperimentalWarning src/main.js --lan",
+    "build:app": "node scripts/build-sea.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
     "test:unit": "node --disable-warning=ExperimentalWarning --test \"test/unit/**/*.test.js\"",
     "test:scenarios": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/scenarios/**/*.test.js\""
@@ -15,5 +18,9 @@
   "dependencies": {
     "aedes": "1.2.0",
     "mqtt": "5.16.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6"
   }
 }

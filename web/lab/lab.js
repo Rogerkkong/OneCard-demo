@@ -1,5 +1,7 @@
 // The lab console (/lab/): a Packet Tracer-like view of the whole virtual system. One virtual
 // cloud server serves many schools; each school's site has its machines, cards and admin card.
+// The device bar builds it further (build.js: drag a machine onto a school, a school onto the
+// internet line) and cables are drawn by dragging their ends (cables.js).
 // Data: GET /api/lab/state (polled, and refreshed when events arrive), the live event stream
 // GET /api/lab/events, and the lab actions under /api/lab/* (they keep working while the
 // virtual cloud server is switched off: they are the lab, not the product). The header's
@@ -18,6 +20,8 @@ import { createClock } from './clock.js';
 import { createInspector } from './inspector.js';
 import { createShell } from './shell.js';
 import { createSim } from './sim.js';
+import { createBuild } from './build.js';
+import { createCables } from './cables.js';
 
 const i18n = createI18n(STRINGS);
 const { t } = i18n;
@@ -169,6 +173,10 @@ const sim = createSim(app, {
   showTab: (name) => tabs.show(name),
 });
 app.sim = sim;
+createCables(app, { sitesEl: $('#sites'), topology, live: $('#build-live') });
+const build = createBuild(app, { root: $('#build'), cloudEl: $('#cloud'), sitesEl: $('#sites'), topology, live: $('#build-live') });
+/** "Add machine" on a school's site: the same dialog as the device bar, for that school. */
+app.openAddMachine = (school, opener) => build.openAddMachine({ school, opener });
 
 // ---- header, language, help, banners ---------------------------------------------------------------
 
@@ -247,7 +255,7 @@ function renderHelp() {
   };
   const steps = document.createElement('ol');
   steps.className = 'help__steps';
-  steps.append(li('help.s1'), li('help.s2'), li('help.s3'), li('help.s4'), li('help.s5'), li('help.s6'));
+  steps.append(li('help.s1'), li('help.s2'), li('help.s3'), li('help.s4'), li('help.s5'), li('help.s6'), li('help.s7'));
   const outside = document.createElement('h3');
   outside.textContent = t('help.outside');
   const tool = (titleKey, ...paras) => {
@@ -322,6 +330,7 @@ function render(requestedAt = 0) {
     if (!school?.cards.some((c) => c.uid === app.selected.slice(i + 1))) app.selected = null;
   }
   topology.render(s);
+  build.update(s);
   faults.update(s);
   clock.update(s);
   inspector.update(s);
@@ -337,14 +346,18 @@ i18n.onChange(() => {
   render();
   inspector.relang();
   sim.relang();
+  build.relang();
 });
 document.title = t('doc.title');
 switcher.setAttribute('aria-label', t('lang.label'));
 i18n.apply();
 
-// the sticky right column sits under the header, whatever its height
+// the sticky right column and the device bar sit under the header, whatever its height; what
+// the page scrolls to sits under both
 const header = $('#lab-header');
 new ResizeObserver(() => document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`)).observe(header);
+const bar = $('#build');
+new ResizeObserver(() => document.documentElement.style.setProperty('--build-h', `${bar.offsetHeight}px`)).observe(bar);
 
 // ---- the state: polled, and fetched again when events say it changed ------------------------------
 

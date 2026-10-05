@@ -662,6 +662,95 @@ describe('the flow of a connection', () => {
     assert.equal(traceOf(net.sendOf(beat.env.id)), null);
   });
 
+  test('linkContext: the flow of the next login (plug, traceNextConnect) and of the last logout (pull, stop), as copies', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { cablePlugged: false, reconnectMs: 20 });
+    reader.provision(INSTALL);
+    await reader.start();
+    assert.equal(reader.linkContext('connect'), null);
+    assert.equal(reader.linkContext('disconnect'), null);
+
+    // plugged in a flow: the login is that flow's, and stays so after the post-connect routine used it
+    await net.ctx.events.withContext({ trace: 'tr_plug', msgId: 'not-for-the-broker' }, () => reader.setCable(true));
+    const first = await net.nextBeat(READER, 0);
+    assert.equal(traceOf(net.sendOf(first.env.id)), 'tr_plug');
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' });
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' }, 'not used up');
+    reader.linkContext('connect').trace = 'tr_changed'; // a copy: changing it changes nothing
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' });
+    assert.equal(reader.linkContext('disconnect'), null);
+    for (const kind of ['denied', 'publish', 'CONNECT', undefined, null]) assert.equal(reader.linkContext(kind), null, String(kind));
+
+    // pulled in another flow: the logout is that one's
+    await net.ctx.events.withContext({ trace: 'tr_pull' }, () => reader.setCable(false));
+    assert.deepEqual(reader.linkContext('disconnect'), { trace: 'tr_pull' });
+    // plugged in again in no flow: nobody's login; connected again, a later logout is not the pull's
+    await reader.setCable(true);
+    assert.equal(reader.connected, true);
+    assert.equal(reader.linkContext('connect'), null);
+    assert.equal(reader.linkContext('disconnect'), null);
+
+    // a reboot: switched off and on in its flow
+    await net.ctx.events.withContext({ trace: 'tr_reboot' }, () => reader.stop());
+    assert.deepEqual(reader.linkContext('disconnect'), { trace: 'tr_reboot' });
+    net.ctx.events.withContext({ trace: 'tr_reboot' }, () => reader.traceNextConnect());
+    await reader.start();
+    assert.equal(reader.connected, true);
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_reboot' });
+    assert.equal(reader.linkContext('disconnect'), null);
+  });
+
+  test('linkContext expires: the login flow after connectTraceMs, the logout flow after 5 s', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { cablePlugged: false, connectTraceMs: 50 });
+    await reader.start();
+    await net.ctx.events.withContext({ trace: 'tr_plug' }, () => reader.setCable(true));
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(reader.linkContext('connect'), null);
+
+    await net.ctx.events.withContext({ trace: 'tr_pull' }, () => reader.setCable(false));
+    const now = performance.now.bind(performance);
+    const at = (ms) => {
+      performance.now = () => now() + ms; // the machine's own clock for these windows (real time)
+      try {
+        return reader.linkContext('disconnect');
+      } finally {
+        delete performance.now;
+      }
+    };
+    assert.deepEqual(at(4000), { trace: 'tr_pull' });
+    assert.equal(at(5500), null);
+  });
+
+  test('linkContext: the login flow ends with the connection it was kept for; a login after a kick is in none', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { cablePlugged: false, reconnectMs: 20 });
+    reader.provision(INSTALL);
+    await reader.start();
+    await net.ctx.events.withContext({ trace: 'tr_plug' }, () => reader.setCable(true));
+    assert.equal(reader.connected, true);
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' });
+
+    // the broker throws it off (its school suspended, say) and it knocks again by itself, well
+    // inside connectTraceMs: that login is not the plug's doing
+    const username = `${READER.school}.${READER.code}`;
+    const mark = net.ctx.events.lastSeq();
+    assert.equal(net.broker.kick(username), 1);
+    await waitFor(() => reader.connected && net.ctx.events.since(mark).some((e) => e.type === 'mqtt.connect' && e.data.username === username), {
+      message: 'back on the broker',
+    });
+    assert.equal(reader.linkContext('connect'), null);
+
+    // a failed attempt does not end it: plugged in a flow while the broker refuses it, the flow
+    // still waits for the connection that comes up
+    await net.ctx.events.withContext({ trace: 'tr_pull' }, () => reader.setCable(false));
+    await net.broker.close();
+    await net.ctx.events.withContext({ trace: 'tr_plug2' }, () => reader.setCable(true));
+    assert.equal(reader.connected, false);
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug2' });
+  });
+
   test('a machine started inside a flow does not keep it: its connection, PUBACKs and commands run in none', NET, async (t) => {
     const net = await startNet(t, [READER]);
     const reader = net.build(CanteenReader, READER);

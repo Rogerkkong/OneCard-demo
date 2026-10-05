@@ -1,12 +1,12 @@
 import { LabError } from '../../shared/errors.js';
 import { createConsole, MAX_INPUT } from '../../lab/console.js';
 
-// The lab console's API (docs/DESIGN.md §7, Lab row; §8; Simulation mode §11.5). These routes
-// operate the virtual hardware and the virtual cloud server, so they need no session (auth
-// 'none') and stay up while the cloud server is switched off: they are the lab, not the
-// product. Each action runs in its own trace (the lab starts it; server.js never wraps these
-// routes), and one held at a hop answers early with { held: true, trace, ... }. The live event
-// stream (GET /api/lab/events) belongs to server.js.
+// The lab console's API (docs/DESIGN.md §7, Lab row; §8; Simulation mode §11.5; building §12).
+// These routes operate the virtual hardware and the virtual cloud server, so they need no
+// session (auth 'none') and stay up while the cloud server is switched off: they are the lab,
+// not the product. Each action runs in its own trace (the lab starts it; server.js never wraps
+// these routes), and one held at a hop answers early with { held: true, trace, ... }. The live
+// event stream (GET /api/lab/events) belongs to server.js.
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -76,6 +76,15 @@ export function routes({ lab }) {
     // the virtual cloud server: { up }
     route('POST', '/api/lab/server', (req) => lab.setServer({ up: bodyOf(req).up })),
     route('POST', '/api/lab/broker/restart', () => lab.restartBroker()),
+
+    // Building (DESIGN §12): the code the add dialog suggests -> { code }, e.g. CANTEEN-03
+    route('GET', '/api/lab/devices/next-code', (req) => lab.nextDeviceCode({ schoolCode: req.query.schoolCode, type: req.query.type })),
+    // add a machine, its cable out unless cablePlugged: { schoolCode, type, code?, location?, cablePlugged? }
+    // -> { machine, trace } (held at its first heartbeat: { held: true, trace, item, machine })
+    route('POST', '/api/lab/devices', (req) => lab.addDevice(bodyOf(req))),
+    // add a school with its staff, machines (cables out) and demo students: { name, code, machines?, students? }
+    // -> { school: { code, name }, machines, trace }
+    route('POST', '/api/lab/schools', (req) => lab.addSchool(bodyOf(req))),
 
     // Simulation mode (DESIGN §11.5): the mode, what is held, the traces (newest first, ?limit=)
     route('GET', '/api/lab/sim', (req) => ({ ...lab.simState(), traces: lab.tracer.list({ limit: traceLimit(req.query) }) })),

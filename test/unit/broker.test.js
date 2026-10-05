@@ -234,6 +234,9 @@ test('bad options are refused before anything starts', NET, async (t) => {
   t.after(() => ctx.db.close());
   assert.ok((await startFails(ctx, { port: 0, resolveDevice: 'nope' })) instanceof TypeError);
   assert.ok((await startFails(ctx, { port: 0, tls: { port: 0 } })) instanceof TypeError);
+  for (const contextFor of ['tr_flow0001', { trace: 'tr_flow0001' }, 42]) {
+    assert.ok((await startFails(ctx, { port: 0, contextFor })) instanceof TypeError, String(contextFor));
+  }
 });
 
 test('startBroker rejects when a port is taken or the TLS key is unusable, and leaves nothing running', NET, async (t) => {
@@ -958,6 +961,75 @@ test('a broker started inside a flow keeps none of it: logins, publishes, refusa
   const types = new Set(ctx.events.since(0).map((e) => e.type));
   for (const type of ['mqtt.connect', 'mqtt.publish', 'mqtt.denied', 'mqtt.disconnect']) assert.ok(types.has(type), type);
   assert.deepEqual(ctx.events.since(0).filter((e) => 'trace' in e || 'msgId' in e), []);
+});
+
+// --- broker logins join their flow (DESIGN §11.7) ----------------------------------------------
+
+test('contextFor: a login, a logout and a refusal are emitted in the flow the hook names for them', NET, async (t) => {
+  const asked = [];
+  const flows = new Map([
+    [`${CANTEEN_A} connect`, { trace: 'tr_plug0001' }], // a cable plugged in
+    [`${CANTEEN_A} denied`, { trace: 'tr_fault001' }], // a fault publishing where it may not
+    [`${CANTEEN_A} disconnect`, { trace: 'tr_fault001' }], // ...and cut off for it
+    [`${CANTEEN_A2} denied`, { trace: 'tr_login001' }],
+  ]);
+  const { ctx, as, connect, refusedCode } = await setup(t, {
+    contextFor: (username, event) => {
+      asked.push(`${username} ${event}`);
+      return flows.get(`${username} ${event}`) ?? null;
+    },
+  });
+  await connect(as.platform()); // the hook names no flow for it
+  const device = await connect(as.device(CANTEEN_A));
+  const cutOff = onClose(device);
+  device.publish(topicOf(CANTEEN_B, 'records'), 'not an envelope', { qos: 0 });
+  await cutOff;
+  assert.equal(await refusedCode({ ...as.device(CANTEEN_A2), password: 'wrong' }), 4);
+  await waitFor(() => eventsOf(ctx, 'mqtt.disconnect').some((e) => e.data.username === CANTEEN_A), { message: 'the logout' });
+
+  const flowsOf = (type, username) => eventsOf(ctx, type).filter((e) => e.data.username === username).map((e) => e.trace ?? null);
+  assert.deepEqual(flowsOf('mqtt.connect', CANTEEN_A), ['tr_plug0001']);
+  assert.deepEqual(flowsOf('mqtt.denied', CANTEEN_A), ['tr_fault001']);
+  assert.deepEqual(flowsOf('mqtt.disconnect', CANTEEN_A), ['tr_fault001']);
+  assert.deepEqual(flowsOf('mqtt.denied', CANTEEN_A2), ['tr_login001']);
+  assert.deepEqual(flowsOf('mqtt.connect', PLATFORM_USERNAME), [null]);
+  // the events say what they always said
+  assert.deepEqual(eventsOf(ctx, 'mqtt.connect').map((e) => [e.school, e.data]), [
+    [null, { username: PLATFORM_USERNAME, clientId: 'platform-test' }],
+    [A, { username: CANTEEN_A, clientId: CANTEEN_A }],
+  ]);
+  assert.deepEqual(deniedOf(ctx), [
+    [B, { username: CANTEEN_A, action: 'publish', topic: topicOf(CANTEEN_B, 'records') }],
+    [A, { username: CANTEEN_A2, action: 'connect' }],
+  ]);
+  for (const call of [`${PLATFORM_USERNAME} connect`, `${CANTEEN_A} connect`, `${CANTEEN_A} denied`, `${CANTEEN_A} disconnect`, `${CANTEEN_A2} denied`]) {
+    assert.ok(asked.includes(call), call);
+  }
+});
+
+test('contextFor: anything but { trace }, or a hook that throws, leaves the event without a flow, and the login goes on', NET, async (t) => {
+  const logs = [];
+  const answers = [null, undefined, 'tr_plain0001', { trace: 7 }, { trace: '' }, ['tr_list0001'], Promise.resolve({ trace: 'tr_later001' }),
+    new (class Flow { trace = 'tr_class001'; })(), 'throw'];
+  let answer = null;
+  const { ctx, as, connect } = await setup(t, ({ ctx: c }) => {
+    c.log = (level, message, meta) => logs.push({ level, message, meta });
+    return {
+      contextFor: () => {
+        if (answer === 'throw') throw new Error('the hook broke');
+        return answer;
+      },
+    };
+  });
+  for (const [i, given] of answers.entries()) {
+    answer = given;
+    const client = await connect(as.device(CANTEEN_A));
+    await client.endAsync();
+    await waitFor(() => eventsOf(ctx, 'mqtt.disconnect').length === i + 1, { message: `the logout ${i + 1}` });
+  }
+  assert.equal(eventsOf(ctx, 'mqtt.connect').length, answers.length);
+  assert.deepEqual(ctx.events.since(0).filter((e) => 'trace' in e), []);
+  assert.ok(logs.some((l) => l.level === 'warn' && l.message === 'contextFor failed' && l.meta.error === 'the hook broke'));
 });
 
 // --- close and TLS --------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestCtx } from '../helpers.js';
-import { createTracer, MAX_MESSAGE_IDS, TRACE_ID_RE } from '../../src/lab/trace.js';
+import { createTracer, MAX_MESSAGE_IDS, MAX_SUBJECT_KEYS, MAX_SUBJECT_TEXT, TRACE_ID_RE } from '../../src/lab/trace.js';
 
 // Traces (docs/DESIGN.md §11.3): a flow's events carry one trace id, also across the MQTT
 // hop, where the tracer links a message's later events by its envelope id.
@@ -36,7 +36,7 @@ test('begin announces the trace inside it; run tags everything the action causes
   events.emit('mqtt.connect', {}, 'smk-alpha'); // after the action: not part of it
   assert.deepEqual(typesOf(tracer, trace), ['sim.trace', 'card.write', 'device.screen']);
   const [announce] = tracer.get(trace).events;
-  assert.deepEqual(announce.data, { id: trace, n: 1, kind: 'tap', title: 'Tap 04A1 on CANTEEN-01', device: 'CANTEEN-01' });
+  assert.deepEqual(announce.data, { id: trace, n: 1, kind: 'tap', title: 'Tap 04A1 on CANTEEN-01', device: 'CANTEEN-01', subject: {} });
   assert.equal(announce.school, 'smk-alpha');
   assert.equal(announce.trace, trace);
   ctx.db.close();
@@ -146,6 +146,62 @@ test('remembers a bounded number of message ids, forgetting the oldest', () => {
   });
   assert.equal(tracer.traceOfMessage('m-0'), null);
   assert.equal(tracer.traceOfMessage(`m-${MAX_MESSAGE_IDS}`), trace);
+  ctx.db.close();
+});
+
+test('a subject names what the flow is about: in sim.trace, list() and get(), {} when none, a copy every time', () => {
+  const { ctx, tracer } = setup();
+  const subject = { uid: '04A1B2C3D4E5F6', cardSchool: 'smk-alpha', school: 'smk-alpha', device: 'CANTEEN-01', items: 'NASI-LEMAK TEH-TARIK*2' };
+  const given = { ...subject };
+  const tap = tracer.run({ kind: 'tap', title: 'Tap', school: 'smk-alpha', device: 'CANTEEN-01', subject: given }, () => {}).trace;
+  given.uid = 'changed afterwards'; // the tracer keeps its own copy
+  const jobs = tracer.run({ kind: 'jobs', title: 'Run the jobs' }, () => {}).trace;
+  const clock = tracer.run({ kind: 'clock', title: 'Clock', subject: { ms: 60_000, held: false } }, () => {}).trace;
+
+  assert.deepEqual(tracer.get(tap).events[0].data.subject, subject, 'sim.trace carries it');
+  assert.deepEqual(tracer.get(tap).trace.subject, subject);
+  assert.deepEqual(tracer.get(jobs).events[0].data.subject, {}, 'always there: {} when none');
+  assert.deepEqual(tracer.list().map((t) => [t.kind, t.subject]), [['clock', { ms: 60_000, held: false }], ['jobs', {}], ['tap', subject]]);
+  // what a reader gets is a copy
+  tracer.list()[0].subject.ms = 1;
+  tracer.get(clock).trace.subject.ms = 2;
+  assert.equal(tracer.get(clock).trace.subject.ms, 60_000);
+  ctx.db.close();
+});
+
+test('a subject is a flat object of a few short names, each a short text, a number or true/false; anything else is a TypeError', () => {
+  const { ctx, tracer } = setup();
+  const meta = (subject) => ({ kind: 'tap', title: 'Tap', subject });
+  const full = Object.fromEntries(Array.from({ length: MAX_SUBJECT_KEYS }, (_, i) => [`k${i}`, i]));
+  const longest = 'x'.repeat(MAX_SUBJECT_TEXT);
+  for (const ok of [{}, full, { path: longest, empty: '', zero: 0, negative: -1.5, yes: true, no: false }, Object.assign(Object.create(null), { a: 1 })]) {
+    assert.doesNotThrow(() => tracer.begin(meta(ok)), JSON.stringify(ok));
+  }
+  const bad = [
+    null,
+    'smk-alpha',
+    42,
+    ['school'],
+    new Map([['school', 'smk-alpha']]),
+    new Date(0),
+    { ...full, one: 'too many' },
+    { path: `${longest}x` },
+    { nested: { school: 'smk-alpha' } },
+    { list: ['a'] },
+    { nothing: null },
+    { missing: undefined },
+    { nan: Number.NaN },
+    { inf: Number.POSITIVE_INFINITY },
+    { big: 10n },
+    { fn: () => {} },
+    { 'not an identifier': 1 },
+    { '1st': 1 },
+    { _hidden: 1 },
+    { [`k${'x'.repeat(32)}`]: 1 },
+    { [Symbol('s')]: 1 },
+  ];
+  for (const subject of bad) assert.throws(() => tracer.begin(meta(subject)), TypeError, String(subject?.toString?.() ?? subject));
+  assert.equal(tracer.list().length, 4, 'a refused subject starts no trace');
   ctx.db.close();
 });
 

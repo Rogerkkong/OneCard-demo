@@ -1,0 +1,145 @@
+# The desktop app (docs/DESIGN.md §13): build the single-file app on each system, check that it
+# starts (--self-test), and keep it as a download of the run. A v* tag, or a manual run with
+# "release" ticked, also publishes a GitHub Release with the apps zipped.
+name: Desktop app
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'Start OneCard Lab.command'
+      - 'Start OneCard Lab.bat'
+      - 'start-onecard-lab.sh'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a GitHub Release with the apps (tag desktop-<run number>)'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: windows-latest
+            target: win-x64
+          - os: macos-latest
+            target: mac-arm64
+          - os: macos-15-intel
+            target: mac-x64
+    env:
+      APP: dist/onecard-lab-${{ matrix.target }}${{ matrix.target == 'win-x64' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Tests
+        if: runner.os == 'Linux'
+        run: npm test
+
+      - name: Build the single-file app
+        run: npm run build:app
+
+      - name: Self-test the app
+        shell: bash
+        run: |
+          ./"$APP" --self-test
+          ls -l "$APP"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: onecard-lab-${{ matrix.target }}
+          path: ${{ env.APP }}
+          if-no-files-found: error
+
+  release:
+    name: Publish a release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: onecard-lab-*
+          path: apps
+          merge-multiple: true
+
+      - name: Zip each app (keeping the executable bit)
+        working-directory: apps
+        run: |
+          for file in onecard-lab-*; do
+            case "$file" in
+              *.exe) ;;
+              *) chmod +x "$file" ;; # artifacts do not keep it; zip stores it for macOS and Linux
+            esac
+            zip -9 "${file%.exe}.zip" "$file"
+          done
+          ls -l
+
+      - name: Write the release notes
+        run: |
+          cat > notes.md <<'EOF'
+          OneCard Lab as one file: no Node.js needed. Download the ZIP for your computer, unzip it
+          and double-click the file inside. The lab console opens in your web browser; keep the
+          window that opens, close it to stop the lab. Lab data only: nothing here is real.
+
+          | Your computer | File |
+          |---|---|
+          | Mac with Apple silicon (M1, M2, M3, M4…) | `onecard-lab-mac-arm64.zip` |
+          | Mac with an Intel processor | `onecard-lab-mac-x64.zip` |
+          | Windows (64-bit) | `onecard-lab-win-x64.zip` |
+          | Linux (64-bit) | `onecard-lab-linux-x64.zip` |
+
+          Which Mac? Apple menu → About This Mac: "Chip: Apple M…" is Apple silicon, "Processor: Intel" is Intel.
+
+          **The apps are not signed**, so the first time:
+          - **macOS 15 (Sequoia) and later:** double-click the file once and close the message, then
+            open System Settings → Privacy & Security, scroll down and click **Open Anyway**, and
+            confirm. Or in Terminal: `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64`
+            (with your file's name and folder).
+          - **macOS 14 and earlier:** right-click the file → **Open** → **Open**.
+          - **macOS**, if it asks whether Terminal may access files in your Downloads folder: **Allow**.
+          - **Windows:** if SmartScreen says "Windows protected your PC", click **More info** →
+            **Run anyway**.
+
+          Check it works on your computer: start the file in a terminal with `--self-test`.
+          EOF
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+            gh release create "$tag" apps/*.zip --verify-tag --title "OneCard Lab $tag" --notes-file notes.md
+          else
+            tag="desktop-$GITHUB_RUN_NUMBER"
+            gh release create "$tag" apps/*.zip --target "$GITHUB_SHA" --title "OneCard Lab $tag" --notes-file notes.md
+          fi

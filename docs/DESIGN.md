@@ -927,3 +927,285 @@ Console, at `onecard>` and `server#`:
   motion: no travel, only highlights.
 - **Text.** Event → step mapping (layer, from, to, verdict, text) lives in `web/lab/sim-steps.js`. Every string is
   in EN and 中文.
+
+### 11.7 Follow-ups: broker logins, reason codes, flow subjects
+
+- **Broker logins join their flow.** `startBroker(ctx, { …, contextFor })`: `contextFor(username, event)` with event
+  `'connect'`, `'disconnect'` or `'denied'` returns `{ trace }` or `null`. The broker emits `mqtt.connect`,
+  `mqtt.disconnect` and `mqtt.denied` inside `events.withContext(...)` of that answer. Without the hook it behaves
+  as before.
+- `Terminal#linkContext(kind)`:
+  - `'connect'`: the context the machine keeps for its next connect (set by a cable plug or `traceNextConnect()`).
+    It is not used up and stays until it expires.
+  - `'disconnect'`: the context in which `setCable(false)` or `stop()` was called, kept 5 s.
+  - Otherwise `null`.
+- The lab's `contextFor`:
+  - the platform account: the context of the server or broker action running at that moment;
+  - a machine: `machine.linkContext(event)`, else, while the lab is closing or opening the broker, the server-off /
+    server-on / broker-restart action's context;
+  - anything else: `null`.
+- `broker.status` gains `code`, a stable reason code next to the English `reason`, e.g. `SERVER_OFF`, `SERVER_ON`,
+  `RESTARTING`, `RESTARTED`, `LAB_STOP`, `LAB_RESET`. The exact list is in lab.js and documented there.
+- `sim.trace` data and the trace summaries (`tracer.list()`, `GET /api/lab/sim`) gain `subject`: a flat object
+  (≤ 12 keys; values are short strings, numbers or booleans) naming what the flow is about, so the page never has
+  to read it out of the English title:
+
+  | kind | subject |
+  |---|---|
+  | tap | `{ uid, cardSchool, school, device, items?, ml?, fault? }` |
+  | cable | `{ school, device, plugged }` |
+  | admin-card | `{ school, device, op }` |
+  | usb, heartbeat, upload, reboot | `{ school, device }` |
+  | clock | `{ ms }` |
+  | jobs | `{}` |
+  | server | `{ up }` |
+  | broker | `{}` |
+  | fault | `{ fault, school?, device?, uid?, toSchool?, toDevice? }` |
+  | request | `{ area, method, path, school? }` |
+  | add-device | `{ school, type, code }` (§12) |
+  | add-school | `{ code }` (§12) |
+
+  `tracer.begin({ …, subject })` validates it (a TypeError for anything else).
+- The cross-device-publish fault's `device.send` carries `copiedLogin: true`.
+
+**As built:**
+- **The broker hook.** An answer that is not a plain `{ trace }` is ignored, and a hook that throws is logged as a
+  warning; neither changes the login. A `contextFor` that is not a function is a TypeError at start.
+- **The lab's `contextFor` order:**
+  1. the copied login of a running cross-device-publish fault (its throwaway client uses a real machine's
+     username) → the fault's flow;
+  2. the machine's own `linkContext(event)`;
+  3. for the lab's own machines and the platform only: the server-off, server-on or broker-restart action that is
+     opening or closing the broker right now;
+  4. anyone else (the viewer, a made-up machine name) → `null`.
+
+  Only a trace the tracer still knows is returned.
+- **`linkContext('disconnect')`** also ends as soon as the machine is connected again. So pull, plug and then
+  server off within 5 s puts the server-off logout in the server-off flow, not in the pull's.
+- **`linkContext('connect')`** is no longer used up by the post-connect routine. It stays until `connectTraceMs`
+  runs out, or until the connection it was kept for is lost (a failed attempt keeps it). So a machine thrown off
+  and let back in soon after a plug has its new login in no old flow.
+- **`linkContext('denied')`** is `null`, as the contract says. So a plugged machine that the broker refuses (its
+  school is suspended) has its `mqtt.denied` in no flow; mapping it to the connect flow is a possible follow-up.
+- **The copied login's flow** replays as: the real machine is knocked off → the copied login comes in → it sends
+  (`copiedLogin: true`) → the broker refuses it (`mqtt.denied`: the topic is not allowed; the platform never gets
+  the message) → the copied login leaves → the real machine is back.
+- **`broker.status` codes** (`BROKER_STATUS_CODES` in lab.js; every event has one, `up: true` too):
+
+  | code | reason |
+  |---|---|
+  | `LAB_START` | lab started |
+  | `LAB_STOP` | lab stopped |
+  | `LAB_RESET` | reset (both the down and the up of a reset) |
+  | `SERVER_OFF` | server switched off |
+  | `SERVER_ON` | server switched on |
+  | `RESTARTING` | restart |
+  | `RESTARTED` | restarted |
+
+  The English reasons did not change.
+- **Subject rules.**
+  - Keys match `/^[A-Za-z][A-Za-z0-9_]{0,31}$/`.
+  - `tracer.begin` stores a frozen copy; readers get copies.
+  - `sim.trace`, `list()`, `get().trace`, `GET /api/lab/sim` and `/api/lab/sim/traces/:id` always carry it.
+- **Tap subjects.** `items` is a short text such as `'ROTI-CANAI TEH-TARIK*2'`; a water tap carries `ml`.
+- **Fault subjects:**
+  - cross-school card and kiosk tap faults: the tap shape plus `fault`, where school and device are the machine's;
+  - cross-device publish: `{ fault, school, device, toSchool, toDevice }`;
+  - clone and tamper: `{ fault, school, uid }`;
+  - server and broker faults: `{ fault }`.
+- **Request subjects.** `area` is `admin`, `operator`, `parent` or `pay`. `path` has no query string and is cut to
+  120 characters with "…". `school` is set when the office session names one.
+
+---
+
+## 12. Building by drag and drop (lab console)
+
+Packet Tracer's way of building a network, for OneCard: drag a machine onto a school and draw its cable.
+
+Lab API (auth `none`, inside a trace):
+- `POST /api/lab/devices { schoolCode, type, code?, location?, cablePlugged? }` adds a machine.
+  - It registers the machine on the platform (the facade's `registerDevice`, actor `lab`) and installs the virtual
+    machine with its cable **unplugged** unless `cablePlugged: true`.
+  - Trace kind `add-device`, title e.g. "Add a canteen reader CANTEEN-03 to smk-contoh".
+  - `type` is CANTEEN, WATER or KIOSK. `code` defaults to the next free `<CANTEEN|WATER|KIOSK>-NN` of that school.
+  - Answer `{ machine, trace }`, where `machine` is the same view as in `state()`. The machine's secret never leaves
+    the lab.
+  - Codes: `INPUT_INVALID` (400), `SCHOOL_NOT_FOUND` (404), `DEVICE_CODE_TAKEN` (409),
+    `SCHOOL_SUSPENDED` (409).
+- `POST /api/lab/schools { name, code, machines?, students? }` onboards a school.
+  - `machines` is `[{ type, code?, location? }]`, default canteen reader, water machine and kiosk. `students` is
+    0–50, default 5.
+  - It uses the facade's `createTenant` (actor `lab`; three fictional staff, one per role). The machines are
+    installed with their cables unplugged.
+  - Trace kind `add-school`.
+  - Answer `{ school: { code, name }, machines: [machine…], trace }`.
+  - Codes: `INPUT_INVALID` (400), `SCHOOL_CODE_TAKEN` (409).
+- `GET /api/lab/devices/next-code?schoolCode&type` → `{ code }`, the suggestion the add dialog fills in.
+
+The page (`web/lab/`):
+- **Device palette**, like Packet Tracer's device bar: canteen reader, water machine, top-up kiosk, school.
+- **Dragging.** Pointer events (mouse, pen and touch; not HTML5 drag and drop, which does not work on touch). Drag a
+  machine onto a school's site, or a school onto the internet line or the cloud. Drop zones highlight. Dropping opens
+  a small dialog (code pre-filled, location; for a school: name, code, number of demo students, machines). **Add**
+  calls the API.
+- **Cables.** A new machine shows a dangling cable. Press its end and drag it to the school network line to plug it
+  in (`POST /api/lab/cable { plugged: true }`); drag a plugged cable's end off the line to pull it. A rubber-band
+  line follows the pointer, and the line highlights when the end is over it.
+- **Without dragging.** Every drag has a button that does the same: "Add machine" on each site, "Add school" by the
+  palette, and the existing Plug/Pull buttons. The keyboard reaches all of them; Escape cancels a drag.
+- **In Simulation.** The new machine's registration, cable plug, broker login and first heartbeat are a flow the
+  Simulation tab can replay.
+
+**As built (API):**
+- **Answers.** Both adds answer 200, like the other `/api/lab` actions.
+- **Server off.** While the cloud server is switched off, both adds answer `SERVER_DOWN` (409), because
+  registering needs the platform. `next-code` still answers.
+- **Error codes.**
+  - Add machine: `INPUT_INVALID` (400), `SCHOOL_NOT_FOUND` (404), `SERVER_DOWN` (409), `SCHOOL_SUSPENDED` (409),
+    `DEVICE_CODE_TAKEN` (409).
+  - Add school: `INPUT_INVALID` (400), `SCHOOL_CODE_INVALID` (400), `NAME_INVALID` (400), `SERVER_DOWN` (409),
+    `SCHOOL_CODE_TAKEN` (409).
+  - Both: `LAB_BUSY` (503) when a reset overtakes the add between registering and installing, and
+    `LAB_NOT_RUNNING` while the lab stops.
+  - The platform's other refusals pass through as they are.
+- **Input.**
+  - `type` and `code` are accepted in any case; add-school lower-cases its code.
+  - The school code and name are checked before any trace starts, so a bad request leaves no flow behind.
+  - `students` or `machines` sent as `null` means the default.
+  - A machine code given twice in one add-school is `INPUT_INVALID`.
+  - A location is at most 60 characters.
+- **Next code.** `next-code` picks the lowest free number of that type, counting the platform's devices and the
+  lab's machines: `CANTEEN-3` and `CANTEEN-003` both count as 3. Two digits, three past 99.
+- **Plugged in.** With `cablePlugged: true`, the machine is installed with its cable out and then plugged in inside
+  the same add-device flow. That one flow holds:
+  - the registration;
+  - the config publish;
+  - `device.cable` and `mqtt.connect`;
+  - the first heartbeat.
+
+  With *Hold at each hop* on, the add answers early: `{ held: true, trace, item, machine }`.
+- **Settings acks.** A new machine acknowledges the settings it got at registration. Those acks join its
+  add-device flow, even when its cable is plugged in later in a flow of its own.
+- **Cable at install.** A pending cable choice per machine makes the install leave the cable out. An operator's
+  or school office's registration keeps today's cable (plugged in for readers and kiosks).
+- **A new school's staff.** Three invented staff, one per office role (OFFICE, FINANCE, ADMIN).
+- **Audit trail.** The add's rows (`tenant.create`, `device.register`, `config.publish`, the block list, `card.issue`)
+  show the actor `lab`. The school's own `school.create` row says `system`, as it does for an operator's onboarding:
+  `createSchool` takes no actor.
+- **`lab.action` events:**
+  - `{ action: 'add-device', device, type, cablePlugged }`
+  - `{ action: 'add-school', school, machines, students }`
+- **Console.** The `onecard>` prompt has the same two actions:
+  - `add machine <school> canteen|water|kiosk [CODE]` (cable out);
+  - `add school <code> <name…>` (three machines, cables out, five students).
+
+  `show trace` also prints broker logins and logouts, registrations, onboarding, card issue, the broker's reason
+  and the copied login in plain lines.
+
+**As built (page):**
+- **Files.** `web/lab/build.js` holds the device bar, the palette drags and the two dialogs; `cables.js` the cable
+  drawing; `drag.js` the pointer-drag helper and its overlay.
+- **The device bar** ("Add to the lab") sticks under the header. It is a `role=toolbar` (arrow keys, Home, End);
+  on a phone it is one row that scrolls sideways. Its items have `touch-action: pan-x`, so a sideways swipe scrolls
+  the bar and any other move drags.
+- **Drags.** Pointer capture starts only once the pointer has moved, so a short press stays a click. A click opens
+  the dialog with the school chosen last time, which the person can change.
+  - Near the top or bottom edge the page scrolls by itself.
+  - A suspended school is dimmed, and a drop there is refused in plain words.
+- **Dialogs** are `<dialog>` elements. The page fills in its own code guess, then the one from `next-code`. Input is
+  checked on the page first, and every server code is shown in plain words next to its field.
+- **The school network line** is drawn taller (34 px instead of 24) so an unplugged cable can visibly dangle below
+  it.
+- **Simulation steps.**
+  - The copied login of the cross-device fault is not a machine on the map, so its steps start from the school's
+    network.
+  - A broker logout names the machine as the last device, but nothing travels: often nothing is sent at all (the
+    cable is out, or the broker stopped). The envelope appears at the broker.
+  - `device.registered`, `tenant.created` and `card.issued` have their own steps, with an "On the platform"
+    section in the details.
+
+---
+
+## 13. Desktop app (double-click to start)
+
+- **Launchers** in the repository root:
+  - `Start OneCard Lab.command` (macOS; Finder opens it in Terminal)
+  - `Start OneCard Lab.bat` (Windows)
+  - `start-onecard-lab.sh` (Linux)
+
+  Each one goes to its own folder and checks Node.js ≥ 22.13. If Node is missing it says so plainly and opens the
+  nodejs.org download page. It runs `npm install` the first time (no `node_modules` yet), then starts the lab with
+  `--open`. Closing the window, or Ctrl+C, stops the lab.
+- **`--open`.** `npm start -- --open` opens the lab console in the default browser once the lab is up (`open`,
+  `cmd /c start ""`, `xdg-open`). A missing browser never fails the start.
+- **Single-file app** (no Node.js needed):
+  - **Build.** `npm run build:app` (`scripts/build-sea.mjs`) bundles the lab into one CommonJS file with esbuild (a
+    dev dependency), with the web apps as Node single-executable-application assets. It then injects that into a
+    copy of the running Node binary (postject, a dev dependency; on macOS, ad-hoc `codesign`). Output:
+    `dist/onecard-lab-<os>-<arch>[.exe]`.
+  - **Start.** At start it unpacks the web apps once per version into the OS temp folder, passes `webRoot` (createLab
+    passes its own `labRoutes`), then runs like `npm start -- --open`.
+  - **Self-test.** `--self-test` starts the lab on free ports, fetches `/lab/` and `/api/lab/state`, stops, and
+    exits 0 or 1.
+- **GitHub Actions** (`.github/workflows/desktop.yml`):
+  - Triggers: pull requests (paths `src/**`, `web/**`, `scripts/**`, `package*.json`, the workflow itself), manual
+    dispatch, and tags `v*`.
+  - Matrix: ubuntu-latest, windows-latest, macos-latest (arm64), macos-15-intel (x64; GitHub retired macos-13).
+  - Steps: `npm ci`, `npm test` (ubuntu only), `npm run build:app`, `--self-test`, upload the file
+    (`actions/upload-artifact@v6`; the release job downloads with `actions/download-artifact@v7`).
+  - A tag, or a dispatch with `release: true`, publishes a GitHub Release with the zipped apps.
+- **Unsigned.** The downloads are not code-signed:
+  - macOS 14 and earlier: open the first time with right-click → Open; macOS 15 and later: see "As built" below
+  - Windows SmartScreen: More info → Run anyway
+
+**As built:**
+- **Start code.** `src/main.js` only checks the Node.js version, without top-level await, so old Node versions
+  print the plain message. It then imports `src/cli.js`, which holds `run(argv, env, how)`. The single-file app's
+  entry (`src/app/sea-main.js`) calls the same `run()`.
+- **Options:** `--open`, `--no-open`, `--lan`, `--self-test` and `--help` (`-h`). An unknown option exits 2.
+  Without `--open`, the banners of `npm start` and `npm run start:lan` are unchanged.
+- **A busy port (EADDRINUSE; on Windows also EACCES for ports from 1024 up, which Hyper-V, WSL or Docker may
+  reserve, or another program may hold exclusively):**
+  - **A lab is already running.** The lab first asks `GET /api/lab/state` on its own web port. If a OneCard Lab
+    answers, it says "OneCard Lab is already running". With `--open` it opens that lab and exits 0; without, it
+    exits 1.
+  - **With `--open` (a double-click):** a busy web, MQTT or console port moves to a free port, with a note in the
+    banner.
+  - **Without `--open`:** one plain line naming the setting to change (`LAB_HTTP_PORT`, `LAB_MQTT_PORT` — "often
+    another MQTT broker, such as Mosquitto" — `LAB_CONSOLE_PORT` or `LAB_MQTT_TLS_PORT`).
+  - **Other start failures.** Two settings with the same port, a port below 1024 that needs administrator rights, an
+    address that is not this computer's, and unreadable TLS files each give one plain line too.
+- **Self-test.** It runs on free ports with the consoles off. It checks `/lab/` (200, HTML) and `/api/lab/state`
+  (200, at least one school), always exits, and gives up after 60 s.
+- **Launchers.** The three shell files are thin; `scripts/launch.cjs` does the work.
+  - It is written in Node 6 syntax, so an old Node prints its "too old" message in English and 中文.
+  - Finding Node: when `node` is not on PATH, or the one on PATH is older than 22.13, the macOS and Linux launchers
+    look in nvm, Volta, fnm, asdf, `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`, and take the first
+    Node that is new enough (else the one on PATH, and the "too old" message). The Windows launcher also looks in
+    `%ProgramFiles%\nodejs` and `NVM_SYMLINK`.
+  - Installing: it runs `npm install --omit=dev --no-audit --no-fund` when `node_modules` or a dependency is
+    missing, or when `package-lock.json` is newer than `node_modules/.package-lock.json`. npm runs from the
+    `npm-cli.js` next to that Node, without a shell, so folder names with spaces or Chinese characters work.
+  - On failure the window stays open ("Press Enter to close"). Ctrl+C or closing the window stops the lab, and a
+    stop sent to the launcher alone is passed on to the lab. Ctrl+C on Windows while the lab is still starting counts
+    as a stop, not a failure.
+  - The `.bat` goes to its folder with `pushd "%~dp0"` (it works in a network folder, `\\server\share`) and
+    `popd` on every exit.
+  - Line endings and modes: `.gitattributes` keeps the `.bat` CRLF and the `.command` / `.sh` LF; both of those
+    are stored as executable (100755).
+- **Single-file app.**
+  - The bundle leaves out three optional native helpers that the libraries only try to load
+    (`bufferutil`, `utf-8-validate`, `supports-color`).
+  - The build fails on any esbuild warning except the known lazy `import.meta` in `src/http/server.js`. It ends by
+    running the new app's `--self-test` and fails on any ExperimentalWarning.
+  - The assets are every file under `web/` plus a manifest (keys, sizes, a content hash). They are unpacked into a
+    private temporary folder and then renamed to `<temp>/onecard-lab-<version>-<hash>/web/`. A complete folder is
+    reused, and a damaged one is replaced. A folder other users can write to, or a leftover `.part-` folder, is
+    never used.
+- **Downloads.**
+  - Files downloaded from an Actions run lose their executable bit, so macOS and Linux need `chmod +x` once.
+  - The Release ZIPs keep the bit.
+  - A dispatch with `release: true` tags `desktop-<run number>`.
+  - Pull requests also run the workflow for changes under `test/**` and to the launchers.
+- **Unsigned apps on macOS 15 (Sequoia) and later.** Right-click → Open is gone. Open the file once, then System
+  Settings → Privacy & Security → **Open Anyway**, or in Terminal `xattr -d com.apple.quarantine <file>`.

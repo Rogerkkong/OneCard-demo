@@ -59,15 +59,17 @@ const MAX_DISCARD_BYTES = 16 * MAX_BODY_BYTES;
 // makes them); anything else in the header is ignored.
 const TRACE_HEADER = 'x-lab-trace';
 const TRACE_ID_RE = /^tr_[A-Za-z0-9_-]{4,64}$/;
-// The product areas whose non-GET requests each start a trace, by path, as the lab console names them.
+// The product areas whose non-GET requests each start a trace, by path: as the lab console names
+// them, and the area's short name in the trace's subject (DESIGN §11.7).
 const TRACED_AREAS = Object.freeze([
-  ['/api/admin/', 'School office'],
-  ['/api/operator/', 'Operator console'],
-  ['/api/parent/', 'Parent app'],
-  ['/api/pay/', 'Mock bank'],
-  ['/pay/', 'Mock bank'], // the bank page's Pay and Decline forms
+  ['/api/admin/', 'School office', 'admin'],
+  ['/api/operator/', 'Operator console', 'operator'],
+  ['/api/parent/', 'Parent app', 'parent'],
+  ['/api/pay/', 'Mock bank', 'pay'],
+  ['/pay/', 'Mock bank', 'pay'], // the bank page's Pay and Decline forms
 ]);
 const MAX_SHOWN_PATH = 120; // longest request path copied into a trace title or an http.kiosk event
+const MAX_SUBJECT_PATH = 120; // longest request path in a trace subject (a subject's text limit)
 
 const SECURITY_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
@@ -105,8 +107,10 @@ const CONTENT_TYPES = Object.freeze({
   '.mp3': 'audio/mpeg',
 });
 
-const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../web/', import.meta.url));
-const LAB_ROUTES_URL = new URL('./routes/lab.js', import.meta.url);
+// Worked out only when used: a single-file build of the lab (scripts/build-sea.mjs) passes webRoot
+// and labRoutes itself and has no module URL to resolve these against.
+const defaultWebRoot = () => fileURLToPath(new URL('../../web/', import.meta.url));
+const labRoutesUrl = () => new URL('./routes/lab.js', import.meta.url);
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -416,15 +420,18 @@ function hostAllowed(hostHeader, allowedHosts) {
 
 export function createHttpServer({
   lab,
-  webRoot = DEFAULT_WEB_ROOT,
+  webRoot = undefined,
   heartbeatMs = DEFAULT_HEARTBEAT_MS,
   allowedHosts = parseAllowedHosts(process.env.LAB_ALLOWED_HOSTS),
+  labRoutes = undefined,
 } = {}) {
   if (!lab || typeof lab !== 'object') throw new TypeError('createHttpServer needs { lab }');
+  if (webRoot !== undefined && (typeof webRoot !== 'string' || webRoot === '')) throw new TypeError('webRoot must be a folder path');
+  if (labRoutes !== undefined && typeof labRoutes !== 'function') throw new TypeError('labRoutes must be the routes() function of src/http/routes/lab.js');
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('heartbeatMs must be a whole number of ms');
   if (!Array.isArray(allowedHosts)) throw new TypeError('allowedHosts must be a list of host names');
   const hostNames = allowedHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean);
-  const root = resolve(webRoot);
+  const root = resolve(webRoot ?? defaultWebRoot());
   const sessions = createSessions();
   const streams = new Set(); // open event streams: each has end()
   let selfUrl = null;
@@ -483,11 +490,15 @@ export function createHttpServer({
       for (const r of defined) list.push(compileRoute(r, `routes/${source}.js`));
     };
     for (const [source, make] of ownModules) add(source, make);
-    // The lab's own routes come from another module that may not exist yet.
-    const labModule = await importOptionalModule(LAB_ROUTES_URL);
-    if (!labModule) note('info', 'src/http/routes/lab.js is not there: no /api/lab routes besides the event stream');
-    else if (typeof labModule.routes !== 'function') note('warn', 'src/http/routes/lab.js has no routes() export');
-    else add('lab', labModule.routes);
+    // The lab's own routes: given by the lab, or loaded from their module, which may not exist yet.
+    if (labRoutes) {
+      add('lab', labRoutes);
+    } else {
+      const labModule = await importOptionalModule(labRoutesUrl());
+      if (!labModule) note('info', 'src/http/routes/lab.js is not there: no /api/lab routes besides the event stream');
+      else if (typeof labModule.routes !== 'function') note('warn', 'src/http/routes/lab.js has no routes() export');
+      else add('lab', labModule.routes);
+    }
     return createRouter(list);
   }
 
@@ -1054,8 +1065,9 @@ export function createHttpServer({
   /**
    * Run a request's handling in its trace, when the lab has a tracer (`lab.tracer`: has(id),
    * run(meta, fn)). A request naming a trace the tracer knows (x-lab-trace) joins it; a non-GET
-   * request of a product area starts its own ("School office: POST /api/admin/configs/prices");
-   * anything else runs as it is. Without a tracer nothing changes.
+   * request of a product area starts its own ("School office: POST /api/admin/configs/prices"),
+   * with the subject `{ area, method, path, school? }` (DESIGN §11.7); anything else runs as it
+   * is. Without a tracer nothing changes.
    */
   function traced(req, url, fn) {
     const tracer = lab.tracer;
@@ -1066,12 +1078,19 @@ export function createHttpServer({
       return typeof bus?.withContext === 'function' ? bus.withContext({ trace: joined }, fn) : fn();
     }
     if (SAFE_METHODS.has(req.method)) return fn();
-    const area = TRACED_AREAS.find(([prefix]) => url.pathname.startsWith(prefix))?.[1];
-    if (!area) return fn();
-    const meta = { kind: 'request', title: `${area}: ${req.method} ${shownPath(url.pathname)}` };
+    const found = TRACED_AREAS.find(([prefix]) => url.pathname.startsWith(prefix));
+    if (!found) return fn();
+    const [, area, areaName] = found;
+    // the path without its query (url.pathname), cut to a subject's length
+    const path = url.pathname.length > MAX_SUBJECT_PATH ? `${url.pathname.slice(0, MAX_SUBJECT_PATH - 1)}…` : url.pathname;
+    const subject = { area: areaName, method: req.method, path };
+    const meta = { kind: 'request', title: `${area}: ${req.method} ${shownPath(url.pathname)}`, subject };
     if (area === 'School office') {
       const school = sessionSchool(req.headers);
-      if (school) meta.school = school;
+      if (school) {
+        meta.school = school;
+        subject.school = school;
+      }
     }
     let pending = null;
     try {

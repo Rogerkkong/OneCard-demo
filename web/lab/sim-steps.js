@@ -52,11 +52,13 @@ const machineNode = (school, device) => (school && device ? { kind: 'machine', s
 const cardNode = (school, uid = null, last4 = null) => (school ? { kind: 'card', school, uid, last4 } : null);
 const adminNode = (school) => (school ? { kind: 'admincard', school } : null);
 const internetNode = (school) => ({ kind: 'internet', school: school ?? null });
+/** Somewhere on a school's network (a copy of a machine's login is not one of its machines). */
+const netNode = (school) => (school ? { kind: 'net', school } : null);
 /** A card's chip UID without the tray's copy suffix ('04A1…80-copy2' -> '04A1…80'). */
 const chipUid = (uid) => String(uid ?? '').replace(/-copy\d*$/i, '').toUpperCase();
 
 /**
- * The card a step is about, on the topology: the card the flow names (its title, its lab.action)
+ * The card a step is about, on the topology: the card the flow names (its subject, its lab.action)
  * when the event matches it, so a copy of a card or another school's card is found in the right
  * tray; else the card the event itself names (its UID or the last 4 characters of it).
  */
@@ -164,24 +166,103 @@ export function hopOrder(events) {
 // ---- what one trace knows about its messages ----------------------------------------------------
 
 /**
- * The card a flow is about, from its title ("Tap 04A1… on smk-contoh/CANTEEN-01", "Fault: copy
- * card 04A1… of smk-contoh", ...): { school, uid } or null. The card's school may be another
- * one than the machine's; the flow's lab.action says so (cardSchool) once it comes.
+ * The card a flow is about, from its subject (a tap, a card fault, a kiosk fault, a card of
+ * another school): { school, uid } or null. The card's own school may be another one than the
+ * machine's; the flow's lab.action says so too (cardSchool) once it comes.
  */
-function cardOfTitle(title) {
-  const text = String(title ?? '');
-  let m = /^Fault: a card of (\S+) \((\S+)\) on /.exec(text);
-  if (m) return { school: m[1], uid: m[2] };
-  m = /^Fault: (?:copy|edit) card (\S+) of (\S+?)(?: by hand)?$/.exec(text);
-  if (m) return { school: m[2], uid: m[1] };
-  m = /(?:^|, )[Tt]ap (\S+) on ([^/\s]+)\/\S+/.exec(text);
-  if (m) return { school: m[2], uid: m[1] };
+function cardOfFlow(trace) {
+  if (trace?.kind !== 'tap' && trace?.kind !== 'fault') return null;
+  const s = subjectOf(trace);
+  const uid = word(s.uid);
+  // a tap names the card's own school (cardSchool); a card fault names the card's school (school)
+  const school = word(s.cardSchool) ?? word(s.school) ?? word(trace.school);
+  return uid && school ? { school, uid } : null;
+}
+
+/** Why a broker login started or ended, from the kind of flow it belongs to (DESIGN §11.7). */
+function loginWhyOfFlow(trace, event) {
+  const s = subjectOf(trace);
+  const fault = trace?.kind === 'fault' ? s.fault : null;
+  const on = event === 'mqtt.connect';
+  if (trace?.kind === 'server' || fault === 'server-down' || fault === 'server-up') {
+    const up = trace.kind === 'server' ? s.up : fault === 'server-up';
+    if (typeof up === 'boolean') return up ? (on ? 'serverOn' : null) : on ? null : 'serverOff';
+  }
+  if (trace?.kind === 'broker' || fault === 'broker-restart') return on ? 'brokerBack' : 'brokerRestart';
+  if (trace?.kind === 'reboot') return on ? 'rebooted' : 'reboot';
+  if (trace?.kind === 'cable' && typeof s.plugged === 'boolean') return s.plugged === on ? (on ? 'plugged' : 'cable') : null;
+  if (trace?.kind === 'add-device' && on) return 'newMachine';
   return null;
 }
 
 /**
+ * Who each broker login of a flow is, and why it starts or ends: seq -> { role?, why? }.
+ * - why: the flow pulled this machine's cable or plugged it in, switched the server off or on,
+ *   restarted the broker, rebooted the machine, added it (the events before it say so, else the
+ *   kind of flow);
+ * - role, in the cross-device fault only: a copy of a machine's login logs in with the machine's
+ *   username and so knocks the real machine off ('knocked'), logs in ('copied'), is refused
+ *   ('copied'), has its connection closed ('copiedClosed'); the machine comes back ('back').
+ */
+function loginsOf(events, trace) {
+  const out = new Map();
+  const cable = new Map(); // '<school>/<DEVICE>' -> 'cable' (pulled) | 'plugged'
+  let down = null; // why every login of the flow ends: the server or the broker went down
+  let up = null; // why every login of the flow starts: the server or the broker came back
+  const s = subjectOf(trace);
+  // the cross-device fault's copy logs in with the machine's own username ('<school>.<DEVICE>')
+  const copiedUser =
+    trace?.kind === 'fault' && s.fault === 'cross-device-publish'
+      ? (machineName(word(s.school) ?? trace.school, word(s.device) ?? trace.device)?.replace('/', '.') ?? null)
+      : null;
+  let copy = 'before'; // where the copied login is: not in yet, on, off (closed), the machine back
+  for (const e of events) {
+    const d = e.data ?? {};
+    if (e.type === 'device.cable' && d.device) cable.set(`${e.school}/${d.device}`, d.plugged ? 'plugged' : 'cable');
+    else if (e.type === 'server.status') {
+      if (d.up) up = 'serverOn';
+      else down = 'serverOff';
+    } else if (e.type === 'broker.status') {
+      if (!d.up && d.code === 'SERVER_OFF') down = 'serverOff';
+      else if (!d.up && d.code === 'RESTARTING') down = 'brokerRestart';
+      else if (d.up && d.code === 'SERVER_ON') up = 'serverOn';
+      else if (d.up && d.code === 'RESTARTED') up = 'brokerBack';
+    }
+    if (e.type !== 'mqtt.connect' && e.type !== 'mqtt.disconnect' && e.type !== 'mqtt.denied') continue;
+    const info = {};
+    const user = typeof d.username === 'string' ? d.username : null;
+    if (copiedUser && user === copiedUser) {
+      // in order: the real machine knocked off, the copy in (then refused), its connection
+      // closed, the real machine back
+      const off = e.type === 'mqtt.disconnect';
+      if (copy === 'before' && off) info.role = 'knocked';
+      else if ((copy === 'before' || copy === 'on') && !off) {
+        info.role = 'copied';
+        if (e.type === 'mqtt.connect') copy = 'on';
+      } else if (copy === 'on' && off) {
+        info.role = 'copiedClosed';
+        copy = 'off';
+      } else if (copy === 'off' && e.type === 'mqtt.connect') {
+        info.role = 'back';
+        copy = 'back';
+      }
+    }
+    if (e.type !== 'mqtt.denied' && !info.role) {
+      const on = e.type === 'mqtt.connect';
+      const machine = machineOfLogin(user, e.school);
+      const byCable = machine ? cable.get(`${machine.school}/${machine.device}`) : null;
+      const why = (byCable === (on ? 'plugged' : 'cable') ? byCable : null) ?? (on ? up : down) ?? loginWhyOfFlow(trace, e.type);
+      if (why) info.why = why;
+    }
+    if (info.role || info.why) out.set(e.seq, info);
+  }
+  return out;
+}
+
+/**
  * Everything the trace's events say about each message (by envelope id) and each held item,
- * and about the flow: the card it is about, its card re-reads, whether it is a forged message.
+ * and about the flow: the card it is about, its card re-reads, whether it is a forged message,
+ * who its broker logins are and why they start or end.
  */
 export function traceContext(events, trace = null) {
   const messages = new Map();
@@ -189,7 +270,7 @@ export function traceContext(events, trace = null) {
   const schools = new Set();
   const reads = new Set(); // machines that have read the card in this flow
   const rereads = new Set(); // seq of each card read after an earlier one by the same machine
-  let card = cardOfTitle(trace?.title);
+  let card = cardOfFlow(trace);
   for (const e of events) {
     if (e.school) schools.add(e.school);
     const d = e.data ?? {};
@@ -208,6 +289,8 @@ export function traceContext(events, trace = null) {
       case 'device.send':
         Object.assign(m, { type: d.type, seq: d.seq, txn: d.txn ?? m.txn, topic: d.topic, bytes: d.bytes, sentAt: e.at, device: d.device, school: e.school });
         if (d.inReplyTo) m.inReplyTo = d.inReplyTo;
+        // the cross-device fault's copy of a machine's login sent it, not the machine itself
+        if (d.copiedLogin === true) m.copied = true;
         break;
       case 'platform.send':
         Object.assign(m, { type: d.type, topic: d.topic, device: d.device, school: e.school, retained: d.retained, sentAt: e.at, byPlatform: true });
@@ -261,13 +344,14 @@ export function traceContext(events, trace = null) {
     multiSchool: schools.size > 1,
     card,
     rereads,
+    logins: loginsOf(events, trace),
     // the lab's forged-message fault: its message is not signed with the machine's secret
-    forgedFlow: /^Fault: forged message as /.test(String(trace?.title ?? '')),
+    forgedFlow: trace?.kind === 'fault' && subjectOf(trace).fault === 'forged-message',
     // the broker's own refusal is a step of this flow (mqtt.denied carries the message's id)
     denied: events.some((e) => e.type === 'mqtt.denied'),
     // heartbeats are routine (hidden unless asked for) in a flow of many machines (the clock, the
-    // server, the broker); in one machine's flow its heartbeat is part of what happens
-    routineBeats: !trace?.device,
+    // server, the broker); in one machine's flow (adding one is one too) its heartbeat is part of what happens
+    routineBeats: !trace?.device && trace?.kind !== 'add-device',
   };
 }
 
@@ -329,83 +413,204 @@ export function heldSubject(item) {
 }
 
 // ---- traces: their names -------------------------------------------------------------------------
+//
+// Every flow names what it is about in its `subject` (DESIGN §11.7): its title and its line in the
+// picker are built here from its kind and subject, in the page's language. The English title the
+// lab writes is only the last resort, for a kind (or a subject) this page does not know.
 
-// The lab's trace titles (src/lab/lab.js, src/http/server.js), translated with the same values.
-const TITLE_PATTERNS = [
-  [/^Tap (\S+) on (\S+) for (\d+) ml$/, 'tt.tapWater', (m) => ({ uid: m[1], machine: m[2], ml: m[3] })],
-  [/^Tap (\S+) on (\S+)$/, 'tt.tap', (m) => ({ uid: m[1], machine: m[2] })],
-  [/^Fault: power cut before the card write, tap (\S+) on (\S+)$/, 'tt.cutBefore', (m) => ({ uid: m[1], machine: m[2] })],
-  [/^Fault: power cut after the card write, tap (\S+) on (\S+)$/, 'tt.cutAfter', (m) => ({ uid: m[1], machine: m[2] })],
-  [/^Fault: the confirmation is lost, tap (\S+) on (\S+)$/, 'tt.confirmLost', (m) => ({ uid: m[1], machine: m[2] })],
-  [/^Plug in the cable of (\S+)$/, 'tt.plug', (m) => ({ machine: m[1] })],
-  [/^Pull the cable of (\S+)$/, 'tt.pull', (m) => ({ machine: m[1] })],
-  [/^Load the admin card of (\S+) at (\S+)$/, 'tt.adminLoad', (m) => ({ school: m[1], machine: m[2] })],
-  [/^Upload the admin card receipts of (\S+) at (\S+)$/, 'tt.adminUpload', (m) => ({ school: m[1], machine: m[2] })],
-  [/^Tap the admin card of (\S+) on (\S+)$/, 'tt.adminTap', (m) => ({ school: m[1], machine: m[2] })],
-  [/^Export the journal of (\S+) to USB$/, 'tt.usb', (m) => ({ machine: m[1] })],
-  [/^Heartbeat now from (\S+)$/, 'tt.heartbeat', (m) => ({ machine: m[1] })],
-  [/^Upload the unsent records of (\S+)$/, 'tt.upload', (m) => ({ machine: m[1] })],
-  [/^Reboot (\S+)$/, 'tt.reboot', (m) => ({ machine: m[1] })],
-  [/^Move the lab clock forward (.+)$/, 'tt.clock', (m, t, lang) => ({ by: durationWords(m[1], t, lang) })],
-  [/^Run the scheduled jobs now$/, 'tt.jobs'],
-  [/^Switch the cloud server on$/, 'tt.serverOn'],
-  [/^Switch the cloud server off$/, 'tt.serverOff'],
-  [/^Restart the MQTT broker$/, 'tt.broker'],
-  [/^Fault: copy card (\S+) of (\S+)$/, 'tt.clone', (m) => ({ uid: m[1], school: m[2] })],
-  [/^Fault: edit card (\S+) of (\S+) by hand$/, 'tt.tamper', (m) => ({ uid: m[1], school: m[2] })],
-  [/^Fault: duplicate upload from (\S+)$/, 'tt.duplicate', (m) => ({ machine: m[1] })],
-  [/^Fault: sequence rollback on (\S+)$/, 'tt.rollback', (m) => ({ machine: m[1] })],
-  [/^Fault: forged message as (\S+)$/, 'tt.forged', (m) => ({ machine: m[1] })],
-  [/^Fault: (\S+) publishes on the topic of (\S+)$/, 'tt.crossDevice', (m) => ({ machine: m[1], target: m[2] })],
-  [/^Fault: a card of (\S+) \((\S+)\) on (\S+)$/, 'tt.crossSchool', (m) => ({ school: m[1], uid: m[2], machine: m[3] })],
-  [/^Fault: switch the cloud server off$/, 'tt.faultServerOff'],
-  [/^Fault: switch the cloud server on$/, 'tt.faultServerOn'],
-  [/^Fault: restart the MQTT broker$/, 'tt.faultBroker'],
-  [/^(School office|Operator console|Parent app|Mock bank): (\S+) (.+)$/, 'tt.request', (m, t) => ({ area: areaName(m[1], t), method: m[2], path: m[3] })],
-];
+/** The web apps of a request flow (subject.area) -> the key of their name. */
+const AREAS = { admin: 'office', operator: 'operator', parent: 'parent', pay: 'bank' };
+/** A kiosk tap made to fail (a fault of kind 'fault' that is also a tap) -> its title. */
+const KIOSK_FAULT_TITLES = { 'power-cut-before-commit': 'tt.cutBefore', 'power-cut-after-commit': 'tt.cutAfter', 'confirm-timeout': 'tt.confirmLost' };
+/** A machine's own flows -> their title. */
+const MACHINE_TITLES = { usb: 'tt.usb', heartbeat: 'tt.heartbeat', upload: 'tt.upload', reboot: 'tt.reboot' };
+const ADMIN_TITLES = { load: 'tt.adminLoad', tap: 'tt.adminTap', upload: 'tt.adminUpload' };
+const ADD_TITLES = { CANTEEN: 'tt.addCanteen', WATER: 'tt.addWater', KIOSK: 'tt.addKiosk' };
 
-const AREAS = { 'School office': 'office', 'Operator console': 'operator', 'Parent app': 'parent', 'Mock bank': 'bank' };
-const areaName = (area, t) => (AREAS[area] ? t(`sim.area.${AREAS[area]}`) : area);
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
-/** '1 h 30 min' (the lab's duration words) in the page's language (English as the lab wrote it). */
-function durationWords(text, t, lang) {
-  if (lang !== 'zh') return String(text);
-  const unitOf = { day: 'day', days: 'day', h: 'h', min: 'min', s: 's', ms: 'ms' };
-  return String(text).replace(/(\d+) (days?|h|min|ms|s)\b/g, (_, n, unit) => t(`sim.unit.${unitOf[unit]}`, { n }));
-}
+/** Text, or null for anything else (an empty string too). */
+const word = (v) => (typeof v === 'string' && v !== '' ? v : null);
+/** A flow's subject: what the lab sent, {} when it sent none (an older lab). */
+const subjectOf = (trace) => (trace?.subject && typeof trace.subject === 'object' ? trace.subject : {});
+/** 'smk-contoh/CANTEEN-01', as the lab names a machine in a title; null without both. */
+const machineName = (school, device) => (word(school) && word(device) ? `${school}/${device}` : null);
 
-/** A trace's title in the page's language (the lab writes it in English). */
-export function traceTitle(title, t, lang) {
-  const text = String(title ?? '');
-  for (const [re, key, vars] of TITLE_PATTERNS) {
-    const m = re.exec(text);
-    if (m) return t(key, vars ? vars(m, t, lang) : undefined);
+/** How far the clock moved, in a few words: '15 days', '1 hour 30 minutes'. */
+export function clockWords(ms, t) {
+  if (!Number.isSafeInteger(ms) || ms <= 0) return null;
+  const parts = [];
+  let left = ms;
+  for (const [size, one, many] of [[DAY, 'dur.day', 'dur.days'], [HOUR, 'dur.hour', 'dur.hours'], [MINUTE, 'dur.minute', 'dur.minutes'], [SECOND, 'dur.second', 'dur.seconds']]) {
+    const n = Math.floor(left / size);
+    left -= n * size;
+    if (n > 0) parts.push(t(n === 1 ? one : many, { n }));
   }
-  return text;
+  if (left > 0) parts.push(t('dur.ms', { n: left }));
+  return parts.join(' ');
 }
 
-/** The trace picker's line: "#3 · Tap · CANTEEN-01 · 10:02". */
-export function traceLabel(summary, t, hhmm, lang) {
-  if (!summary) return '';
-  let kind = tr(t, `sim.kind.${summary.kind}`, summary.kind);
-  let subject = summary.device ?? null;
-  const title = String(summary.title ?? '');
-  if (summary.kind === 'request') {
-    const m = /^(School office|Operator console|Parent app|Mock bank): (\S+) (.+)$/.exec(title);
-    if (m) {
-      kind = areaName(m[1], t);
-      subject = `${m[2]} ${m[3]}`;
+/** A tap: on which machine, which card (another school's?), what it bought or poured. */
+function tapWords(s, trace, t) {
+  const uid = word(s.uid);
+  const school = word(s.school) ?? word(trace.school);
+  const device = word(s.device) ?? word(trace.device);
+  const machine = machineName(school, device);
+  if (!uid || !machine) return null;
+  let title;
+  if (KIOSK_FAULT_TITLES[s.fault]) title = t(KIOSK_FAULT_TITLES[s.fault], { uid, machine });
+  else if (Number.isSafeInteger(s.ml)) title = t('tt.tapWater', { uid, machine, ml: s.ml });
+  else if (word(s.items)) title = t('tt.tapItems', { uid, machine, items: s.items });
+  else title = t('tt.tap', { uid, machine });
+  const cardSchool = word(s.cardSchool);
+  if (cardSchool && cardSchool !== school) title = t('tt.otherCard', { title, school: cardSchool });
+  return { title, kind: t('sim.kind.tap'), short: device };
+}
+
+/** A fault: its own title, named in the picker by the fault and where it happens. */
+function faultWords(s, trace, t) {
+  const fault = word(s.fault);
+  if (!fault) return null;
+  const school = word(s.school) ?? word(trace.school);
+  const device = word(s.device) ?? word(trace.device);
+  const machine = machineName(school, device);
+  const uid = word(s.uid);
+  let title = null;
+  switch (fault) {
+    case 'clone-card':
+    case 'tamper-card':
+      if (uid && school) title = t(fault === 'clone-card' ? 'tt.clone' : 'tt.tamper', { uid, school });
+      break;
+    case 'duplicate-upload':
+    case 'sequence-rollback':
+    case 'forged-message': {
+      const key = { 'duplicate-upload': 'tt.duplicate', 'sequence-rollback': 'tt.rollback', 'forged-message': 'tt.forged' }[fault];
+      if (machine) title = t(key, { machine });
+      break;
     }
-  } else if (summary.kind === 'server') subject = t(/ off$/.test(title) ? 'sim.subject.off' : 'sim.subject.on');
-  else if (summary.kind === 'broker') subject = t('sim.subject.restart');
-  else if (summary.kind === 'jobs') subject = t('sim.subject.jobs');
-  else if (summary.kind === 'clock') {
-    const m = /forward (.+)$/.exec(title);
-    if (m) subject = `+${durationWords(m[1], t, lang)}`;
+    case 'cross-device-publish': {
+      const target = machineName(word(s.toSchool) ?? school, word(s.toDevice));
+      if (machine && target) title = t('tt.crossDevice', { machine, target });
+      break;
+    }
+    case 'cross-school-card': {
+      // a card of one school (cardSchool) tapped on a machine of another (school, device)
+      const cardSchool = word(s.cardSchool);
+      if (uid && cardSchool && machine) title = t('tt.crossSchool', { school: cardSchool, uid, machine });
+      break;
+    }
+    case 'server-down':
+      title = t('tt.faultServerOff');
+      break;
+    case 'server-up':
+      title = t('tt.faultServerOn');
+      break;
+    case 'broker-restart':
+      title = t('tt.faultBroker');
+      break;
+    default:
+      if (KIOSK_FAULT_TITLES[fault] && uid && machine) title = t(KIOSK_FAULT_TITLES[fault], { uid, machine });
+      break;
   }
-  // a flow of no machine (the server, the clock, a fault on the cloud) is named by what it did
-  if (!subject) return t('sim.trace.optionTitle', { n: summary.n, title: traceTitle(summary.title, t, lang), time: hhmm(summary.at) });
-  return t('sim.trace.option', { n: summary.n, kind, subject, time: hhmm(summary.at) });
+  const name = tr(t, `fault.${fault}.title`, fault);
+  // a fault this page knows by name but not by its fields: still named in the page's words
+  title ??= hasKey(`fault.${fault}.title`) ? t('tt.fault', { name }) : null;
+  if (!title) return null;
+  // named in the picker by where it happens: the machine, or the card a card fault is about
+  const where = device ?? (uid ? `··${chipUid(uid).slice(-4)}` : null);
+  return { title, kind: t('sim.kind.fault'), short: where ? t('sim.subject.faultAt', { name, device: where }) : name };
+}
+
+/**
+ * What a flow is called, from its kind and subject: { title, kind, short } (kind and short make
+ * the picker's line), or null when this page does not know the kind or the subject lacks a field.
+ * `names(code)`: a school's name, when the page knows it.
+ */
+function flowWords(trace, t, names = null) {
+  if (!trace) return null;
+  const s = subjectOf(trace);
+  const school = word(s.school) ?? word(trace.school);
+  const device = word(s.device) ?? word(trace.device);
+  const machine = machineName(school, device);
+  switch (trace.kind) {
+    case 'tap':
+      return tapWords(s, trace, t);
+    case 'fault':
+      return faultWords(s, trace, t);
+    case 'cable':
+      if (!machine || typeof s.plugged !== 'boolean') return null;
+      return {
+        title: t(s.plugged ? 'tt.plug' : 'tt.pull', { machine }),
+        kind: t('sim.kind.cable'),
+        short: t(s.plugged ? 'sim.subject.cableIn' : 'sim.subject.cableOut', { device }),
+      };
+    case 'admin-card':
+      if (!machine || !ADMIN_TITLES[s.op]) return null;
+      return { title: t(ADMIN_TITLES[s.op], { school, machine }), kind: t('sim.kind.admin-card'), short: t(`sim.subject.admin.${s.op}`, { device }) };
+    case 'usb':
+    case 'heartbeat':
+    case 'upload':
+    case 'reboot':
+      if (!machine) return null;
+      return { title: t(MACHINE_TITLES[trace.kind], { machine }), kind: t(`sim.kind.${trace.kind}`), short: device };
+    case 'clock': {
+      const by = clockWords(s.ms, t);
+      if (!by) return null;
+      return { title: t('tt.clock', { by }), kind: t('sim.kind.clock'), short: `+${by}` };
+    }
+    case 'jobs':
+      return { title: t('tt.jobs'), kind: t('sim.kind.jobs'), short: t('sim.subject.jobs') };
+    case 'server':
+      if (typeof s.up !== 'boolean') return null;
+      return { title: t(s.up ? 'tt.serverOn' : 'tt.serverOff'), kind: t('sim.kind.server'), short: t(s.up ? 'sim.subject.on' : 'sim.subject.off') };
+    case 'broker':
+      return { title: t('tt.broker'), kind: t('sim.kind.broker'), short: t('sim.subject.restart') };
+    case 'request': {
+      const area = AREAS[s.area] ? t(`sim.area.${AREAS[s.area]}`) : null;
+      const method = word(s.method);
+      const path = word(s.path);
+      if (!area || !method || !path) return null;
+      return { title: t('tt.request', { area, method, path }), kind: area, short: `${method} ${path}` };
+    }
+    case 'add-device': {
+      const code = word(s.code);
+      if (!word(s.school) || !code || !ADD_TITLES[s.type]) return null;
+      return { title: t(ADD_TITLES[s.type], { code, school: s.school }), kind: t('sim.kind.add-device'), short: code };
+    }
+    case 'add-school': {
+      const code = word(s.code);
+      if (!code) return null;
+      const name = names?.(code) ?? null;
+      return { title: name ? t('tt.addSchoolNamed', { name, code }) : t('tt.addSchool', { code }), kind: t('sim.kind.add-school'), short: code };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * A flow's title in the page's language, from its kind and subject; the lab's English title for
+ * a kind or subject this page does not know.
+ * @param {{ kind?: string, title?: string, subject?: object, school?: string|null, device?: string|null }} trace  a summary
+ * @param {Function} t  the page's i18n
+ * @param {{ names?: (code: string) => string|null }} [options]  names: a school's name by its code
+ */
+export function traceTitle(trace, t, { names = null } = {}) {
+  return flowWords(trace, t, names)?.title ?? String(trace?.title ?? '');
+}
+
+/**
+ * The trace picker's line: "#3 · Tap · CANTEEN-01 · 10:02".
+ * @param {{ names?: (code: string) => string|null }} [options]  as for traceTitle()
+ */
+export function traceLabel(summary, t, hhmm, { names = null } = {}) {
+  if (!summary) return '';
+  const words = flowWords(summary, t, names);
+  if (words) return t('sim.trace.option', { n: summary.n, kind: words.kind, subject: words.short, time: hhmm(summary.at) });
+  return t('sim.trace.optionTitle', { n: summary.n, title: String(summary.title ?? ''), time: hhmm(summary.at) });
 }
 
 // ---- one event, one step ----------------------------------------------------------------------
@@ -421,6 +626,7 @@ export function traceLabel(summary, t, hhmm, lang) {
  * @property {string} titleKey its i18n key
  * @property {boolean} heartbeat  a routine heartbeat (hidden unless asked for)
  * @property {boolean} parked  the step is a hold: the envelope waits here
+ * @property {boolean} [still]  it names where it comes from, but nothing travels (a broker login ending)
  * @property {string|null} msgId  the message the step is about
  * @property {object[]} sections  the packet-detail sections that apply (built when first read)
  */
@@ -459,8 +665,9 @@ export function stepOf(e, ctx) {
   switch (e.type) {
     // ---- the lab and live stepping --------------------------------------------------------
     case 'sim.trace': {
-      step.to = traceNode(ctx.trace ?? { kind: d.kind, title: d.title, school, device: d.device ?? null }, ctx);
-      say('st.trace', { title: traceTitle(d.title, t, ctx.lang) });
+      const trace = ctx.trace ?? { kind: d.kind, title: d.title, school, device: d.device ?? null, subject: d.subject };
+      step.to = traceNode(trace, ctx);
+      say('st.trace', { title: traceTitle(trace, t, { names: ctx.names }) });
       break;
     }
     case 'sim.held': {
@@ -551,7 +758,15 @@ export function stepOf(e, ctx) {
       step.heartbeat = isBeat;
       const vars = { device: dev ?? '—', type: d.type ?? '—', seq: d.seq ?? '—', bytes: d.bytes ?? '—' };
       const p = parseTopic(d.topic);
-      if (p && dev && (p.device !== dev || (school && p.school !== school))) {
+      if (d.copiedLogin === true) {
+        // the cross-device fault: a copy of this machine's broker login sends, not the machine;
+        // the copy is somewhere on the school's network, not one of the machines on the map
+        step.to = netNode(school);
+        step.verdict = 'warn';
+        step.note = t('st.send.copiedNote', { device: dev ?? '—' });
+        const target = p ? (school && p.school !== school ? `${p.school}/${p.device}` : p.device) : d.topic ?? '—';
+        say('st.send.copied', { ...vars, target });
+      } else if (p && dev && (p.device !== dev || (school && p.school !== school))) {
         // the lab's cross-device fault: a copy of this machine's login publishes on another machine's topic
         step.verdict = 'warn';
         step.note = t('st.send.otherTopicNote');
@@ -607,34 +822,32 @@ export function stepOf(e, ctx) {
       receivedStep(step, e, ctx, say, here);
       break;
     case 'mqtt.connect':
-    case 'mqtt.disconnect': {
-      step.layer = 'mqtt';
-      const who = machineOfLogin(d.username, school);
-      step.from = d.username === 'platform' ? PLATFORM : who;
-      step.to = BROKER;
-      step.verdict = e.type === 'mqtt.connect' ? 'ok' : 'warn';
-      say(e.type === 'mqtt.connect' ? 'st.connect' : 'st.disconnect', { who: loginName(d.username, ctx, school, { start: true }) });
+    case 'mqtt.disconnect':
+      loginStep(step, e, ctx, say);
       break;
-    }
     case 'mqtt.denied': {
       step.layer = 'mqtt';
       const p = parseTopic(d.topic);
-      step.from = machineOfLogin(d.username, school) ?? (p ? machineNode(p.school, p.device) : null);
+      const copied = ctx.logins?.get(e.seq)?.role === 'copied';
+      step.from = copied ? netNode(school) : (machineOfLogin(d.username, school) ?? (p ? machineNode(p.school, p.device) : null));
       step.to = BROKER;
       step.drop = BROKER;
       step.verdict = 'bad';
-      say(d.topic ? 'st.denied.topic' : 'st.denied', { action: tr(t, `ev.action.${d.action}`, d.action ?? ''), who: loginName(d.username, ctx, school), topic: d.topic ?? '' });
+      const vars = { action: tr(t, `ev.action.${d.action}`, d.action ?? ''), who: loginName(d.username, ctx, school), topic: d.topic ?? '' };
+      if (copied) say(d.topic ? 'st.denied.copiedTopic' : 'st.denied.copied', { ...vars, device: machineOfLogin(d.username, school)?.device ?? vars.who });
+      else say(d.topic ? 'st.denied.topic' : 'st.denied', vars);
       step.kinds = [step.msgId ? 'message' : null, 'mqtt'];
       break;
     }
-    case 'broker.status':
+    case 'broker.status': {
       step.layer = 'mqtt';
       step.to = BROKER;
       step.verdict = d.up ? 'ok' : 'warn';
-      if (d.up) say('st.broker.up');
-      else if (d.reason) say('st.broker.down', { reason: brokerReason(d.reason, t) });
-      else say('st.broker.downPlain');
+      const reason = brokerReason(d, t);
+      if (d.up) say(reason ? 'st.broker.upWhy' : 'st.broker.up', { reason });
+      else say(reason ? 'st.broker.down' : 'st.broker.downPlain', { reason });
       break;
+    }
 
     // ---- HTTP (the kiosk) -------------------------------------------------------------------------
     case 'http.kiosk': {
@@ -673,12 +886,34 @@ export function stepOf(e, ctx) {
       // the actor as the audit trail keeps it: "Name (stf_…)", or "device:KIOSK-01" (shown as the machine)
       say('st.audit', { actor: typeof d.actor === 'string' ? d.actor.replace(/^device:/, '') : JSON.stringify(d.actor ?? ''), action: d.action ?? '' });
       break;
+    case 'device.registered':
+      // a new machine (DESIGN §12): the platform knows it now; the lab installs it at the school
+      step.layer = 'platform';
+      step.from = PLATFORM;
+      step.to = DB;
+      say('st.registered', { code: d.code ?? '—', type: tr(t, `type.${d.type}`, d.type ?? '—'), school: school ?? '—' });
+      step.note = t('st.registeredNote');
+      step.kinds = ['record'];
+      break;
+    case 'tenant.created':
+      step.layer = 'platform';
+      step.from = PLATFORM;
+      step.to = DB;
+      say('st.tenant', { name: d.name ?? '—', code: d.code ?? school ?? '—' });
+      step.note = t('st.tenantNote');
+      step.kinds = ['record'];
+      break;
     case 'card.issued':
+      step.layer = 'platform';
+      step.from = PLATFORM;
+      step.to = DB;
+      say('st.issued', { uid: d.uid ?? '—' });
+      step.note = t('st.issuedNote');
+      step.kinds = ['record'];
+      break;
     case 'card.lost':
     case 'card.found':
-    case 'tenant.created':
     case 'school.status':
-    case 'device.registered':
       step.layer = 'platform';
       step.from = PLATFORM;
       step.to = DB;
@@ -781,10 +1016,13 @@ export function stepOf(e, ctx) {
  */
 function traceNode(trace, ctx) {
   if (trace.device && trace.school) return machineNode(trace.school, trace.device);
-  const title = String(trace.title ?? '');
-  if (ctx.card && /^Fault: (?:copy|edit) card /.test(title)) return cardFor(ctx, ctx.card.school);
-  if (trace.kind === 'broker' || /^Fault: restart the MQTT broker/.test(title)) return BROKER;
-  if (['server', 'jobs', 'request'].includes(trace.kind) || /^Fault: switch the cloud server/.test(title)) return PLATFORM;
+  const s = subjectOf(trace);
+  // a machine being added: where it is installed
+  if (trace.kind === 'add-device' && word(s.school) && word(s.code)) return machineNode(s.school, s.code);
+  const fault = trace.kind === 'fault' ? s.fault : null;
+  if (ctx.card && (fault === 'clone-card' || fault === 'tamper-card')) return cardFor(ctx, ctx.card.school);
+  if (trace.kind === 'broker' || fault === 'broker-restart') return BROKER;
+  if (['server', 'jobs', 'request', 'add-school'].includes(trace.kind) || fault === 'server-down' || fault === 'server-up') return PLATFORM;
   return null;
 }
 
@@ -804,12 +1042,57 @@ function heldNode(item) {
  */
 function loginName(username, ctx, school, { start = false } = {}) {
   const { t } = ctx;
-  const word = (name) => t(start ? `sim.who.${name}` : `ev.${name}`);
-  if (username === null || username === undefined || username === '') return word('someone');
-  if (username === 'platform') return word('platform');
-  if (username === 'viewer') return word('viewer');
+  const named = (name) => t(start ? `sim.who.${name}` : `ev.${name}`);
+  if (username === null || username === undefined || username === '') return named('someone');
+  if (username === 'platform') return named('platform');
+  if (username === 'viewer') return named('viewer');
   const machine = machineOfLogin(username, school);
   return machine ? nodeName(machine, t, { multiSchool: ctx.multiSchool }) : String(username);
+}
+
+/**
+ * A broker login starting or ending (mqtt.connect, mqtt.disconnect, DESIGN §11.7): between the
+ * machine (or the platform) and the broker. A login travels to the broker; one that ends travels
+ * nowhere (often nothing is sent: a cable is pulled, the broker stops), it is shown at the broker.
+ * The copy of a machine's login (the cross-device fault) is not one of the machines on the map:
+ * it comes from the school's network.
+ */
+function loginStep(step, e, ctx, say) {
+  const { t } = ctx;
+  const d = e.data ?? {};
+  const on = e.type === 'mqtt.connect';
+  const info = ctx.logins?.get(e.seq) ?? {};
+  const machine = machineOfLogin(d.username, e.school ?? null);
+  const who = loginName(d.username, ctx, e.school ?? null, { start: true });
+  step.layer = 'mqtt';
+  step.from = d.username === 'platform' ? PLATFORM : machine;
+  step.to = BROKER;
+  step.verdict = on ? 'ok' : 'warn';
+  step.still = !on;
+  step.kinds = ['login'];
+  const why = info.why ? t(`why.${info.why}`) : '';
+  const device = machine?.device ?? who;
+  switch (info.role) {
+    case 'copied':
+      step.from = netNode(e.school ?? null);
+      step.verdict = 'warn';
+      say('st.on.copied', { device });
+      return;
+    case 'copiedClosed':
+      step.from = netNode(e.school ?? null);
+      say('st.off.copied', { device });
+      return;
+    case 'knocked':
+      say('st.off.knocked', { who, device });
+      return;
+    case 'back':
+      say('st.on.back', { who });
+      return;
+    default:
+      break;
+  }
+  if (on) say(why ? 'st.on.why' : 'st.on', { who, why });
+  else say(why ? 'st.off.why' : 'st.off', { who, why });
 }
 
 function diffList(list, t) {
@@ -1057,7 +1340,11 @@ function sectionOf(kind, step, e, ctx) {
     case 'security':
       return securitySection(e, msg, ctx);
     case 'mqtt':
-      return mqttSection(e, msg, ctx);
+      return e.type === 'mqtt.denied' && e.data?.action === 'connect' ? loginSection(e, ctx) : mqttSection(e, msg, ctx);
+    case 'login':
+      return loginSection(e, ctx);
+    case 'record':
+      return recordSection(e, ctx);
     case 'http':
       return httpSection(e, ctx);
     case 'platform':
@@ -1211,10 +1498,12 @@ function messageSection(e, msg, ctx) {
   const txn = m.txn ?? d.txn;
   if (txn) rows.push([t('pd.msg.txn'), code(txn)]);
   if (m.inReplyTo) rows.push([t('pd.msg.reply'), code(m.inReplyTo)]);
+  // the cross-device fault's copied login sent it: not one of the machine's own messages
+  if (m.copied) rows.push([t('pd.msg.sender'), t('pd.msg.copiedLogin', { device: m.device ?? '—' })]);
   // a message waiting at the machine's hold point has not been sent yet
-  if (m.sentAt && e.type !== 'sim.held') rows.push([t(m.byPlatform ? 'pd.msg.sentPlatform' : 'pd.msg.sent'), preciseTime(m.sentAt)]);
+  if (m.sentAt && e.type !== 'sim.held') rows.push([t(m.byPlatform ? 'pd.msg.sentPlatform' : m.copied ? 'pd.msg.sentCopy' : 'pd.msg.sent'), preciseTime(m.sentAt)]);
   if (Number.isFinite(m.bytes)) rows.push([t('pd.msg.size'), t('pd.msg.bytes', { n: m.bytes })]);
-  return { id: 'message', rows, note: t(m.byPlatform ? 'pd.msg.notePlatform' : 'pd.msg.note') };
+  return { id: 'message', rows, note: t(m.byPlatform ? 'pd.msg.notePlatform' : m.copied ? 'pd.msg.noteCopied' : 'pd.msg.note') };
 }
 
 function securitySection(e, msg, ctx) {
@@ -1248,11 +1537,13 @@ function securitySection(e, msg, ctx) {
     };
   }
   const sig = (m.intake?.checks ?? (e.type.startsWith('intake.') ? d.checks : null))?.find?.((c) => c.step === 'signature') ?? null;
+  let signs = isForged(m.msgId ?? d.msgId, ctx) ? 'pd.sec.forged' : 'pd.sec.machineSigns';
+  if (m.copied) signs = 'pd.sec.copiedSigns';
   return {
     id: 'security',
     rows: [
-      [t('pd.sec.signature'), t(isForged(m.msgId ?? d.msgId, ctx) ? 'pd.sec.forged' : 'pd.sec.machineSigns', { device })],
-      [t('pd.sec.secret'), t('pd.sec.secretHow', { device })],
+      [t('pd.sec.signature'), t(signs, { device: m.copied ? m.device ?? device : device })],
+      [t('pd.sec.secret'), t(m.copied ? 'pd.sec.secretCopied' : 'pd.sec.secretHow', { device: m.copied ? m.device ?? device : device })],
     ],
     checks: [{
       state: !sig ? 'skip' : sig.ok ? 'ok' : 'bad',
@@ -1276,9 +1567,12 @@ function mqttSection(e, msg, ctx) {
     rows.push([t('pd.mqtt.rule'), t('pd.mqtt.ruleUp')]);
     return { id: 'mqtt', rows, checks: [{ state: 'bad', label: t('pd.mqtt.allowed'), value: t('pd.mqtt.refused') }] };
   }
-  rows.push([t('pd.mqtt.qos'), t('pd.mqtt.qos1', { qos: m.qos ?? d.qos ?? 1 })]);
+  // the copied login of the cross-device fault publishes once, unconfirmed (QoS 0)
+  const qos = m.qos ?? d.qos ?? (m.copied ? 0 : 1);
+  rows.push([t('pd.mqtt.qos'), t(qos === 0 ? 'pd.mqtt.qos0' : 'pd.mqtt.qos1', { qos })]);
   rows.push([t('pd.mqtt.retained'), t((m.retained ?? d.retained) ? 'pd.mqtt.retainedYes' : 'pd.mqtt.retainedNo')]);
   if (m.from) rows.push([t('pd.mqtt.login'), code(m.from)]);
+  else if (m.copied && m.school && m.device) rows.push([t('pd.mqtt.login'), t('pd.mqtt.loginCopied', { login: `${m.school}.${m.device}` })]);
   rows.push([t('pd.mqtt.rule'), t(down ? 'pd.mqtt.ruleDown' : 'pd.mqtt.ruleUp')]);
   const checks = [];
   if (m.passedAt || e.type === 'mqtt.publish') checks.push({ state: 'ok', label: t('pd.mqtt.allowed'), value: t('pd.mqtt.passed') });
@@ -1287,12 +1581,75 @@ function mqttSection(e, msg, ctx) {
     checks.push({ state: 'bad', label: t('pd.mqtt.allowed'), value: t('pd.mqtt.refused') });
     return { id: 'mqtt', rows, checks };
   }
-  if (!down && !m.byPlatform) {
+  if (!down && !m.byPlatform && !m.copied) {
     const a = m.acked ?? (e.type === 'device.acked' ? d : null);
     if (a) checks.push({ state: a.ok ? 'ok' : 'warn', label: t('pd.mqtt.puback'), value: a.ok ? t('pd.mqtt.pubackMs', { ms: a.ms ?? '—' }) : tr(t, `sim.ackReason.${a.reason}`, a.reason ?? '—') });
     else checks.push({ state: 'skip', label: t('pd.mqtt.puback'), value: t('pd.sec.notYet') });
   }
   return { id: 'mqtt', rows, checks };
+}
+
+/**
+ * A broker login (DESIGN §11.7): its username and client id, who it is, why it starts or ends,
+ * and the broker's check of it.
+ */
+function loginSection(e, ctx) {
+  const { t } = ctx;
+  const d = e.data ?? {};
+  const info = ctx.logins?.get(e.seq) ?? {};
+  const machine = machineOfLogin(d.username, e.school ?? null);
+  const rows = [[t('pd.mqtt.login'), code(d.username ?? '—')]];
+  if (d.clientId) rows.push([t('pd.mqtt.client'), code(d.clientId)]);
+  let who = null;
+  if (info.role === 'copied' || info.role === 'copiedClosed') who = t('pd.login.copied', { device: machine?.device ?? '—' });
+  else if (d.username === 'platform') who = t('pd.login.platform');
+  else if (d.username === 'viewer') who = t('pd.login.viewer');
+  else if (machine) who = t('pd.login.machine', { device: machine.device, school: machine.school });
+  if (who) rows.push([t('pd.login.who'), who]);
+  const why = info.role ? t(`pd.login.role.${info.role}`) : info.why ? t(`why.${info.why}`) : null;
+  if (why) rows.push([t('pd.login.why'), why]);
+  const checks = [];
+  if (e.type === 'mqtt.connect') checks.push({ state: 'ok', label: t('pd.login.check'), value: t('pd.login.allowed') });
+  else if (e.type === 'mqtt.denied') checks.push({ state: 'bad', label: t('pd.login.check'), value: t('pd.login.refused') });
+  return { id: 'mqtt', rows, checks, note: machine ? t('pd.login.note') : null };
+}
+
+/** What the platform now keeps for something new: a machine, a school, a card (DESIGN §12). */
+function recordSection(e, ctx) {
+  const { t } = ctx;
+  const d = e.data ?? {};
+  if (e.type === 'device.registered') {
+    const rows = [
+      [t('pd.rec.machine'), code(d.code ?? '—')],
+      [t('pd.rec.type'), tr(t, `type.${d.type}`, d.type ?? '—')],
+      [t('pd.rec.school'), code(e.school ?? '—')],
+    ];
+    if (d.location) rows.push([t('pd.rec.location'), d.location]);
+    rows.push([t('pd.rec.login'), code(e.school && d.code ? `${e.school}.${d.code}` : '—')]);
+    rows.push([t('pd.rec.secret'), t('pd.rec.secretHow', { device: d.code ?? '—' })]);
+    return { id: 'record', rows };
+  }
+  if (e.type === 'tenant.created') {
+    return {
+      id: 'record',
+      rows: [
+        [t('pd.rec.school'), code(d.code ?? e.school ?? '—')],
+        [t('pd.rec.name'), d.name ?? '—'],
+        [t('pd.rec.cardKey'), t('pd.rec.cardKeyHow')],
+      ],
+    };
+  }
+  if (e.type === 'card.issued') {
+    return {
+      id: 'record',
+      rows: [
+        [t('pd.rec.card'), code(d.uid ?? '—')],
+        [t('pd.rec.school'), code(e.school ?? '—')],
+        [t('pd.rec.balance'), money(0)],
+      ],
+    };
+  }
+  return null;
 }
 
 function httpSection(e, ctx) {
@@ -1402,7 +1759,7 @@ export function eventSentence(e, { t, lang, trace = null, held = null }) {
 /**
  * Every step of a trace, in hop order, numbered from 1.
  * @param {object[]} events  the trace's events (any order; sorted by seq here)
- * @param {{ t: Function, lang: string, trace?: object, isHeld?: (id: string) => boolean }} options
+ * @param {{ t: Function, lang: string, trace?: object, isHeld?: (id: string) => boolean, names?: (code: string) => string|null }} options
  * @returns {Array<Step & { n: number, seq: number, e: object }>}
  */
 export function buildSteps(events, options) {

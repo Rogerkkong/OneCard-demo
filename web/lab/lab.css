@@ -75,11 +75,14 @@
   --sim-shadow: rgba(0, 0, 0, 0.7);
 }
 
-html { scroll-padding-top: calc(var(--header-h) + 12px); }
+/* what the page scrolls to stays clear of the sticky header and the device bar */
+html { scroll-padding-top: calc(var(--header-h) + var(--build-h, 0px) + 20px); }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
+/* the shared input:focus look (a soft glow) is too faint on a small radio or checkbox: a ring */
+input[type='radio']:focus-visible, input[type='checkbox']:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .skip-link {
   position: absolute; left: 12px; top: -80px; z-index: 60; padding: 8px 12px; border-radius: 8px;
   background: var(--surface); color: var(--ink); border: 2px solid var(--focus); font-weight: 600;
@@ -263,14 +266,20 @@ h4 { margin: 0; line-height: 1.25; }
 .site__note { padding: 8px 10px; border-radius: 8px; background: var(--bad-soft); font-size: 13px; }
 .site__gw { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .site__gwicon svg { display: block; width: 20px; height: 20px; }
+/* the router sits on the rail below it: the row keeps it at its bottom edge */
+.site__gwrow { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 6px 12px; }
+.site__add { gap: 4px; padding: 0 10px 0 6px; }
+.site__addicon svg, .build__addicon svg { display: block; width: 16px; height: 16px; }
+.site.is-added { box-shadow: 0 0 0 3px var(--teal), 0 0 0 8px var(--teal-soft); }
 
-/* the school network: a rail down the left, a bus over each row, one cable per machine */
+/* the school network: a rail down the left, a bus over each row, one cable per machine (tall
+   enough for a pulled-out cable to dangle below the line, with its plug, DESIGN §12) */
 .site__net {
   --gap: 14px;
-  --bus: 24px;
+  --bus: 34px;
   position: relative; display: grid; min-width: 0; margin: -12px 0 0 9px;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  column-gap: var(--gap); row-gap: calc(var(--bus) + 10px);
+  column-gap: var(--gap); row-gap: calc(var(--bus) + 14px);
   padding: var(--bus) 0 0 var(--gap); border-left: 2px solid var(--net-line);
 }
 .site__empty { font-size: 13px; }
@@ -290,17 +299,59 @@ h4 { margin: 0; line-height: 1.25; }
 }
 .machine[data-link='wait'] .machine__cable { border-left-style: dashed; border-left-color: var(--link-wait); }
 .machine[data-link='bad'] .machine__cable { border-left-style: dashed; border-left-color: var(--link-bad); }
-.machine[data-link='off'] .machine__cable {
-  top: calc(-1 * var(--bus) + 11px); height: calc(var(--bus) - 11px); border-left: 3px dotted var(--link-off);
+.machine[data-link='off'] .machine__cable { top: -10px; height: 10px; border-left: 3px dotted var(--link-off); }
+
+/* the cable's end (DESIGN §12): seated on the school network line, or dangling below it when the
+   cable is pulled out. Pressed and dragged, it plugs the cable in or pulls it out (cables.js). */
+.machine__end {
+  position: absolute; z-index: 2; left: 12px; top: calc(-1 * var(--bus) - 10px); width: 36px; height: 32px;
+  border-radius: 8px; cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
-.machine__plug { display: none; }
-.machine[data-link='off'] .machine__plug {
-  display: block; position: absolute; top: -8px; left: -7px; width: 11px; height: 8px;
-  border: 2px solid var(--link-off); border-radius: 2px; background: var(--surface);
+.machine__end:hover { background: var(--teal-soft); }
+.machine__plug {
+  position: absolute; left: 50%; top: 11px; width: 12px; height: 8px; transform: translate(-50%, -50%);
+  border-radius: 2.5px; background: var(--link-up); box-shadow: 0 0 0 2px var(--surface);
 }
+.machine[data-link='wait'] .machine__plug { background: var(--link-wait); }
+.machine[data-link='bad'] .machine__plug { background: var(--link-bad); }
+.machine[data-link='off'] .machine__end,
+.machine[data-pending='pull'] .machine__end { top: calc(-1 * var(--bus)); height: calc(var(--bus) + 2px); }
+.machine[data-link='off'] .machine__plug,
+.machine[data-pending='pull'] .machine__plug {
+  top: auto; bottom: 12px; height: 10px; transform: translateX(-50%);
+  background: var(--surface); border: 2px solid var(--link-off); box-shadow: none;
+}
+/* the plug's two pins */
+.machine[data-link='off'] .machine__plug::before,
+.machine[data-pending='pull'] .machine__plug::before {
+  content: ''; position: absolute; left: 1px; right: 1px; top: -5px; height: 3px;
+  border-left: 2px solid var(--link-off); border-right: 2px solid var(--link-off);
+}
+/* while the lab plugs the cable in or pulls it out, the cable shows the change it waits for */
+.machine[data-pending='pull'] .machine__cable { top: -10px; height: 10px; border-left: 3px dotted var(--link-off); }
+.machine[data-pending='plug'] .machine__cable { top: calc(-1 * var(--bus)); height: var(--bus); border-left: 3px dashed var(--link-wait); }
+.machine[data-pending='plug'] .machine__end { top: calc(-1 * var(--bus) - 10px); height: 32px; }
+.machine[data-pending='plug'] .machine__plug {
+  top: 11px; bottom: auto; height: 8px; transform: translate(-50%, -50%);
+  background: var(--link-wait); border: 0; box-shadow: 0 0 0 2px var(--surface);
+}
+.machine[data-pending='plug'] .machine__plug::before { content: none; }
+.machine[data-pending] .machine__plug { animation: cable-busy 1s ease-in-out infinite; }
+.machine[data-pending] .machine__end { cursor: progress; }
+@keyframes cable-busy { 50% { opacity: 0.35; } }
+.machine.is-cable-dragging .machine__cable, .machine.is-cable-dragging .machine__plug { opacity: 0; }
+/* the school network line lights up while a cable end is dragged, more strongly while it is over it */
+.site__net.is-cable-target { border-left-color: var(--teal); }
+.site__net.is-cable-target > .machine::before { border-top-color: var(--teal); }
+.site__net.is-cable-over { box-shadow: -3px 0 0 var(--teal-soft), inset 3px 0 0 var(--teal-soft); }
+.site__net.is-cable-over > .machine::before { border-top-width: 4px; }
+.site:has(.site__net.is-cable-target) .site__gwicon svg { color: var(--teal); }
 .machine.is-talking .machine__cable { border-left-color: var(--link-flash); box-shadow: 0 0 8px var(--link-flash); }
 .machine.is-talking { border-color: var(--teal); }
 .machine.is-acted { border-color: var(--kunyit); box-shadow: 0 0 0 3px var(--kunyit-soft); }
+/* just added from the device bar: marked for a moment */
+.machine.is-added { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal), 0 0 0 7px var(--teal-soft); }
 .packet {
   position: absolute; left: -5px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--link-flash); box-shadow: 0 0 0 2px var(--surface);
@@ -855,11 +906,111 @@ h4 { margin: 0; line-height: 1.25; }
 .tapform__radiotitle { display: block; font-weight: 600; }
 .tapform__radiotext { display: block; font-size: 12.5px; }
 
+/* ---- building the lab by drag and drop (DESIGN §12) ---------------------------------------- */
+/* the device bar: always at hand at the top of the map, under the header */
+.build {
+  container: build / inline-size;
+  position: sticky; top: calc(var(--header-h) + 8px); z-index: 25; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px 12px; margin-bottom: 16px; padding: 6px 12px 6px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--menu-shadow);
+}
+.build__head { flex: 1 1 120px; display: grid; gap: 2px; min-width: 0; max-width: 220px; }
+.build__title {
+  font-size: 11px; font-weight: 700; line-height: 1.25; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2);
+}
+.build__bar { display: flex; align-items: stretch; gap: 6px; min-width: 0; padding: 2px; }
+.build__item {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  min-width: 74px; min-height: 50px; padding: 3px 8px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--ink);
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1.2; white-space: nowrap; cursor: grab;
+  /* a finger moving sideways scrolls the bar; any other way it drags the item */
+  touch-action: pan-x; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.build__item:hover { border-color: var(--teal); background: var(--teal-soft); }
+.build__item.is-dragged { border-style: dashed; opacity: 0.55; }
+.build__icon svg { display: block; width: 24px; height: 24px; color: var(--pandan); }
+.build__item--water .build__icon svg { color: var(--teal); }
+.build__item--kiosk .build__icon svg { color: var(--warn); }
+.build__sep { flex: 0 0 auto; align-self: stretch; width: 1px; margin: 4px 2px; background: var(--line); }
+.build__addschool { flex: 0 0 auto; align-self: center; gap: 4px; padding: 0 10px 0 6px; white-space: nowrap; }
+.build__hint { font-size: 12px; line-height: 1.35; color: var(--ink-2); }
+/* a narrow bar keeps one row: the hint is still read out with the bar, and the items say it on hover */
+@container build (max-width: 700px) {
+  .build__head { flex: 0 0 auto; }
+  .build__title { max-width: 7em; }
+  .build__hint {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+}
+
+/* where a dragged item may go: dashed; the place under the pointer: solid */
+.site.is-drop-target, .cloud.is-drop-target { outline: 2px dashed var(--teal); outline-offset: 4px; }
+.site.is-drop-over, .cloud.is-drop-over { outline: 3px solid var(--teal); outline-offset: 4px; box-shadow: 0 0 0 10px var(--teal-soft); }
+.site.is-drop-blocked { opacity: 0.6; }
+.internet.is-drop-target { border-left-color: var(--teal); }
+.internet.is-drop-over { border-left-color: var(--teal); box-shadow: -6px 0 0 var(--teal-soft); }
+
+/* what a drag draws over the page: the ghost under the pointer and the rubber-band cable */
+.drag-layer { position: fixed; inset: 0; z-index: 70; pointer-events: none; }
+.drag-band { position: absolute; inset: 0; }
+.drag-band svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.drag-band__line { fill: none; stroke: var(--link-off); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 1 6; }
+.drag-band.is-on .drag-band__line { stroke: var(--teal); stroke-dasharray: none; }
+.drag-band__plug { fill: var(--surface); stroke: var(--link-off); stroke-width: 2; }
+.drag-band.is-on .drag-band__plug { fill: var(--teal); stroke: var(--teal); }
+.drag-ghost {
+  position: absolute; left: 0; top: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+  gap: 0 8px; max-width: min(280px, calc(100vw - 16px)); padding: 7px 12px 7px 8px;
+  border: 2px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink);
+  box-shadow: var(--menu-shadow); will-change: transform;
+}
+.drag-ghost.is-on { border-color: var(--teal); }
+.drag-ghost.is-blocked { border-color: var(--bad); }
+.drag-ghost__icon { grid-row: span 2; }
+.drag-ghost__icon svg { display: block; width: 28px; height: 28px; color: var(--pandan); }
+.drag-ghost__name { font-size: 14px; font-weight: 700; line-height: 1.2; }
+.drag-ghost__where { font-size: 12px; line-height: 1.3; color: var(--ink-2); }
+.drag-ghost.is-on .drag-ghost__where { color: var(--teal); font-weight: 600; }
+.drag-ghost.is-blocked .drag-ghost__where { color: var(--bad); font-weight: 600; }
+html.is-dragging, html.is-dragging * { -webkit-user-select: none; user-select: none; cursor: grabbing !important; }
+
+/* the Add machine and Add school dialogs */
+.bfields { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.bfield { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.bfield__label { color: var(--ink); font-weight: 600; }
+.bfield__hint { font-size: 12.5px; color: var(--ink-2); }
+.bfield__hint.is-warn { color: var(--warn); font-weight: 600; }
+.bfield__number { width: 7em; }
+.dialog [aria-invalid='true'] { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.bfieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.bfieldset legend { padding: 0 4px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.bchoices { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.bchoices .bfield__hint { grid-column: 1 / -1; }
+.bchoice {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 10px; color: var(--ink); font-size: 14px; cursor: pointer;
+}
+.bchoice:has(input:checked) { border-color: var(--pandan); background: var(--pandan-soft); }
+.bchoice input, .bcheck input { width: auto; min-height: 0; margin: 0; accent-color: var(--pandan); }
+.bchoice__icon svg { display: block; width: 22px; height: 22px; color: var(--pandan); }
+.bcheck { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 14px; font-weight: 600; cursor: pointer; }
+
 /* ---- small screens ------------------------------------------------------------------------- */
 @media (max-width: 760px) {
   .lab-header { position: static; }
   .hdr-clock { display: none; }
-  html { scroll-padding-top: 12px; }
+  html { scroll-padding-top: calc(var(--build-h, 0px) + 12px); }
+  /* the header scrolls away: the device bar stays at the top, one compact row that scrolls inside itself */
+  .build { top: 0; flex-wrap: nowrap; padding: 6px 8px; }
+  .build__head {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .build__bar { flex: 1 1 auto; overflow-x: auto; scrollbar-width: thin; overscroll-behavior-x: contain; }
+  /* two-line labels keep the items narrow: the next one peeks in, so the row shows it scrolls */
+  .build__item { flex: 0 0 auto; width: 76px; min-width: 0; min-height: 52px; padding: 3px 4px; font-size: 11px; line-height: 1.15; white-space: normal; text-align: center; }
 }
 @media (max-width: 560px) {
   /* message rows: time and type, then school and machine, then the summary */

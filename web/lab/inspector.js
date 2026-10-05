@@ -197,7 +197,7 @@ export function createInspector(app, root) {
   /** A new event from the stream. */
   function add(e) {
     const d = e.data ?? {};
-    if (e.type === 'sim.trace' && typeof d.id === 'string') remember(flows, d.id, { id: d.id, kind: d.kind, title: d.title, school: e.school ?? null, device: d.device ?? null });
+    if (e.type === 'sim.trace' && typeof d.id === 'string') remember(flows, d.id, { id: d.id, kind: d.kind, title: d.title, subject: d.subject ?? {}, school: e.school ?? null, device: d.device ?? null });
     if (e.type === 'sim.held' && typeof d.id === 'string') remember(waiting, d.id, d);
     const item = { id: nextId++, e, kind: kindOf(e), hb: isHeartbeat(e), trouble: isTrouble(e), machine: machineOf(e) };
     if (paused) {
