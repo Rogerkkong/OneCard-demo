@@ -40,11 +40,11 @@ if ! has_node || ! new_enough node; then
     "$HOME/.asdf/shims" \
     /opt/homebrew/bin /usr/local/bin /opt/local/bin; do
     [ -n "$dir" ] && [ -x "$dir/node" ] || continue
-    [ -n "$first" ] || first="$dir"
     if new_enough "$dir/node"; then
       first="$dir"
       break
     fi
+    has_node || [ -n "$first" ] || first="$dir"
   done
   [ -z "$first" ] || PATH="$first:$PATH"
 fi
