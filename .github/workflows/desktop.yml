@@ -1,0 +1,9 @@
+# Placeholder: the desktop app build (docs/DESIGN.md §13) replaces this.
+name: Desktop app
+on:
+  workflow_dispatch:
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "placeholder"
