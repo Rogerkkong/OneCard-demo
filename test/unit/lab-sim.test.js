@@ -4,12 +4,14 @@ import { createLab } from '../../src/lab/lab.js';
 import { waitFor } from '../helpers.js';
 
 // Live stepping in the lab (docs/DESIGN.md §11.4), at its awkward moments: Next pressed while
-// the server goes down or the broker restarts, hold switched on while the server comes up, two
-// machines held at once, a held admin-card load with a visit queued behind it, a held clock
-// move, and a reset or stop with flows held at every hop. After each one every record is home
-// exactly once, every school's books balance and every card equals its mirror, and nothing is
-// left held. A real lab: the demo seed (fictional schools, people and cards), broker and web
-// server on random ports, the lab clock standing still.
+// the server goes down or the broker restarts (and either one while the broker is passing an
+// acknowledged sale on), hold switched on or off while the server comes up, two machines held
+// at once, a held admin-card load with a visit queued behind it, a kiosk's confirm held while
+// the server goes off, a held clock move, and a reset or stop with flows held at every hop (or
+// held while it waits for the lab). After each one every record is home exactly once, every
+// school's books balance and every card equals its mirror, and nothing is left held. A real
+// lab: the demo seed (fictional schools, people and cards), broker and web server on random
+// ports, the lab clock standing still.
 
 const NET = { timeout: 60_000 };
 const SMK = 'smk-contoh';
@@ -144,6 +146,48 @@ test('Next pressed during a broker restart: the old broker takes nothing it can 
   lab.setSim({ mode: 'realtime' });
   await booksBalance();
   assert.deepEqual(verdicts(mark, sale.item.txn), [['POSTED', 'JOURNAL_BATCH']]);
+});
+
+/**
+ * Tap a sale on CANTEEN-01 and run `action` at the worst moment for it: the broker has
+ * acknowledged the sale (aedes sends the PUBACK first, so the reader marks it sent) and is
+ * about to pass it on to the platform. @returns {Promise<object>} the tap's answer
+ */
+async function saleWhileThe(action) {
+  const persistence = lab.broker.aedes.persistence;
+  const enqueue = persistence.outgoingEnqueueCombi;
+  let done = null;
+  persistence.outgoingEnqueueCombi = function onItsWay(subs, packet, ...rest) {
+    if (done === null && String(packet.payload).includes('"sale.recorded"')) done = action();
+    return enqueue.call(this, subs, packet, ...rest);
+  };
+  try {
+    const sale = await tap('CANTEEN-01', LEE, { items: items('ROTI-CANAI') });
+    assert.ok(done, 'the action ran while the sale was on its way');
+    await done;
+    return sale;
+  } finally {
+    persistence.outgoingEnqueueCombi = enqueue;
+  }
+}
+
+test('the server goes off while the broker passes a sale on: what it acknowledged still reaches the books', NET, async () => {
+  await lab.reset();
+  const mark = lab.ctx.events.lastSeq();
+  const sale = await saleWhileThe(() => lab.setServer({ up: false }));
+  assert.equal(sale.sent, true, 'the reader counts it as sent');
+  await lab.setServer({ up: true });
+  await booksBalance();
+  assert.deepEqual(verdicts(mark, sale.record.txn), [['POSTED', 'MQTT']]);
+});
+
+test('the broker restarts while it passes a sale on: what it acknowledged still reaches the books', NET, async () => {
+  await lab.reset();
+  const mark = lab.ctx.events.lastSeq();
+  const sale = await saleWhileThe(() => lab.restartBroker());
+  assert.equal(sale.sent, true, 'the reader counts it as sent');
+  await booksBalance();
+  assert.deepEqual(verdicts(mark, sale.record.txn), [['POSTED', 'MQTT']]);
 });
 
 test('Next and server off at once, again and again: every sale reaches the books exactly once', NET, async () => {
@@ -286,6 +330,31 @@ test('a held admin-card load holds the kiosk: a visit waits behind it, then both
   await booksBalance();
 });
 
+test('a held confirm and the server off: the money written on the card is reported at the next visit', NET, async () => {
+  await lab.reset();
+  lab.setSim({ mode: 'simulation', hold: true });
+  const visit = await tap('KIOSK-01', AHMAD);
+  assert.deepEqual([visit.held, visit.item.type], [true, 'card.readback']);
+  await stepUntil(() => heldNow((h) => h.trace === visit.trace && h.call === 'confirm').length === 1, 'the confirm call held');
+  assert.equal(lab.cards.get(`${SMK}/${AHMAD}`).balanceSen, 5000, 'on the card already');
+
+  // the server goes off before the kiosk could report the write: no answer, and none to the lookup
+  await lab.setServer({ up: false });
+  await stepUntil(() => inTrace(visit.trace, 'lab.action').length === 1, 'the visit to finish');
+  assert.deepEqual(inTrace(visit.trace, 'device.http').map((e) => [e.data.call, e.data.status]), [['pending', 200], ['confirm', 0], ['lookup', 0]]);
+  assert.equal(lab.checkBooks().ok, true, 'the books leave the unreported write out');
+
+  // the server on again: the next visit reports it, and the card equals its mirror
+  lab.setSim({ mode: 'realtime' });
+  await lab.setServer({ up: true });
+  await waitFor(() => machine('KIOSK-01').connected, { timeout: 15_000, message: 'the kiosk back on the broker' });
+  const again = await tap('KIOSK-01', AHMAD);
+  assert.deepEqual([again.screen, again.reconfirmed.map((r) => r.result)], ['Nothing to add · Balance RM 50.00', ['CONFIRMED']]);
+  await booksBalance();
+  const card = lab.checkBooks().schools.find((s) => s.code === SMK).cards.find((c) => c.uid === AHMAD);
+  assert.deepEqual([card.cardSen, card.mirrorSen, card.unconfirmedSen], [5000, 5000, 0]);
+});
+
 test('a held clock move answers with the new time at once; its heartbeats go on with Next', NET, async () => {
   await lab.reset();
   const before = lab.state().clock.now;
@@ -348,6 +417,34 @@ test('a reset with flows held at every hop: nothing held, nothing of the old dem
   await booksBalance();
 });
 
+test('a kiosk visit a reset let go ends in the old demo, even when its next call comes after the reset', NET, async () => {
+  await lab.reset();
+  lab.setSim({ mode: 'simulation', hold: true });
+  // this kiosk's API calls go only once the reset is over (as a slow call would)
+  const kiosk = machine('KIOSK-01');
+  let resetOver;
+  const afterReset = new Promise((resolve) => {
+    resetOver = resolve;
+  });
+  const hold = kiosk._hold;
+  kiosk._hold = function lateCall(info) {
+    const held = hold.call(this, info);
+    return held && info.kind === 'http' ? held.then(() => afterReset) : held;
+  };
+  const visit = await tap('KIOSK-01', AHMAD);
+  assert.deepEqual([visit.held, visit.item.type], [true, 'card.readback']);
+  lab.simNext();
+  await waitFor(() => heldNow((h) => h.trace === visit.trace && h.call === 'pending').length === 1, { message: 'the pending call held' });
+
+  await lab.reset();
+  resetOver();
+  await sleep(300); // the old kiosk asks what is waiting, in a demo that is gone
+  const { devices, schools } = lab.platform.services;
+  const warned = devices.listLog(schools.getSchoolByCode(SMK).id).filter((l) => l.level !== 'INFO');
+  assert.deepEqual(warned.map((l) => `${l.code}: ${l.message}`), [], "the old demo's kiosk never reached the new platform");
+  await booksBalance();
+});
+
 test('hold switched on again while a reset waits for the lab: the reset still leaves nothing held', NET, async () => {
   await lab.reset();
   const busy = lab.setServer({ up: false }); // the lab's lock is taken for a moment
@@ -387,6 +484,32 @@ test('stop with flows held at every hop: it ends at once, lets them all go, and 
   assert.deepEqual(other.simState(), { mode: 'realtime', hold: false, held: [] });
   assert.equal(other.phase, 'stopped');
   await sleep(300); // the flows let go end against a stopped lab, quietly
+  assert.deepEqual(logs, []);
+});
+
+test('hold switched on again while a stop waits for the lab: the stop still leaves nothing held', NET, async () => {
+  const logs = [];
+  const other = createLab({
+    clockMode: 'manual',
+    httpPort: 0,
+    mqttPort: 0,
+    consolePort: 0,
+    jobsMs: 0,
+    reconnectMs: 100,
+    log: (level, message, meta) => {
+      if (level === 'error') logs.push(`${message} ${JSON.stringify(meta ?? {})}`);
+    },
+  });
+  await other.start();
+  const busy = other.setServer({ up: false }); // the lab's lock is taken for a moment
+  const stopping = other.stop(); // lets go of what waits now, then waits for the lock
+  other.setSim({ mode: 'simulation', hold: true });
+  const late = await other.tap({ schoolCode: SMK, deviceCode: 'CANTEEN-01', uid: LEE, items: items('ROTI-CANAI') });
+  assert.equal(late.held, true, 'held while the stop waited');
+  await busy;
+  await stopping;
+  assert.equal(other.phase, 'stopped');
+  assert.deepEqual(other.simState(), { mode: 'realtime', hold: false, held: [] });
   assert.deepEqual(logs, []);
 });
 

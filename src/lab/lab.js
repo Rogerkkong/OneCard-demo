@@ -1470,8 +1470,8 @@ export function createLab(options = {}) {
    * Take the broker down, then the platform's link. In this order the broker never takes a
    * message it cannot deliver: with the platform gone first, it would still acknowledge a
    * machine's record (which then counts it as sent) and queue it for the platform's session,
-   * a queue that dies with the broker. The platform stays on until the broker closes and
-   * handles what was already passed to it.
+   * a queue that dies with the broker. The platform stays on until the broker has closed, so
+   * it receives what the broker acknowledged (passed on before it closes, see broker.js).
    */
   async function closeBrokerAndLink(reason) {
     try {

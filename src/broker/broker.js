@@ -18,6 +18,12 @@ import { DEVICE_CODE_RE, SCHOOL_CODE_RE, TOPIC_ROOT, parseTopic, topicFor } from
 // - publish: aedes closes the connection without a PUBACK (MQTT-3.3.5-2), so the message
 //   reaches nobody. Note that mqtt.js resends unacknowledged QoS 1/2 messages after it
 //   reconnects, so a client that keeps such a message is refused again on every reconnect.
+//
+// aedes acknowledges a QoS 1 message (PUBACK) before it passes it on to the subscribers, so
+// close() first lets every message it has acknowledged reach them: the sender counts it as
+// delivered (a machine marks the record sent), and a broker that closed in between would
+// lose it with the platform's queue. While it closes, a machine's new message is refused
+// without a PUBACK, so the machine keeps it and sends it again to the next broker.
 
 /** Username of the platform's own broker account. */
 export const PLATFORM_USERNAME = 'platform';
@@ -35,6 +41,9 @@ const PEEK_MAX_BYTES = 1024 * 1024;
 // most 64 characters); a longer one is shown as null, so one message cannot copy up to a
 // megabyte into the kept events and out to every lab console.
 const PEEK_MAX_CHARS = 64;
+// close() waits at most this long for the messages it acknowledged to be passed on (a pass
+// normally takes a millisecond; one whose PUBACK could not even be sent never completes).
+const DRAIN_MS = 1000;
 
 /**
  * '<school>.<DEVICE>' -> { schoolCode, deviceCode }, or null when it is not a device login.
@@ -190,6 +199,10 @@ export async function startBroker(ctx, {
   };
 
   const accounts = new WeakMap(); // aedes client -> the account it logged in with
+  // QoS 1 messages from clients that aedes has acknowledged but not yet passed on (see close()).
+  const passingOn = new Set();
+  let draining = false; // close() has begun: a machine's new message is refused
+  let drained = null; // ends close()'s wait once passingOn is empty
   // kick() voids logins already under way, whose device lookup may predate the switch-off.
   let loginSeq = 0;
   const kickedUpTo = new Map(); // username -> last login attempt started before kick()
@@ -299,6 +312,13 @@ export async function startBroker(ctx, {
   function authorizePublish(client, packet, callback) {
     // client is null only for a stored will of a broker that is gone; nobody vouches for it
     const account = client ? accounts.get(client) : undefined;
+    if (draining && account?.role !== 'platform') {
+      // closing: no PUBACK, so the sender keeps the message (the platform's link stays, to
+      // receive what is still being passed on)
+      log('debug', 'broker closing: publish refused', { username: account?.username ?? null, topic: packet.topic });
+      callback(new Error('the broker is closing'));
+      return;
+    }
     if (account && mayPublish(account, packet.topic)) {
       // A QoS 2 resend is published again only if the first copy never arrived: then the
       // 'publish' event announces it.
@@ -306,6 +326,8 @@ export async function startBroker(ctx, {
         announced.add(packet);
         announcePublish(packet, client);
       }
+      // acknowledged before it is passed on: close() waits for it (QoS 2 is passed on first)
+      if (packet.qos === 1) passingOn.add(packet);
       callback(null);
       return;
     }
@@ -345,6 +367,8 @@ export async function startBroker(ctx, {
   // Fires once per published message, with the retain flag as sent. Messages from clients were
   // announced when authorizePublish accepted them; this covers the ones the server sends itself.
   aedes.on('publish', (packet, client) => {
+    // passed on to every subscriber: nothing of it is left for close() to wait for
+    if (passingOn.delete(packet) && passingOn.size === 0) drained?.();
     if (typeof packet.topic !== 'string' || packet.topic.startsWith('$')) return; // the broker's own $SYS chatter
     if (announced.has(packet)) return;
     announcePublish(packet, client);
@@ -385,6 +409,17 @@ export async function startBroker(ctx, {
     closing ??= (async () => {
       // Stop accepting first; each server reports closed once its last socket is gone.
       const stopped = servers.map((server) => new Promise((resolve) => (server.listening ? server.close(() => resolve()) : resolve())));
+      // Then pass on what was acknowledged already, before the connections go (file header).
+      draining = true;
+      if (passingOn.size > 0) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, DRAIN_MS);
+          drained = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      }
       await new Promise((resolve) => aedes.close(() => resolve()));
       for (const socket of sockets) socket.destroy(); // still waiting for CONNECT, or mid-handshake
       await Promise.all(stopped);
