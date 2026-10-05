@@ -858,6 +858,21 @@ Rules:
   (a tap includes the machine's screen). The rest arrives as events; the action's `lab.action` event is emitted
   when it completes.
 
+As built (additions to the above):
+- A held item also carries, when known, `txn`, `topic`, `method`, `path`. `sim.held` carries the whole item.
+- Every action answer carries `trace`. An early answer also carries the held `item`.
+- An action that fails after it answered early reports a `lab.action` with `ok: false, code, message` inside its trace.
+- A machine message is held only while the lab is running. Command acks are never held at the machine, only at the
+  platform.
+- `setSim` refuses contradictory or empty requests (`hold: true` with realtime) with `INPUT_INVALID`.
+- The lab's kiosk API client treats the kiosk as offline while its cable is out **or** the virtual cloud server is
+  off. A switched-off server answers nothing, so the call fails as NETWORK, status 0, with no `http.kiosk`.
+- A `publishUp` message that was held and then overtaken (for example by a heartbeat) goes out with the next seq,
+  re-signed, with the same message id.
+- `device.acked` is emitted untraced and joins its flow by `data.msgId`. Commands are handled inside
+  `withContext({ msgId: <command id> })`.
+- `createLab` gains option `reconnectMs` (the machines' first broker retry; tests use 200).
+
 ### 11.5 Lab API
 
 Routes, all with auth `none`:
