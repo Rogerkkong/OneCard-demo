@@ -168,6 +168,10 @@ function labOptions(options) {
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('heartbeatMs must be a whole number of milliseconds');
   const jobsMs = o.jobsMs ?? 5000;
   if (!Number.isSafeInteger(jobsMs) || jobsMs < 0) throw new TypeError('jobsMs must be a whole number of milliseconds (0 = no timer)');
+  const reconnectMs = o.reconnectMs ?? null; // null: the machines' own default
+  if (reconnectMs !== null && (!Number.isSafeInteger(reconnectMs) || reconnectMs < 1 || reconnectMs > 60_000)) {
+    throw new TypeError('reconnectMs must be a whole number of milliseconds, 1 to 60000');
+  }
   if (o.tls != null && (!isPlainObject(o.tls) || !o.tls.key || !o.tls.cert)) throw new TypeError('tls needs { key, cert } (PEM) and optionally port');
   return {
     httpPort: port('httpPort', o.httpPort, 8080),
@@ -178,6 +182,7 @@ function labOptions(options) {
     startAt: o.startAt ?? DEFAULT_LAB_START,
     heartbeatMs,
     jobsMs,
+    reconnectMs,
     tls: o.tls ?? null,
     log: typeof o.log === 'function' ? o.log : defaultLog,
   };
@@ -253,6 +258,8 @@ function durationText(ms) {
  * @param {number} [options.startAt]  lab time at start (default Mon 05/10/2026 10:00 KL)
  * @param {number} [options.heartbeatMs]  machine heartbeat period (default 15000)
  * @param {number} [options.jobsMs]  scheduled jobs period (default 5000; 0 = no timer)
+ * @param {number} [options.reconnectMs]  a machine's first retry after losing the broker (default
+ *   the machines' own, 1 s; it doubles up to 10 s): lower in tests that switch the server off
  * @param {{ port?: number, key: string, cert: string }} [options.tls]  optional MQTT TLS listener
  * @param {(level: string, message: string, meta?: object) => void} [options.log]  default: errors to stderr
  */
@@ -663,6 +670,7 @@ export function createLab(options = {}) {
       log: ctx.log,
       gate: machineGate,
     };
+    if (config.reconnectMs !== null) options.reconnectMs = config.reconnectMs;
     let machine;
     if (device.type === 'CANTEEN') machine = new CanteenReader(options);
     else if (device.type === 'WATER') machine = new WaterMachine(options);

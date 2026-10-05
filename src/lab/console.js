@@ -110,19 +110,30 @@ function clockTime(at) {
 }
 
 /**
- * The steps in the order of the hops. Events are kept in the order they were emitted, and
- * the broker reports passing a message (mqtt.publish) only once it has delivered it, often
- * after the platform has handled it: each pass is shown right after the send it belongs to.
+ * The steps in the order of the hops. Events are kept in the order they were emitted, which at
+ * two places is not the order of the hops: the platform announces its verdict on a message
+ * (intake.*) only after the books have committed what the message caused, so the verdict is
+ * shown before that work (the events carrying the message's id just before it); and a broker
+ * that reports passing a message only once it has delivered it (mqtt.publish) has the pass
+ * shown right after the send it belongs to. Nothing else moves.
  */
 function hopOrder(events) {
   const isSend = (e) => (e.type === 'device.send' || e.type === 'platform.send') && typeof e.data?.msgId === 'string';
   const sent = new Set(events.filter(isSend).map((e) => e.data.msgId));
   const isPass = (e) => e.type === 'mqtt.publish' && sent.has(e.data?.msgId);
+  const isVerdict = (e) => e.type.startsWith('intake.') && typeof e.msgId === 'string';
   const passes = new Map(); // msgId -> the broker's passes of it, in order
   for (const e of events.filter(isPass)) passes.set(e.data.msgId, [...(passes.get(e.data.msgId) ?? []), e]);
   const out = [];
   for (const e of events) {
     if (isPass(e)) continue;
+    if (isVerdict(e)) {
+      // what the platform did with this message came at its commit, right before the verdict
+      let at = out.length;
+      while (at > 0 && out[at - 1].msgId === e.msgId && !isVerdict(out[at - 1])) at -= 1;
+      out.splice(at, 0, e);
+      continue;
+    }
     out.push(e);
     if (isSend(e) && passes.has(e.data.msgId)) {
       out.push(...passes.get(e.data.msgId));
@@ -701,12 +712,10 @@ export function createConsole(lab) {
     if (!kept) return `% No trace #${n}: show traces lists the ones the lab keeps.`;
     const { trace, events } = kept;
     const steps = hopOrder(events);
-    const count = trace.events > events.length
-      ? `${trace.events} events, the first and the last ${events.length - 1} kept`
-      : plural(trace.events, 'event');
+    const count = trace.events > events.length ? `${trace.events} events (${events.length} kept)` : plural(trace.events, 'event');
     return [
       `Trace #${trace.n} (${trace.kind}): ${trace.title}`,
-      `${count}, started ${when(trace.at)}. TIME is the lab clock (KL).`,
+      `${count}, started ${when(trace.at)}. Steps in hop order; TIME is the lab clock (KL).`,
       ...table([{ title: '#' }, { title: 'TIME' }, { title: 'TYPE', max: 19 }, { title: 'WHAT' }],
         steps.map((e, i) => [i + 1, clockTime(e.at), e.type, stepText(e)])),
     ];

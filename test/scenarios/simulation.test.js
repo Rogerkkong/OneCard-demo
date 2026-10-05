@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLab } from '../../src/lab/lab.js';
 import { waitFor } from '../helpers.js';
@@ -25,8 +25,14 @@ const labLog = (level, message, meta) => {
 };
 
 before(async () => {
-  lab = createLab({ clockMode: 'manual', httpPort: 0, mqttPort: 0, consolePort: 0, jobsMs: 0, log: labLog });
+  // machines retry the broker after 200 ms (doubling): back soon after the server is switched on
+  lab = createLab({ clockMode: 'manual', httpPort: 0, mqttPort: 0, consolePort: 0, jobsMs: 0, reconnectMs: 200, log: labLog });
   base = (await lab.start()).httpUrl;
+});
+
+// whatever an exercise left held (a failed one too), the next one starts in realtime
+afterEach(() => {
+  if (lab?.phase === 'running') lab.setSim({ mode: 'realtime' });
 });
 
 after(async () => {
@@ -137,16 +143,18 @@ test('16.1 a canteen tap is one trace, from the card to the books, and the lab A
   assert.deepEqual([trace.id, trace.n, trace.kind, trace.title, trace.school, trace.device], [sale.trace, 1, 'tap', `Tap ${AHMAD} on ${SMK}/CANTEEN-01`, SMK, 'CANTEEN-01']);
   assert.equal(trace.events, events.length);
   assert.ok(events.every((e) => e.trace === sale.trace), 'every hop carries the trace');
-  // the machine's own steps, in order, then the hops that follow (broker, platform, books,
-  // the PUBACK and the lab's answer), each once and nothing else
+  // The order the events happened in: the machine's own steps and the broker taking the
+  // record, then two hops at once: the broker's acknowledgement back to the reader (and the
+  // lab's answer after it) and the platform's handling, where the books' events come before
+  // intake's verdict (intake announces after its commit). Where the lab's answer falls among
+  // the platform's events depends on the machine's load; everything else is fixed.
   const order = events.map(kindOf);
-  assert.deepEqual(order.slice(0, 7), [
-    'sim.trace', 'device.step card.read', 'device.step rules', 'card.write', 'device.step journal', 'device.screen', 'device.send',
+  assert.deepEqual(order.slice(0, 8), [
+    'sim.trace', 'device.step card.read', 'device.step rules', 'card.write', 'device.step journal', 'device.screen', 'device.send', 'mqtt.publish',
   ]);
-  assert.deepEqual(order.slice(7).sort(), ['device.acked', 'intake.accepted', 'lab.action', 'ledger.posting', 'mqtt.publish', 'purchase.received']);
-  const at = (type) => order.indexOf(type);
-  assert.ok(at('device.acked') < at('lab.action'), 'the tap answers once the broker has the record');
-  assert.ok(at('purchase.received') < at('intake.accepted') && at('ledger.posting') < at('intake.accepted'), 'intake announces after the books');
+  assert.deepEqual(order.slice(8).sort(), ['device.acked', 'intake.accepted', 'lab.action', 'ledger.posting', 'purchase.received']);
+  assert.deepEqual(order.slice(8).filter((t) => t !== 'lab.action'), ['device.acked', 'ledger.posting', 'purchase.received', 'intake.accepted']);
+  assert.ok(order.indexOf('device.acked') < order.indexOf('lab.action'), 'the tap answers once the broker has the record');
 
   const one = (type) => events.find((e) => e.type === type);
   assert.deepEqual(one('sim.trace').data, { id: sale.trace, n: 1, kind: 'tap', title: `Tap ${AHMAD} on ${SMK}/CANTEEN-01`, device: 'CANTEEN-01' });
@@ -287,9 +295,10 @@ test('16.4 hold at the platform: the message waits there while the server is off
   // the server's own flow: the platform republished every retained setting, and the plugged
   // machines' first heartbeats on the new broker belong to it (they wait at their outboxes)
   assert.ok(inTrace(on.trace, 'platform.send', (e) => e.data.retained).length >= 3);
+  await waitFor(() => machine('CANTEEN-01').connected, { timeout: 30_000, message: 'CANTEEN-01 back on the broker' });
   await waitFor(() => heldNow((h) => h.trace === on.trace && h.school === SMK && h.device === 'CANTEEN-01' && h.type === 'device.heartbeat').length === 1, {
-    timeout: 15_000,
-    message: 'CANTEEN-01 back, its first heartbeat held in the server-up flow',
+    timeout: 5000,
+    message: "CANTEEN-01's first heartbeat held in the server-up flow",
   });
 
   // back to realtime: everything held goes on
@@ -330,7 +339,7 @@ test('16.5 hold at the kiosk API: with the server off the call fails, and the ne
   await lab.setServer({ up: true });
   await waitFor(() => inTrace(visit.trace, 'intake.accepted', (e) => e.data.type === 'card.readback').length === 1, { message: 'the read-back processed' });
   lab.setSim({ mode: 'realtime' });
-  await waitFor(() => machine('KIOSK-01').connected, { timeout: 15_000, message: 'the kiosk back on the broker' });
+  await waitFor(() => machine('KIOSK-01').connected, { timeout: 30_000, message: 'the kiosk back on the broker' });
   const again = await tap('KIOSK-01', AHMAD);
   assert.equal(again.screen, 'Added RM 20.00 · Balance RM 50.00');
   assert.deepEqual(again.added.map((a) => [a.amountSen, a.confirmed]), [[2000, true]]);

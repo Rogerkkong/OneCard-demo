@@ -486,7 +486,7 @@ test('Simulation mode: hold a sale at each hop, let it go with next, and read th
   assert.ok(listed.slice(2).some((row) => cells(row)[0] === `#${n}` && cells(row)[2] === `Tap ${AHMAD} on smk-contoh/CANTEEN-01`), listed.join('\n'));
   const steps = lines(await top.out(`show trace ${n}`));
   assert.equal(steps[0], `Trace #${n} (tap): Tap ${AHMAD} on smk-contoh/CANTEEN-01`);
-  assert.match(steps[1], /^\d+ events, started \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\. TIME is the lab clock \(KL\)\.$/);
+  assert.match(steps[1], /^\d+ events, started \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\. Steps in hop order; TIME is the lab clock \(KL\)\.$/);
   assert.deepEqual(cells(steps[2]), ['#', 'TIME', 'TYPE', 'WHAT']);
   const rows = steps.slice(3).map(cells);
   rows.forEach((r, i) => assert.equal(r[0], String(i + 1)));
@@ -500,7 +500,9 @@ test('Simulation mode: hold a sale at each hop, let it go with next, and read th
   assert.ok(at('card.write') < at('sim.held') && at('sim.held') < at('sim.released') && at('sim.released') < send);
   assert.equal(types[send + 1], 'mqtt.publish', 'the broker passes the message right after it is sent');
   assert.ok(at('sim.held', send) > send && at('purchase.received') > at('sim.released', send));
-  assert.ok(types.includes('intake.accepted') && types.includes('ledger.posting') && types.includes('lab.action'));
+  // the platform's verdict, then what it booked (emitted the other way round: intake announces after the commit)
+  assert.ok(at('intake.accepted') > at('sim.released', send) && at('intake.accepted') < at('ledger.posting'));
+  assert.ok(at('ledger.posting') < at('purchase.received') && types.includes('lab.action'));
   assert.match(rows[at('device.step')][3], new RegExp(`^CANTEEN-01 read card \\.\\.${AHMAD.slice(-4)}: RM \\d+\\.\\d{2}, counter \\d+, \\d+ records?$`));
   assert.match(rows[at('sim.held')][3], /^waits at the outbox: sale\.recorded of CANTEEN-01$/);
   assert.match(rows[send][3], /^CANTEEN-01 sends sale\.recorded \(seq \d+, CANTEEN-01-\d{6}\)$/);
