@@ -515,7 +515,9 @@ describe('accepted messages', () => {
       ['settings', 0, 'HEARTBEAT', true],
       ['blocklist', 1, 'HEARTBEAT', false],
     ]);
-    assert.deepEqual(eventsOf(t.ctx, 'intake.accepted').map((e) => [e.school, e.data]), [['smk-alpha', { device: 'CANTEEN-01', type: 'device.heartbeat' }]]);
+    assert.deepEqual(eventsOf(t.ctx, 'intake.accepted').map((e) => [e.school, e.data]), [
+      ['smk-alpha', { device: 'CANTEEN-01', type: 'device.heartbeat', msgId: env.id, checks: ALL_PASSED }],
+    ]);
     assert.equal(inbound(t.a), 1);
   });
 
@@ -534,7 +536,8 @@ describe('accepted messages', () => {
     const canteen = t.a.m['CANTEEN-01'];
     const card = fund(t.a, 'aina', 2000);
     const record = sale(card, { n: 1, items: [['NASI-LEMAK', 1], ['TEH-TARIK', 2]] });
-    const res = send(canteen, 'sale.recorded', { record }, { txn: record.txn });
+    const env = envelope(canteen, 'sale.recorded', { record }, { txn: record.txn });
+    const res = deliver(canteen, env);
     assert.equal(res.result, 'ACCEPTED');
     assert.equal(res.type, 'sale.recorded');
     const [r] = res.detail.results;
@@ -545,7 +548,10 @@ describe('accepted messages', () => {
     assert.equal(wallet(t.a, 'aina'), 2000 - 710);
     assertBooks(t.a);
     assert.deepEqual(eventsOf(t.ctx, 'intake.accepted').map((e) => e.data), [
-      { device: 'CANTEEN-01', type: 'sale.recorded', results: [{ txn: 'CANTEEN-01-000001', status: 'POSTED', differences: [] }] },
+      {
+        device: 'CANTEEN-01', type: 'sale.recorded', msgId: env.id, checks: ALL_PASSED,
+        results: [{ txn: 'CANTEEN-01-000001', status: 'POSTED', differences: [] }],
+      },
     ]);
   });
 
