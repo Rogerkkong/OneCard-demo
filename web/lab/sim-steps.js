@@ -52,6 +52,8 @@ const machineNode = (school, device) => (school && device ? { kind: 'machine', s
 const cardNode = (school, uid = null, last4 = null) => (school ? { kind: 'card', school, uid, last4 } : null);
 const adminNode = (school) => (school ? { kind: 'admincard', school } : null);
 const internetNode = (school) => ({ kind: 'internet', school: school ?? null });
+/** Somewhere on a school's network (a copy of a machine's login is not one of its machines). */
+const netNode = (school) => (school ? { kind: 'net', school } : null);
 /** A card's chip UID without the tray's copy suffix ('04A1…80-copy2' -> '04A1…80'). */
 const chipUid = (uid) => String(uid ?? '').replace(/-copy\d*$/i, '').toUpperCase();
 
@@ -520,8 +522,9 @@ function faultWords(s, trace, t) {
 /**
  * What a flow is called, from its kind and subject: { title, kind, short } (kind and short make
  * the picker's line), or null when this page does not know the kind or the subject lacks a field.
+ * `names(code)`: a school's name, when the page knows it.
  */
-function flowWords(trace, t) {
+function flowWords(trace, t, names = null) {
   if (!trace) return null;
   const s = subjectOf(trace);
   const school = word(s.school) ?? word(trace.school);
@@ -575,7 +578,8 @@ function flowWords(trace, t) {
     case 'add-school': {
       const code = word(s.code);
       if (!code) return null;
-      return { title: t('tt.addSchool', { code }), kind: t('sim.kind.add-school'), short: code };
+      const name = names?.(code) ?? null;
+      return { title: name ? t('tt.addSchoolNamed', { name, code }) : t('tt.addSchool', { code }), kind: t('sim.kind.add-school'), short: code };
     }
     default:
       return null;
@@ -587,14 +591,14 @@ function flowWords(trace, t) {
  * a kind or subject this page does not know.
  * @param {{ kind?: string, title?: string, subject?: object, school?: string|null, device?: string|null }} trace  a summary
  */
-export function traceTitle(trace, t) {
-  return flowWords(trace, t)?.title ?? String(trace?.title ?? '');
+export function traceTitle(trace, t, { names = null } = {}) {
+  return flowWords(trace, t, names)?.title ?? String(trace?.title ?? '');
 }
 
 /** The trace picker's line: "#3 · Tap · CANTEEN-01 · 10:02". */
-export function traceLabel(summary, t, hhmm) {
+export function traceLabel(summary, t, hhmm, { names = null } = {}) {
   if (!summary) return '';
-  const words = flowWords(summary, t);
+  const words = flowWords(summary, t, names);
   if (words) return t('sim.trace.option', { n: summary.n, kind: words.kind, subject: words.short, time: hhmm(summary.at) });
   return t('sim.trace.optionTitle', { n: summary.n, title: String(summary.title ?? ''), time: hhmm(summary.at) });
 }
@@ -652,7 +656,7 @@ export function stepOf(e, ctx) {
     case 'sim.trace': {
       const trace = ctx.trace ?? { kind: d.kind, title: d.title, school, device: d.device ?? null, subject: d.subject };
       step.to = traceNode(trace, ctx);
-      say('st.trace', { title: traceTitle(trace, t) });
+      say('st.trace', { title: traceTitle(trace, t, { names: ctx.names }) });
       break;
     }
     case 'sim.held': {
@@ -744,7 +748,9 @@ export function stepOf(e, ctx) {
       const vars = { device: dev ?? '—', type: d.type ?? '—', seq: d.seq ?? '—', bytes: d.bytes ?? '—' };
       const p = parseTopic(d.topic);
       if (d.copiedLogin === true) {
-        // the cross-device fault: a copy of this machine's broker login sends, not the machine
+        // the cross-device fault: a copy of this machine's broker login sends, not the machine;
+        // the copy is somewhere on the school's network, not one of the machines on the map
+        step.to = netNode(school);
         step.verdict = 'warn';
         step.note = t('st.send.copiedNote', { device: dev ?? '—' });
         const target = p ? (school && p.school !== school ? `${p.school}/${p.device}` : p.device) : d.topic ?? '—';
@@ -812,7 +818,7 @@ export function stepOf(e, ctx) {
       step.layer = 'mqtt';
       const p = parseTopic(d.topic);
       const copied = ctx.logins?.get(e.seq)?.role === 'copied';
-      step.from = copied ? null : (machineOfLogin(d.username, school) ?? (p ? machineNode(p.school, p.device) : null));
+      step.from = copied ? netNode(school) : (machineOfLogin(d.username, school) ?? (p ? machineNode(p.school, p.device) : null));
       step.to = BROKER;
       step.drop = BROKER;
       step.verdict = 'bad';
@@ -1037,7 +1043,8 @@ function loginName(username, ctx, school, { start = false } = {}) {
  * A broker login starting or ending (mqtt.connect, mqtt.disconnect, DESIGN §11.7): between the
  * machine (or the platform) and the broker. A login travels to the broker; one that ends travels
  * nowhere (often nothing is sent: a cable is pulled, the broker stops), it is shown at the broker.
- * The copy of a machine's login (the cross-device fault) is not on the map: it shows at the broker.
+ * The copy of a machine's login (the cross-device fault) is not one of the machines on the map:
+ * it comes from the school's network.
  */
 function loginStep(step, e, ctx, say) {
   const { t } = ctx;
@@ -1056,12 +1063,12 @@ function loginStep(step, e, ctx, say) {
   const device = machine?.device ?? who;
   switch (info.role) {
     case 'copied':
-      step.from = null;
+      step.from = netNode(e.school ?? null);
       step.verdict = 'warn';
       say('st.on.copied', { device });
       return;
     case 'copiedClosed':
-      step.from = null;
+      step.from = netNode(e.school ?? null);
       say('st.off.copied', { device });
       return;
     case 'knocked':

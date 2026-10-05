@@ -676,6 +676,7 @@ export const STRINGS = {
     'tt.addWater': 'Add a water machine {code} to {school}',
     'tt.addKiosk': 'Add a top-up kiosk {code} to {school}',
     'tt.addSchool': 'Add the school {code}',
+    'tt.addSchoolNamed': 'Add the school {name} ({code})',
 
     'sim.hold.title': 'Live stepping',
     'sim.hold': 'Hold at each hop (live)',
@@ -1933,6 +1934,7 @@ export const STRINGS = {
     'tt.addWater': '给 {school} 加一台饮水机 {code}',
     'tt.addKiosk': '给 {school} 加一台充值机 {code}',
     'tt.addSchool': '加入学校 {code}',
+    'tt.addSchoolNamed': '加入学校 {name}（{code}）',
 
     'sim.hold.title': '实时一步一步走',
     'sim.hold': '每一跳都停（实时）',
