@@ -55,7 +55,7 @@
 只有第一次，电脑可能会先问你：
 
 - **Mac**，如果文件夹是从网上下载的 ZIP：macOS 会说无法检查这个文件。右键点启动文件 → **打开** → **打开**。
-  macOS 15（Sequoia）以后：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
+  macOS 15（Sequoia）及以后：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
   （用 Git 或 GitHub Desktop 拿到的文件夹不会这样。）
 - **Mac**：如果 macOS 问 Terminal 能不能访问"桌面"（或"文稿""下载"）文件夹里的文件，按 **允许**（或 **好**）：实验室的文件就在那里。
 - **Windows**：如果 SmartScreen 显示"Windows 已保护你的电脑"，按 **更多信息** → **仍要运行**。
@@ -284,9 +284,9 @@ onecard> exit
 |---|---|
 | `node` 不是内部或外部命令 | 装好 Node.js 后关掉 PowerShell 再重新打开（或重启 Windows）。 |
 | `OneCard Lab needs Node.js 22.13 or newer` | 到 nodejs.org 装最新的 LTS。 |
-| `Port 1883 (the MQTT broker) is already in use`（或 8080、2323）／端口被占用 | 有别的程序在用这个端口。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。双击启动和桌面版会自己换一个空的端口。 |
+| `Port 1883 (the MQTT broker) is already in use`（或 8080、2323；Windows 上也可能是 `cannot be used on this computer`）／端口被占用 | 有别的程序在用这个端口（Windows 上也可能是 Hyper-V、WSL 或 Docker 占着它）。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。双击启动和桌面版会自己换一个空的端口。 |
 | `OneCard Lab is already running` | 另一个窗口里已经开着实验室：用那一个就好（双击启动会直接在浏览器里打开它），或先关掉那个窗口。 |
-| Mac："无法打开"、"Apple 无法验证……" | 右键 → **打开** → **打开**。macOS 15 以后：先试一次，再到 **系统设置 → 隐私与安全性** → **仍要打开**。 |
+| Mac："无法打开"、"Apple 无法验证……" | 右键 → **打开** → **打开**。macOS 15 及以后：先试一次，再到 **系统设置 → 隐私与安全性** → **仍要打开**。 |
 | Windows："Windows 已保护你的电脑" | **更多信息** → **仍要运行**。 |
 | 启动文件说文件不全 | 你是在 ZIP 里面打开的。先把文件夹解压（Windows：右键点 ZIP → **全部解压缩**），再在解压后的文件夹里双击启动文件。 |
 | PuTTY 显示 "Connection refused" | 实验室没在跑，或选了 SSH 而不是 **Telnet**，或端口不是 2323。 |

@@ -314,7 +314,7 @@ cloud server off, building a school by drag and drop, and more.
 |---|---|
 | `node` is not recognized | Close and reopen PowerShell after installing Node.js (or restart Windows). |
 | `OneCard Lab needs Node.js 22.13 or newer` | Install the current LTS from nodejs.org. |
-| `Port 1883 (the MQTT broker) is already in use` (or 8080, 2323) | Another program uses that port. Stop it, or pick other ports, e.g. PowerShell: `$env:LAB_HTTP_PORT=8090; npm start` (Mac: `LAB_HTTP_PORT=8090 npm start`). The double-click launchers and the desktop app take a free port by themselves. |
+| `Port 1883 (the MQTT broker) is already in use` (or 8080, 2323; on Windows also `cannot be used on this computer`) | Another program uses that port (on Windows, Hyper-V, WSL or Docker may keep it too). Stop it, or pick other ports, e.g. PowerShell: `$env:LAB_HTTP_PORT=8090; npm start` (Mac: `LAB_HTTP_PORT=8090 npm start`). The double-click launchers and the desktop app take a free port by themselves. |
 | `OneCard Lab is already running` | It is already open in another window: use that one (the double-click launchers open it in the browser for you), or close that window first. |
 | Mac: "cannot be opened", "Apple could not verify…" | Right-click → **Open** → **Open**. macOS 15 and later: try once, then **System Settings → Privacy & Security** → **Open Anyway**. |
 | Windows: "Windows protected your PC" | **More info** → **Run anyway**. |

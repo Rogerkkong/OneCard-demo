@@ -3,7 +3,7 @@
 // short press without moving stays a click (on the element pressed: the pointer is captured only
 // once the drag starts) and a touch can still scroll the page. While dragging the element keeps
 // the pointer (pointer capture), the page scrolls by itself near the top and bottom of the
-// window, and Escape, or the browser taking the gesture over, cancels the drag.
+// window, and Escape, the window losing focus or the browser taking the gesture over cancels it.
 // Also the one overlay every drag draws on: a ghost under the pointer and a rubber-band line.
 
 import { h } from '/shared/api.js';
@@ -83,6 +83,11 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     },
     true,
   );
+  // nor is a click while dragging (Enter or Space on the pressed button would open its dialog mid-drag)
+  function onDragClick(ev) {
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+  }
 
   const point = (ev) => ({ x: ev.clientX, y: ev.clientY, type: ev.pointerType || 'mouse' });
 
@@ -98,6 +103,9 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     cancelAnimationFrame(frame);
     frame = 0;
     document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('click', onDragClick, true);
+    window.removeEventListener('blur', onAway);
+    document.removeEventListener('visibilitychange', onAway);
     document.documentElement.classList.remove('is-dragging');
     session = null;
     unwatch();
@@ -109,12 +117,17 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     window.addEventListener('pointermove', onPendingMove, true);
     window.addEventListener('pointerup', onPendingEnd, true);
     window.addEventListener('pointercancel', onPendingEnd, true);
+    // a context menu or another window takes the press: its button-up never comes here
+    window.addEventListener('contextmenu', unwatch, true);
+    window.addEventListener('blur', unwatch);
   }
   function unwatch() {
     pending = null;
     window.removeEventListener('pointermove', onPendingMove, true);
     window.removeEventListener('pointerup', onPendingEnd, true);
     window.removeEventListener('pointercancel', onPendingEnd, true);
+    window.removeEventListener('contextmenu', unwatch, true);
+    window.removeEventListener('blur', unwatch);
   }
   function onPendingEnd(ev) {
     // a short press without moving: the click that follows does what a click does
@@ -122,6 +135,11 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
   }
   function onPendingMove(ev) {
     if (!pending || ev.pointerId !== pending.id) return;
+    // no button down any more (its button-up went elsewhere): the press is over, no drag
+    if (ev.buttons === 0) {
+      unwatch();
+      return;
+    }
     const p = point(ev);
     const far = Math.hypot(p.x - pending.x, p.y - pending.y) >= (p.type === 'touch' ? MOVE_TOUCH : MOVE_MOUSE);
     if (!far) return;
@@ -140,8 +158,26 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     armed = false;
     document.documentElement.classList.add('is-dragging');
     document.addEventListener('keydown', onKey, true);
+    document.addEventListener('click', onDragClick, true);
+    // the window loses focus (Cmd+Tab, another tab): the drag is called off, not left hanging
+    window.addEventListener('blur', onAway);
+    document.addEventListener('visibilitychange', onAway);
     move(session, p);
     frame = requestAnimationFrame(edgeScroll);
+  }
+
+  function onAway() {
+    if (!session || (document.visibilityState === 'visible' && document.hasFocus())) return;
+    stop();
+  }
+
+  /** Call the running drag off: the gesture was taken away. */
+  function stop() {
+    const s = session;
+    const id = s.pointerId;
+    end();
+    release(id);
+    cancel(s, 'lost');
   }
 
   function onKey(ev) {
@@ -190,6 +226,11 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
 
   el.addEventListener('pointermove', (ev) => {
     if (!session || ev.pointerId !== session.pointerId) return;
+    // the button came up where this page did not see it: nothing is held any more
+    if (ev.buttons === 0) {
+      stop();
+      return;
+    }
     last = point(ev);
     ev.preventDefault();
     move(session, last);
@@ -222,12 +263,7 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
   return {
     /** Stop a running drag from outside (the page is reset, the element goes away). */
     cancel() {
-      if (!session) return;
-      const s = session;
-      const id = s.pointerId;
-      end();
-      release(id);
-      cancel(s, 'lost');
+      if (session) stop();
     },
     get active() {
       return Boolean(session);

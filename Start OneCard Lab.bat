@@ -5,7 +5,8 @@ rem lab console opens in your web browser. Close the window, or press Ctrl+C, to
 rem (docs/DESIGN.md section 13. This file only finds Node.js; scripts\launch.cjs does the rest:
 rem version check, first-time install, start.)
 setlocal
-cd /d "%~dp0"
+rem pushd, not cd: it also works in a network folder (\\server\share), where cd cannot go
+pushd "%~dp0"
 if not exist "scripts\launch.cjs" goto notunzipped
 
 where node >nul 2>nul
@@ -21,7 +22,8 @@ set "PATH=%NVM_SYMLINK%;%PATH%"
 
 :run
 node scripts\launch.cjs %*
-exit /b %errorlevel%
+rem on one line, so the exit code is read before popd runs
+popd & exit /b %errorlevel%
 
 :nonode
 chcp 65001 >nul
@@ -36,7 +38,7 @@ echo   装好后再双击 "Start OneCard Lab"。
 echo.
 start "" "https://nodejs.org/en/download"
 pause
-exit /b 1
+popd & exit /b 1
 
 :notunzipped
 chcp 65001 >nul
@@ -49,4 +51,4 @@ echo   OneCard Lab 的文件不全。如果你是直接打开 ZIP 文件，请�
 echo   再在解压后的文件夹里双击 "Start OneCard Lab"。
 echo.
 pause
-exit /b 1
+popd & exit /b 1

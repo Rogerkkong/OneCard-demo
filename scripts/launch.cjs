@@ -173,6 +173,13 @@ function once(fn) {
 
 /** Signals that mean someone stopped the lab (Ctrl+C, a closed window, kill), not that it broke. */
 const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGKILL'];
+/** Windows' exit code for a program that Ctrl+C ended before it could stop by itself (STATUS_CONTROL_C_EXIT). */
+const WINDOWS_CTRL_C_EXIT = 0xc000013a;
+
+/** Whether the lab ended because someone stopped it, or opened the lab that was already running. */
+function stoppedOnPurpose(code, signal) {
+  return code === 0 || code === WINDOWS_CTRL_C_EXIT || STOP_SIGNALS.indexOf(signal) >= 0;
+}
 
 /** Open a page in the default browser, detached; a missing browser changes nothing. */
 function openInBrowser(url, platform) {
@@ -226,8 +233,8 @@ function startLab(argv) {
     if (err) {
       say(messages.cannotRun('Node.js', err));
       closeAfterEnter(1);
-    } else if (code === 0 || STOP_SIGNALS.indexOf(signal) >= 0) {
-      process.exit(0); // stopped: Ctrl+C, a closed window, or the lab that was already running opened
+    } else if (stoppedOnPurpose(code, signal)) {
+      process.exit(0); // stopped: Ctrl+C (also while it was starting), a closed window, or the lab that was already running opened
     } else {
       say(messages.stopped);
       closeAfterEnter(code || 1);
@@ -287,6 +294,6 @@ function main(argv) {
   });
 }
 
-module.exports = { MIN_NODE, NPM_ARGS, DOWNLOAD_URL, parseVersion, nodeVersionOk, needsInstall, npmInvocation, envWithNodeFirst, labArgs, messages };
+module.exports = { MIN_NODE, NPM_ARGS, DOWNLOAD_URL, parseVersion, nodeVersionOk, needsInstall, npmInvocation, envWithNodeFirst, labArgs, stoppedOnPurpose, messages };
 
 if (require.main === module) main(process.argv.slice(2));

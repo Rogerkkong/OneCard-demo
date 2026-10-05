@@ -27,6 +27,7 @@ export function schoolCodeFrom(name) {
   return String(name ?? '')
     .toLowerCase()
     .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // 'é' -> 'e', not 'e-'
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 32)
@@ -217,7 +218,7 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
           return;
         }
         if (s.item.kind === 'school') openAddSchool({ opener: s.button });
-        else openAddMachine({ type: s.item.type, school: zone.code, opener: s.button });
+        else openAddMachine({ type: s.item.type, school: zone.code, opener: s.button, touch: s.type === 'touch' });
       },
       cancel(s, why) {
         clearZones(s);
@@ -275,6 +276,9 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
     if (control) {
       control.setAttribute('aria-invalid', 'true');
       control.focus();
+    } else if (!r.dialog.contains(document.activeElement)) {
+      // the busy Add button lost focus while it was disabled: back on it, to try again
+      r.submit.focus();
     }
   }
 
@@ -384,9 +388,9 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
 
   /**
    * Open the Add machine dialog. type: from the device bar; school: where it was dropped (else the
-   * person chooses, starting from the school they chose last time).
+   * person chooses, starting from the school they chose last time); touch: dropped by a finger.
    */
-  function openAddMachine({ type = null, school = null, opener = null } = {}) {
+  function openAddMachine({ type = null, school = null, opener = null, touch = false } = {}) {
     if (am.dialog.open) return;
     am.opener = opener ?? document.activeElement;
     amCodeTouched = false;
@@ -403,8 +407,10 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
     clearError(am);
     amChanged();
     am.dialog.showModal();
-    // dropped on a school: the code is ready, Enter adds it; else choose the school first
-    if (school) {
+    // dropped on a school: the code is ready, Enter adds it (on a phone the Add button: focusing
+    // the code would bring up the keyboard over a dialog that is ready); else choose the school first
+    if (school && touch) am.submit.focus();
+    else if (school) {
       amCode.control.focus();
       amCode.control.select();
     } else if (type) amSchool.control.focus();

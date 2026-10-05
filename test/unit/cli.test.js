@@ -20,6 +20,7 @@ import {
   openInBrowser,
   parseArgs,
   portBusyPlan,
+  portTaken,
   run,
   selfTest,
   startCommand,
@@ -258,6 +259,31 @@ describe('ports in use: the decision', () => {
     assert.doesNotMatch(mac, /npm start|PowerShell/);
     const win = portBusyPlan({ which: 'http', port: 8080, open: false, labAnswering: false, command: '.\\onecard-lab-win-x64.exe' }).message;
     assert.match(win, /\(PowerShell\) \$env:LAB_HTTP_PORT=8081; \.\\onecard-lab-win-x64\.exe$/);
+  });
+
+  test('Windows refusing a port above 1024 (EACCES: kept for Hyper-V, WSL or Docker) is a taken port, not a rights problem', async () => {
+    assert.equal(portTaken({ code: 'EADDRINUSE', port: 1883 }), true);
+    assert.equal(portTaken({ code: 'EACCES', port: 1883 }), true);
+    assert.equal(portTaken({ code: 'EACCES', port: 80 }), false); // below 1024: administrator rights (next test)
+    assert.equal(portTaken({ code: 'EADDRNOTAVAIL', port: 8080 }), false);
+    const plan = portBusyPlan({ which: 'mqtt', port: 1883, open: false, labAnswering: false, refused: true });
+    assert.match(plan.message, /^Port 1883 \(the MQTT broker\) cannot be used on this computer: another program holds it, or Windows keeps it \(Hyper-V, WSL and Docker reserve some ports\)\.\n/);
+    assert.match(plan.message, /LAB_MQTT_PORT=1884 npm start/);
+    // a lab whose MQTT port Windows refuses: a plain message, or with --open a free port and a note
+    const refusing = (options) => ({
+      start: async () => {
+        if (options.mqttPort === 1883) {
+          throw Object.assign(new Error('listen EACCES: permission denied 127.0.0.1:1883'), { code: 'EACCES', syscall: 'listen', address: '127.0.0.1', port: 1883 });
+        }
+        return { httpUrl: 'http://127.0.0.1:8080', mqttUrl: 'mqtt://127.0.0.1:50123' };
+      },
+      stop: async () => {},
+    });
+    const options = { httpPort: 8080, mqttPort: 1883, consolePort: 0, host: '127.0.0.1' };
+    const probe = async () => false;
+    await assert.rejects(startWithFallbacks({ createLab: refusing, options, probe }), (err) => err instanceof CliError && /^Port 1883 \(the MQTT broker\) cannot be used/.test(err.message));
+    const { notes } = await startWithFallbacks({ createLab: refusing, options, open: true, probe });
+    assert.deepEqual(notes, ['port 1883 could not be used (another program holds it, or Windows keeps it),\n      so the MQTT broker uses port 50123 this time.']);
   });
 
   test('other listen failures in plain words', async () => {

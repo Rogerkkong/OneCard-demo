@@ -306,6 +306,35 @@ describe('the launchers (scripts/launch.cjs)', () => {
     assert.deepEqual(args, ['--disable-warning=ExperimentalWarning', join('/x', 'src', 'main.js'), '--open', '--lan']);
   });
 
+  test('a stop is not a problem: Ctrl+C (on Windows also while the lab starts), a closed window, kill', () => {
+    for (const [code, signal] of [[0, null], [null, 'SIGINT'], [null, 'SIGTERM'], [null, 'SIGHUP'], [null, 'SIGKILL'], [0xc000013a, null]]) {
+      assert.equal(launch.stoppedOnPurpose(code, signal), true, `${code} ${signal}`);
+    }
+    for (const code of [1, 2, 0xc0000005]) assert.equal(launch.stoppedOnPurpose(code, null), false, String(code));
+  });
+
+  test('the macOS/Linux launcher takes a Node.js that is new enough, also when an older one comes first on PATH', { skip: process.platform === 'win32' && 'a shell script' }, () => {
+    const dir = tempDir('launcher');
+    try {
+      // stand-ins for node: the launcher's version check is `node -e …`, exit code 0 = new enough
+      const fakeNode = (folder, label, newEnough) => {
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(join(folder, 'node'), `#!/bin/sh\n[ "$1" = -e ] && exit ${newEnough ? 0 : 1}\necho "${label}: $*"\n`, { mode: 0o755 });
+      };
+      fakeNode(join(dir, 'old'), 'old node on PATH', false);
+      fakeNode(join(dir, 'new'), 'new node on PATH', true);
+      fakeNode(join(dir, 'home', '.volta', 'bin'), 'Volta node', true);
+      const start = (path) =>
+        spawnSync('/bin/bash', [join(ROOT, 'start-onecard-lab.sh'), '--lan'], { encoding: 'utf8', env: { HOME: join(dir, 'home'), PATH: path }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const behindOld = start(`${join(dir, 'old')}:/usr/bin:/bin`);
+      assert.equal(behindOld.stdout, 'Volta node: scripts/launch.cjs --lan\n', behindOld.stderr);
+      const onPath = start(`${join(dir, 'new')}:/usr/bin:/bin`);
+      assert.equal(onPath.stdout, 'new node on PATH: scripts/launch.cjs --lan\n', onPath.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('the messages are in English and 中文', () => {
     const tooOld = launch.messages.tooOld('18.19.0', 'darwin');
     assert.match(tooOld, /needs Node\.js 22\.13 or newer, and this computer has Node\.js 18\.19\.0/);

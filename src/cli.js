@@ -205,19 +205,31 @@ export function whichPort(failure, options) {
 /** A port to suggest instead of a busy one. */
 const nextPort = (port) => (port >= 65535 ? 1024 : port + 1);
 
+/** Why Windows refuses a port above 1024 (EACCES): it is not a matter of administrator rights. */
+const REFUSED = 'another program holds it, or Windows keeps it (Hyper-V, WSL and Docker reserve some ports)';
+
 /**
- * What to do when a port the lab needs is in use (EADDRINUSE).
+ * Whether a listen failure means "this port is taken": EADDRINUSE, or on Windows EACCES for a
+ * port above 1024, which Hyper-V, WSL or Docker reserve, or another program holds exclusively.
+ */
+export function portTaken(failure) {
+  return failure?.code === 'EADDRINUSE' || (failure?.code === 'EACCES' && Number.isInteger(failure.port) && failure.port >= 1024);
+}
+
+/**
+ * What to do when a port the lab needs is in use (EADDRINUSE, or refused: see portTaken()).
  * @param {object} situation
  * @param {'http'|'mqtt'|'mqttTls'|'console'|null} situation.which  the busy listener
  * @param {number} [situation.port]  the busy port
  * @param {boolean} situation.open  started with --open (double-click): nobody can type a setting
  * @param {boolean} situation.labAnswering  a OneCard Lab answers on the lab's web port
  * @param {string} [situation.command]  how the lab is started (startCommand()), for the example
+ * @param {boolean} [situation.refused]  EACCES rather than EADDRINUSE, for the wording
  * @returns {{ action: 'already-running' } | { action: 'fallback', which: string } | { action: 'stop', message: string }}
  *   already-running: that lab is the one to use; fallback: take a free port and say so in the
  *   banner; stop: the message says what to change
  */
-export function portBusyPlan({ which, port, open, labAnswering, command = 'npm start' }) {
+export function portBusyPlan({ which, port, open, labAnswering, command = 'npm start', refused = false }) {
   if (labAnswering) return { action: 'already-running' };
   if (!which) {
     return { action: 'stop', message: `A port the lab needs${port ? ` (${port})` : ''} is already in use by another program. Stop that program, or choose other ports (see --help).` };
@@ -228,7 +240,9 @@ export function portBusyPlan({ which, port, open, labAnswering, command = 'npm s
   return {
     action: 'stop',
     message:
-      `Port ${port} (${what}) is already in use${usual ? `, ${usual}` : ' by another program'}.\n` +
+      (refused
+        ? `Port ${port} (${what}) cannot be used on this computer: ${REFUSED}.\n`
+        : `Port ${port} (${what}) is already in use${usual ? `, ${usual}` : ' by another program'}.\n`) +
       `Stop that program, or start the lab with another port, for example:\n` +
       withSetting(env, instead, command) +
       (which === 'console' ? `\n${env}=0 starts the lab without the machine consoles.` : ''),
@@ -271,9 +285,10 @@ function startedPorts(started) {
 /** Banner notes for the listeners that moved to another port. */
 function fallbackNotes(moved, started) {
   const now = startedPorts(started);
-  return moved.map(({ which, from }) => {
+  return moved.map(({ which, from, refused }) => {
     const { uses, usual } = PORTS[which];
-    return `port ${from} was already in use${usual ? ` (${usual})` : ''},\n      so ${uses} port ${now[which]} this time.`;
+    const why = refused ? 'could not be used (another program holds it, or Windows keeps it)' : `was already in use${usual ? ` (${usual})` : ''}`;
+    return `port ${from} ${why},\n      so ${uses} port ${now[which]} this time.`;
   });
 }
 
@@ -357,14 +372,15 @@ export async function startWithFallbacks({ createLab, options, open = false, pro
       const failure = listenErrorOf(err);
       if (!failure) throw err;
       const which = whichPort(failure, current);
-      if (failure.code !== 'EADDRINUSE') throw listenProblem(failure, which);
+      if (!portTaken(failure)) throw listenProblem(failure, which);
+      const refused = failure.code === 'EACCES';
       // Whatever is busy: if a OneCard Lab answers on our web port, that is the lab to use.
       const base = current.httpPort ? `http://${reachableHost(current.host)}:${current.httpPort}` : null;
       const labAnswering = base ? await probe(base) : false;
-      const plan = portBusyPlan({ which, port: failure.port, open, labAnswering, command });
+      const plan = portBusyPlan({ which, port: failure.port, open, labAnswering, command, refused });
       if (plan.action === 'already-running') return { alreadyRunning: `${base}/lab/` };
       if (plan.action === 'stop') throw new CliError(plan.message);
-      if (!moved.some((m) => m.which === which)) moved.push({ which, from: failure.port });
+      if (!moved.some((m) => m.which === which)) moved.push({ which, from: failure.port, refused });
       current = await withFreePort(current, which, findFreePort);
     }
   }
