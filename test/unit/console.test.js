@@ -558,6 +558,61 @@ test('Simulation mode with the server off: a message held at the platform waits 
   });
 });
 
+test('onecard>: add machine and add school build the lab, as the lab console\'s palette does (DESIGN §12)', NET, async () => {
+  const top = session();
+  const help = await top.out('help');
+  for (const cmd of ['add machine <school> <type> [CODE]', 'add school <code> <name...>']) assert.ok(help.includes(cmd), cmd);
+  assert.equal(await top.out('add'), '% Incomplete command. Usage: add machine <school> <type> [CODE] | add school <code> <name...>');
+  assert.equal(await top.out('add printer'), '% Invalid input. Usage: add machine <school> <type> [CODE] | add school <code> <name...>');
+  assert.equal(await top.out('add machine smk-contoh'), '% Incomplete command. Usage: add machine <school> canteen|water|kiosk [CODE]');
+  assert.match(await top.out('add machine smk-contoh toaster'), /^% Invalid input\. Usage: add machine/);
+  assert.match(await top.out('add machine smk-contoh canteen CANTEEN-09 now'), /^% Invalid input\. Usage: add machine/);
+  assert.equal(await top.out('add machine smk-nowhere canteen'), '% There is no school smk-nowhere.');
+  assert.equal(await top.out('add machine smk-contoh canteen CANTEEN-01'), '% Device code CANTEEN-01 is already used in smk-contoh.');
+  assert.match(await top.out('add machine smk-contoh canteen bad code!'), /^% Invalid input\. Usage: add machine/);
+  assert.equal(await top.out('add machine smk-contoh canteen bad!'), '% Code must be upper-case letters, digits and dashes, e.g. CANTEEN-03.');
+
+  assert.deepEqual(lines(await top.out('add machine smk-contoh canteen')), [
+    'Added canteen reader smk-contoh/CANTEEN-03.',
+    'It is registered on the platform and installed with its cable out.',
+    'Plug it in: connect smk-contoh/CANTEEN-03, then cable plug.',
+  ]);
+  assert.equal(lines(await top.out('add machine SJKC-CONTOH Water water-07'))[0], 'Added water machine sjkc-contoh/WATER-07.');
+  const reader = session('smk-contoh/CANTEEN-03');
+  assert.match(await reader.out('show status'), /Cable\s+unplugged \(no network\)/);
+  assert.match(await reader.out('cable plug'), /^Cable plugged in: connected to the broker, heartbeat sent/);
+
+  assert.equal(await top.out('add school smk-baru'), '% Incomplete command. Usage: add school <code> <name...>, e.g. add school smk-baru SMK Baru');
+  assert.equal(await top.out('add school SMK!! Baru'), '% School code must be lower-case letters, digits and dashes (e.g. smk-contoh).');
+  assert.deepEqual(lines(await top.out('add school smk-baru SMK Baru (fictional)')), [
+    'Added the school SMK Baru (fictional) (smk-baru).',
+    'Its machines, cables out: CANTEEN-01, WATER-01, KIOSK-01.',
+    "In the tray: 5 student cards and the school's admin card.",
+    'Plug a machine in: connect smk-baru/<DEVICE>, then cable plug.',
+  ]);
+  assert.equal(await top.out('add school smk-baru Another One'), '% School code smk-baru is already used.');
+  const rows = lines(await top.out('machines')).map(cells).filter((r) => r[0] === 'smk-baru');
+  assert.deepEqual(rows.map((r) => [r[1], r[3], r[4]]), [['CANTEEN-01', 'out', 'down'], ['KIOSK-01', 'out', 'down'], ['WATER-01', 'out', 'down']]);
+  // building is done from the top
+  assert.equal(await session('server').out('add school smk-lain Lain'), UNKNOWN_COMMAND);
+  assert.equal(await reader.out('add machine smk-contoh kiosk'), UNKNOWN_COMMAND);
+
+  // what show trace makes of an add and a plug: the registration, the login, the first heartbeat
+  const listed = lines(await top.out('show traces'));
+  const plugRow = listed.map(cells).find((r) => r[2] === 'Plug in the cable of smk-contoh/CANTEEN-03');
+  const steps = lines(await top.out(`show trace ${plugRow[0]}`)).slice(3).map((r) => cells(r)[3]);
+  assert.ok(steps.includes('CANTEEN-03 cable plugged in'), steps.join('\n'));
+  assert.ok(steps.includes('smk-contoh.CANTEEN-03 logs in to the broker'), steps.join('\n'));
+  assert.ok(steps.some((x) => /^CANTEEN-03 sends device\.heartbeat \(seq 1\)$/.test(x)), steps.join('\n'));
+  const addRow = listed.map(cells).find((r) => r[2] === 'Add a canteen reader CANTEEN-03 to smk-contoh');
+  const added = lines(await top.out(`show trace ${addRow[0]}`)).slice(3).map((r) => cells(r)[3]);
+  assert.ok(added.includes('CANTEEN-03 (canteen reader) registered on the platform'), added.join('\n'));
+  await waitFor(() => [...lab.terminals.values()].filter((m) => m.cablePlugged).every((m) => m.connected), {
+    timeout: 15_000,
+    message: 'every plugged machine on the broker',
+  });
+});
+
 test('every line the console printed fits in 100 characters, with money as RM 0.00 and times as DD/MM/YYYY HH:MM', NET, () => {
   assert.ok(outputs.length > 80);
   for (const text of outputs) {

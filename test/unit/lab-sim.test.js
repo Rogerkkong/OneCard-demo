@@ -1,6 +1,7 @@
 import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLab } from '../../src/lab/lab.js';
+import mqtt from 'mqtt';
+import { BROKER_STATUS_CODES, createLab } from '../../src/lab/lab.js';
 import { waitFor } from '../helpers.js';
 
 // Live stepping in the lab (docs/DESIGN.md §11.4), at its awkward moments: Next pressed while
@@ -9,9 +10,11 @@ import { waitFor } from '../helpers.js';
 // at once, a held admin-card load with a visit queued behind it, a kiosk's confirm held while
 // the server goes off, a held clock move, and a reset or stop with flows held at every hop (or
 // held while it waits for the lab). After each one every record is home exactly once, every
-// school's books balance and every card equals its mirror, and nothing is left held. A real
-// lab: the demo seed (fictional schools, people and cards), broker and web server on random
-// ports, the lab clock standing still.
+// school's books balance and every card equals its mirror, and nothing is left held. Then the
+// follow-ups of §11.7: the broker's logins and logouts in the flow that caused them, the
+// broker.status codes, and the subject every kind of flow names. A real lab: the demo seed
+// (fictional schools, people and cards), broker and web server on random ports, the lab clock
+// standing still.
 
 const NET = { timeout: 60_000 };
 const SMK = 'smk-contoh';
@@ -600,5 +603,188 @@ test("the platform's inbox gate is there only while hold is on: in realtime a me
   const sale = await tap('CANTEEN-01', LEE, { items: items('ROTI-CANAI') });
   await waitFor(() => verdicts(mark, sale.record.txn).length === 1, { message: 'the sale in the books' });
   assert.deepEqual(eventsSince(mark, 'sim.held'), []);
+  await booksBalance();
+});
+
+// ---- broker logins join their flow; every flow names its subject (DESIGN §11.7) -----------------
+
+/** The lab's web server with one cookie jar: (method, path, json?, headers?) -> { status, body }. */
+function webSession() {
+  let cookie = '';
+  return async (method, path, json, extra = {}) => {
+    const headers = { accept: 'application/json', ...extra };
+    if (cookie) headers.cookie = cookie;
+    if (json !== undefined) headers['content-type'] = 'application/json';
+    const res = await fetch(lab.urls.httpUrl + path, { method, headers, body: json === undefined ? undefined : JSON.stringify(json) });
+    const set = res.headers.getSetCookie().map((c) => c.split(';')[0]).filter((pair) => !pair.endsWith('='));
+    if (set.length > 0) cookie = set.join('; ');
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+}
+
+const loginOf = (key) => key.replace('/', '.'); // 'smk-contoh/CANTEEN-01' -> its broker username
+const connectedKeys = () => [...lab.terminals.values()].filter((m) => m.connected).map((m) => `${m.schoolCode}/${m.deviceCode}`).sort();
+/** Usernames of the broker's logins (mqtt.connect) or logouts (mqtt.disconnect) in a trace, sorted. */
+const loginsIn = (trace, type) => inTrace(trace, type).map((e) => e.data.username).sort();
+
+test('broker logins join their flow: a pull, a plug and its first heartbeat, the server off and on, a broker restart', NET, async () => {
+  await lab.reset();
+  const where = { schoolCode: SMK, deviceCode: 'CANTEEN-01' };
+  const reader = `${SMK}.CANTEEN-01`;
+
+  const pull = await lab.setCable({ ...where, plugged: false });
+  await waitFor(() => loginsIn(pull.trace, 'mqtt.disconnect').includes(reader), { message: "the pull's logout" });
+  assert.deepEqual(loginsIn(pull.trace, 'mqtt.disconnect'), [reader]);
+
+  const plug = await lab.setCable({ ...where, plugged: true });
+  await waitFor(() => inTrace(plug.trace, 'intake.accepted', (e) => e.data.type === 'device.heartbeat').length === 1, { message: "the plug's heartbeat" });
+  assert.deepEqual(loginsIn(plug.trace, 'mqtt.connect'), [reader]);
+  const kinds = inTrace(plug.trace, 'mqtt.connect').concat(inTrace(plug.trace, 'device.send')).sort((a, b) => a.seq - b.seq);
+  assert.deepEqual(kinds.map((e) => e.data.type ?? e.type), ['mqtt.connect', 'device.heartbeat'], 'logged in, then its first heartbeat');
+
+  // the server off: every machine on the broker and the platform leave in its flow
+  const online = connectedKeys();
+  assert.ok(online.length >= 5, online.join(' '));
+  const off = await lab.setServer({ up: false });
+  assert.deepEqual(loginsIn(off.trace, 'mqtt.disconnect'), [...online.map(loginOf), 'platform'].sort());
+  // on again: the platform and every machine with a cable log in in its flow
+  const on = await lab.setServer({ up: true });
+  const plugged = [...lab.terminals.values()].filter((m) => m.cablePlugged).map((m) => `${m.schoolCode}.${m.deviceCode}`);
+  await waitFor(() => loginsIn(on.trace, 'mqtt.connect').length === plugged.length + 1, { timeout: 15_000, message: 'every login in the server-on flow' });
+  assert.deepEqual(loginsIn(on.trace, 'mqtt.connect'), [...plugged, 'platform'].sort());
+
+  // a broker restart: out and back in, all in its flow
+  await waitFor(() => connectedKeys().length === plugged.length, { timeout: 15_000, message: 'every plugged machine back' });
+  const restart = await lab.restartBroker();
+  assert.deepEqual(loginsIn(restart.trace, 'mqtt.disconnect'), [...plugged, 'platform'].sort());
+  await waitFor(() => loginsIn(restart.trace, 'mqtt.connect').length === plugged.length + 1, { timeout: 15_000, message: 'every login in the restart flow' });
+  assert.deepEqual(loginsIn(restart.trace, 'mqtt.connect'), [...plugged, 'platform'].sort());
+
+  // the read-only viewer is nobody's flow
+  const mark = lab.ctx.events.lastSeq();
+  const viewer = await mqtt.connectAsync(lab.broker.url, { ...lab.ctx.settings.viewer, clientId: 'viewer-lab-sim', reconnectPeriod: 0 });
+  await viewer.endAsync();
+  await waitFor(() => eventsSince(mark, 'mqtt.disconnect', (e) => e.data.username === 'viewer').length === 1, { message: "the viewer's logout" });
+  assert.ok(lab.ctx.events.since(mark).filter((e) => e.data?.username === 'viewer').every((e) => e.trace === undefined));
+  await booksBalance();
+});
+
+test('broker.status: every one the lab emits says why with a stable code next to the English reason', NET, async () => {
+  const mark = lab.ctx.events.lastSeq();
+  await lab.reset();
+  await lab.setServer({ up: false });
+  await lab.setServer({ up: true });
+  await lab.restartBroker();
+  const statuses = eventsSince(mark, 'broker.status').map((e) => [e.data.up, e.data.code, e.data.reason]);
+  assert.deepEqual(statuses, [
+    [false, 'LAB_RESET', 'reset'],
+    [true, 'LAB_RESET', 'reset'],
+    [false, 'SERVER_OFF', 'server switched off'],
+    [true, 'SERVER_ON', 'server switched on'],
+    [false, 'RESTARTING', 'restart'],
+    [true, 'RESTARTED', 'restarted'],
+  ]);
+  for (const [, code, reason] of statuses) assert.equal(BROKER_STATUS_CODES[code], reason);
+  await booksBalance();
+});
+
+test("the cross-device-publish fault: the copied login, the machine knocked off, the refusal and the copied login leaving are the fault's", NET, async () => {
+  await lab.reset();
+  const reader = `${SMK}.CANTEEN-01`;
+  const cross = await lab.fault({ type: 'cross-device-publish', schoolCode: SMK, deviceCode: 'CANTEEN-01' });
+  assert.equal(cross.ok, true, cross.summary);
+  const steps = lab.tracer.get(cross.trace).events
+    .filter((e) => ['mqtt.connect', 'mqtt.disconnect', 'mqtt.denied', 'device.send'].includes(e.type))
+    .map((e) => [e.type, e.data.username ?? e.data.device, e.data.copiedLogin ?? null]);
+  assert.deepEqual(steps, [
+    ['mqtt.disconnect', reader, null], // the real reader knocked off by the copied login...
+    ['mqtt.connect', reader, null], // ...which the broker reports logged in
+    ['device.send', 'CANTEEN-01', true],
+    ['mqtt.denied', reader, null],
+    ['mqtt.disconnect', reader, null], // the copied login cut off
+    ['mqtt.connect', reader, null], // the real reader back
+  ]);
+  assert.equal(machine('CANTEEN-01').connected, true);
+  await booksBalance();
+});
+
+test('every kind of flow names its subject, in sim.trace and in the trace lists', NET, async () => {
+  await lab.reset();
+  const subjectOf = (answer) => {
+    assert.match(answer?.trace ?? '', /^tr_/, JSON.stringify(answer));
+    const kept = lab.tracer.get(answer.trace);
+    assert.deepEqual(kept.events[0].data.subject, kept.trace.subject, 'sim.trace and the summary agree');
+    return [kept.trace.kind, kept.trace.subject];
+  };
+  const smk = (device, more = {}) => ({ school: SMK, device, ...more });
+  const check = async (what, answer, kind, subject) => assert.deepEqual(subjectOf(await answer), [kind, subject], what);
+
+  await check('canteen tap', tap('CANTEEN-01', LEE, { items: [{ code: 'ROTI-CANAI', qty: 1 }, { code: 'TEH-TARIK', qty: 2 }] }), 'tap',
+    { uid: LEE, cardSchool: SMK, ...smk('CANTEEN-01'), items: 'ROTI-CANAI TEH-TARIK*2' });
+  await check('water tap', tap('WATER-01', ARJUN, { ml: 250 }), 'tap', { uid: ARJUN, cardSchool: SMK, ...smk('WATER-01'), ml: 250 });
+  await check('kiosk tap', tap('KIOSK-01', AHMAD), 'tap', { uid: AHMAD, cardSchool: SMK, ...smk('KIOSK-01') });
+  await check('kiosk fault', lab.fault({ type: 'power-cut-before-commit', schoolCode: SMK, deviceCode: 'KIOSK-01', uid: LEE }), 'fault',
+    { uid: LEE, cardSchool: SMK, ...smk('KIOSK-01'), fault: 'power-cut-before-commit' });
+  await check('cable', lab.setCable({ schoolCode: SMK, deviceCode: 'CANTEEN-02', plugged: true }), 'cable', smk('CANTEEN-02', { plugged: true }));
+  await check('admin card load', lab.adminCardLoad({ schoolCode: SMK }), 'admin-card', smk('KIOSK-01', { op: 'load' }));
+  await check('admin card tap', lab.adminCardTap({ schoolCode: SMK, deviceCode: 'CANTEEN-01' }), 'admin-card', smk('CANTEEN-01', { op: 'tap' }));
+  await check('admin card upload', lab.adminCardUpload({ schoolCode: SMK }), 'admin-card', smk('KIOSK-01', { op: 'upload' }));
+  lab.exportUsb({ schoolCode: SMK, deviceCode: 'CANTEEN-01' }); // answers the file itself, without its trace
+  assert.deepEqual(subjectOf(lab.tracer.list()[0].kind === 'usb' ? { trace: lab.tracer.list()[0].id } : null), ['usb', smk('CANTEEN-01')]);
+  await check('heartbeat', lab.heartbeat({ schoolCode: SMK, deviceCode: 'KIOSK-01' }), 'heartbeat', smk('KIOSK-01'));
+  await check('upload', lab.upload({ schoolCode: SMK, deviceCode: 'CANTEEN-01' }), 'upload', smk('CANTEEN-01'));
+  await check('reboot', lab.reboot({ schoolCode: SJKC, deviceCode: 'KIOSK-01' }), 'reboot', { school: SJKC, device: 'KIOSK-01' });
+  await check('clock', lab.advanceClock(60_000), 'clock', { ms: 60_000 });
+  await check('jobs', lab.runJobs(), 'jobs', {});
+  await check('server off', lab.setServer({ up: false }), 'server', { up: false });
+  await check('server on', lab.setServer({ up: true }), 'server', { up: true });
+  await check('broker', lab.restartBroker(), 'broker', {});
+  await waitFor(() => machine('CANTEEN-01').connected && machine('KIOSK-01').connected, { timeout: 15_000, message: 'the machines back' });
+
+  // faults: the fault and what it works on
+  await check('clone', lab.fault({ type: 'clone-card', schoolCode: SMK, uid: ARJUN }), 'fault', { fault: 'clone-card', school: SMK, uid: ARJUN });
+  await check('tamper', lab.fault({ type: 'tamper-card', schoolCode: SMK, uid: `${ARJUN}-copy` }), 'fault',
+    { fault: 'tamper-card', school: SMK, uid: `${ARJUN}-copy` });
+  await check('duplicate', lab.fault({ type: 'duplicate-upload', schoolCode: SMK, deviceCode: 'CANTEEN-01' }), 'fault', { fault: 'duplicate-upload', ...smk('CANTEEN-01') });
+  await check('rollback', lab.fault({ type: 'sequence-rollback', schoolCode: SMK, deviceCode: 'CANTEEN-01' }), 'fault', { fault: 'sequence-rollback', ...smk('CANTEEN-01') });
+  await check('forged', lab.fault({ type: 'forged-message', schoolCode: SMK, deviceCode: 'CANTEEN-01' }), 'fault', { fault: 'forged-message', ...smk('CANTEEN-01') });
+  await check('cross device', lab.fault({ type: 'cross-device-publish', schoolCode: SMK, deviceCode: 'CANTEEN-01', toSchoolCode: SJKC, toDeviceCode: 'WATER-01' }),
+    'fault', { fault: 'cross-device-publish', ...smk('CANTEEN-01'), toSchool: SJKC, toDevice: 'WATER-01' });
+  await check('cross school', lab.fault({ type: 'cross-school-card', schoolCode: SMK, uid: LEE, toSchoolCode: SJKC }), 'fault',
+    { fault: 'cross-school-card', school: SJKC, device: 'CANTEEN-01', uid: LEE, cardSchool: SMK, items: 'NASI-LEMAK' });
+  await check('server fault', lab.fault({ type: 'server-down' }), 'fault', { fault: 'server-down' });
+  await check('server fault', lab.fault({ type: 'server-up' }), 'fault', { fault: 'server-up' });
+  await check('broker fault', lab.fault({ type: 'broker-restart' }), 'fault', { fault: 'broker-restart' });
+
+  // building (DESIGN §12)
+  await check('add device', lab.addDevice({ schoolCode: SMK, type: 'WATER' }), 'add-device', { school: SMK, type: 'WATER', code: 'WATER-02' });
+  await check('add school', lab.addSchool({ code: 'smk-teladan', name: 'SMK Teladan (fictional)', students: 1 }), 'add-school', { code: 'smk-teladan' });
+
+  // a person's request in the web apps: the area, the method, the path without its query, the school when known
+  const call = webSession();
+  const requestSubject = () => lab.tracer.list()[0].subject;
+  const finance = (await call('GET', '/api/admin/staff-options')).body.find((s) => s.schoolCode === SMK && s.role === 'FINANCE');
+  assert.equal((await call('POST', '/api/admin/login?from=lab-sim', { staffId: finance.id })).status, 200);
+  assert.deepEqual(requestSubject(), { area: 'admin', method: 'POST', path: '/api/admin/login' }, 'no school before signing in');
+  const lee = (await call('GET', '/api/admin/members')).body.find((m) => m.memberNo === 'S1002');
+  assert.equal((await call('POST', '/api/admin/subsidies', { memberId: lee.id, amountSen: 500, note: 'trip' })).status, 201);
+  assert.deepEqual(requestSubject(), { area: 'admin', method: 'POST', path: '/api/admin/subsidies', school: SMK });
+  assert.equal((await call('POST', '/api/operator/login')).status, 200);
+  assert.deepEqual(requestSubject(), { area: 'operator', method: 'POST', path: '/api/operator/login' });
+  const parent = (await call('GET', '/api/parent/options')).body.find((p) => p.name === 'Lee Kah Seng');
+  assert.equal((await call('POST', '/api/parent/login', { parentId: parent.id })).status, 200);
+  assert.deepEqual(requestSubject(), { area: 'parent', method: 'POST', path: '/api/parent/login' });
+  const child = (await call('GET', '/api/parent/children')).body.children.find((c) => c.schoolCode === SMK);
+  const topup = await call('POST', `/api/parent/children/${child.schoolId}/${child.memberId}/topups`, { amountSen: 1000 }, { 'idempotency-key': 'lab-sim-subject' });
+  assert.equal(topup.status, 201, JSON.stringify(topup.body));
+  assert.equal((await call('POST', `/api/pay/${topup.body.order.id}/complete`, { result: 'SUCCESS' })).status, 200);
+  assert.deepEqual(requestSubject(), { area: 'pay', method: 'POST', path: `/api/pay/${topup.body.order.id}/complete` });
+
+  // the lab API lists them with their subjects: every trace has one
+  const sim = await call('GET', '/api/lab/sim?limit=200');
+  assert.ok(sim.body.traces.length >= 30);
+  for (const t of sim.body.traces) assert.ok(t.subject && typeof t.subject === 'object' && !Array.isArray(t.subject), JSON.stringify(t));
+  const one = await call('GET', `/api/lab/sim/traces/${sim.body.traces.at(-1).id}`);
+  assert.deepEqual(one.body.trace.subject, one.body.events[0].data.subject);
   await booksBalance();
 });

@@ -157,7 +157,15 @@ test('16.1 a canteen tap is one trace, from the card to the books, and the lab A
   assert.ok(order.indexOf('device.acked') < order.indexOf('lab.action'), 'the tap answers once the broker has the record');
 
   const one = (type) => events.find((e) => e.type === type);
-  assert.deepEqual(one('sim.trace').data, { id: sale.trace, n: 1, kind: 'tap', title: `Tap ${AHMAD} on ${SMK}/CANTEEN-01`, device: 'CANTEEN-01' });
+  assert.deepEqual(one('sim.trace').data, {
+    id: sale.trace,
+    n: 1,
+    kind: 'tap',
+    title: `Tap ${AHMAD} on ${SMK}/CANTEEN-01`,
+    device: 'CANTEEN-01',
+    // what the flow is about, so the page never reads it out of the title (§11.7)
+    subject: { uid: AHMAD, cardSchool: SMK, school: SMK, device: 'CANTEEN-01', items: 'NASI-LEMAK TEH-TARIK' },
+  });
   const send = one('device.send');
   assert.deepEqual([send.data.type, send.data.txn, send.data.topic], ['sale.recorded', 'CANTEEN-01-000001', `lab/v1/${SMK}/CANTEEN-01/records`]);
   for (const type of ['mqtt.publish', 'intake.accepted', 'device.acked']) assert.equal(one(type).data.msgId, send.data.msgId, type);
@@ -171,7 +179,8 @@ test('16.1 a canteen tap is one trace, from the card to the books, and the lab A
   const sim = ok(await b.get('/api/lab/sim'));
   assert.deepEqual([sim.mode, sim.hold, sim.held], ['realtime', false, []]);
   assert.equal(sim.traces[0].id, sale.trace);
-  assert.deepEqual(Object.keys(sim.traces[0]).sort(), ['at', 'device', 'events', 'id', 'kind', 'lastAt', 'n', 'school', 'title']);
+  assert.deepEqual(Object.keys(sim.traces[0]).sort(), ['at', 'device', 'events', 'id', 'kind', 'lastAt', 'n', 'school', 'subject', 'title']);
+  assert.deepEqual(sim.traces[0].subject, one('sim.trace').data.subject);
   assert.equal(ok(await b.get('/api/lab/sim?limit=1')).traces.length, 1);
   assert.equal(ok(await b.get('/api/lab/sim?limit=0'), 400).error.code, 'INPUT_INVALID');
   assert.equal(ok(await b.get('/api/lab/sim/traces/tr_unknown0000'), 404).error.code, 'TRACE_NOT_FOUND');
