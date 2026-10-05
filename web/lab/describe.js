@@ -420,6 +420,14 @@ export function kioskResult(fault, r, t, lang) {
 
 // ---- Simulation mode: what waits at a hop --------------------------------------------------------
 
+/** Sentences one after the other: a space after English ones, none after a Chinese full stop. */
+export function sentences(...parts) {
+  return parts
+    .filter((p) => p !== null && p !== undefined && p !== '')
+    .map(String)
+    .reduce((out, p) => (out === '' ? p : /[。！？：）]$/.test(out) ? `${out}${p}` : `${out} ${p}`), '');
+}
+
 /** Messages whose hold the person can test by pulling the cable (records the journal keeps). */
 export const RECORD_TYPES = new Set(['sale.recorded', 'water.recorded', 'journal.batch', 'card.readback']);
 
@@ -436,24 +444,25 @@ export function callName(call, t) {
 /**
  * What waits at a hop (a held item, DESIGN §11.4) in plain words, with what to try next: "The
  * sale is waiting inside CANTEEN-01. Press Next hop, or pull the cable first and see what happens."
- * @param {{ tip?: boolean }} [options]  tip: add the second sentence
+ * @param {{ tip?: boolean, serverUp?: boolean }} [options]  tip: add the second sentence;
+ *   serverUp: the cloud server is on (with it off, the tip says what happens instead)
  */
-export function heldText(item, t, { tip = true } = {}) {
+export function heldText(item, t, { tip = true, serverUp = true } = {}) {
   if (!item) return t('held.unknown');
   const device = item.device ?? '—';
   let text;
   let tipKey = 'held.tip.next';
   if (item.where === 'kiosk-http') {
     text = t(hasKey(`held.kiosk.${item.call}`) ? `held.kiosk.${item.call}` : 'held.kiosk.other', { device, call: item.call ?? '—' });
-    tipKey = 'held.tip.server';
+    tipKey = serverUp ? 'held.tip.server' : 'held.tip.kioskOff';
   } else if (item.where === 'platform') {
     text = t('held.platform', { what: messageName(item.type, t), device });
-    tipKey = 'held.tip.server';
+    tipKey = serverUp ? 'held.tip.server' : 'held.tip.platformOff';
   } else {
     text = t('held.machine', { what: messageName(item.type, t), device });
     if (RECORD_TYPES.has(item.type)) tipKey = 'held.tip.cable';
   }
-  return tip ? `${text} ${t(tipKey)}` : text;
+  return tip ? sentences(text, t(tipKey)) : text;
 }
 
 // ---- errors -------------------------------------------------------------------------------------

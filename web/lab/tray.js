@@ -3,7 +3,7 @@
 // at a water machine, an optional power cut or lost confirmation at the kiosk.
 
 import { formatKL, formatRM, h, toast } from '/shared/api.js';
-import { errorText, faultResult, heldText, kioskResult, screenCaption } from './describe.js';
+import { errorText, faultResult, heldText, kioskResult, screenCaption, sentences } from './describe.js';
 import { reconcile, setAttr, setHidden, setText, setTone } from './util.js';
 
 const KIOSK_FAULTS = ['power-cut-before-commit', 'power-cut-after-commit', 'confirm-timeout'];
@@ -225,7 +225,7 @@ export function createTrays(app) {
     const where = action === 'tap' ? deviceCode : kiosk?.code ?? '';
     if (res.held) {
       // Simulation mode, hold on: the kiosk's call to the platform waits at a hop
-      toast(`${where}${t('colon')}${heldText(res.data.item, t)}`, 'info');
+      toast(`${where}${t('colon')}${heldText(res.data.item, t, { serverUp: app.state?.server?.up !== false })}`, 'info');
       if (where) app.highlight(`${school}/${where}`);
       return;
     }
@@ -483,7 +483,7 @@ export function createTrays(app) {
     if (res.held) {
       // Simulation mode, hold on: the machine answered, and its message waits at a hop
       const shown = r.screen ? screenCaption(r.screen, t, app.i18n.lang) ?? r.screen : null;
-      toast(`${job.code}${t('colon')}${shown ? `${shown}. ` : ''}${heldText(r.item, t)}`, 'info');
+      toast(`${job.code}${t('colon')}${sentences(shown ? t('held.screen', { screen: shown }) : null, heldText(r.item, t, { serverUp: app.state?.server?.up !== false }))}`, 'info');
       app.highlight(job.key);
       flashCard(cardKey(found.school.code, found.card.uid));
       return;

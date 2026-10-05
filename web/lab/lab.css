@@ -576,12 +576,14 @@ h4 { margin: 0; line-height: 1.25; }
 .con__quicklist { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ---- the Simulation tab (DESIGN §11.6) ---------------------------------------------------- */
-.sim { overflow-y: auto; overflow-anchor: none; }
+/* its own width decides the layout of its rows (the column is narrow on a 1024 px screen too) */
+.sim { overflow-y: auto; overflow-anchor: none; container: sim / inline-size; }
 .sim:focus { outline: none; }
 .sim__bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; }
 .sim__title { font-size: 16px; }
 .sim__intro { font-size: 13px; }
-.sim.has-details .sim__intro { display: none; }
+/* with the details open, or something waiting, the room goes to what needs it */
+.sim.has-details .sim__intro, .sim.has-waiting .sim__intro { display: none; }
 .sim__traces { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .sim__tracelabel { display: inline; font-size: 13px; }
 .sim__select { flex: 1 1 200px; width: auto; min-width: 0; min-height: 32px; padding: 3px 8px; font-size: 13px; }
@@ -618,8 +620,9 @@ h4 { margin: 0; line-height: 1.25; }
 .sim__waitingtitle { font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .sim__waiting { display: grid; gap: 4px; max-height: 104px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
 .wait__btn {
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: 'where machine flow' 'what what what';
-  gap: 0 8px; width: 100%; padding: 4px 8px; border: 1px solid var(--line); border-left: 4px solid var(--kunyit); border-radius: 6px;
+  /* one line each: where · machine · what · flow (two lines on a phone) */
+  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto; grid-template-areas: 'where machine what flow';
+  align-items: baseline; gap: 0 8px; width: 100%; padding: 3px 8px; border: 1px solid var(--line); border-left: 4px solid var(--kunyit); border-radius: 6px;
   background: var(--surface); color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
 }
 .wait__btn:hover { border-color: var(--ink-2); border-left-color: var(--kunyit); }
@@ -627,7 +630,7 @@ h4 { margin: 0; line-height: 1.25; }
 .wait.is-current .wait__btn { background: var(--teal-soft); }
 .wait__where { grid-area: where; font-weight: 600; }
 .wait__machine { grid-area: machine; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.wait__what { grid-area: what; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.wait__what { grid-area: what; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12px; }
 .wait__flow { grid-area: flow; color: var(--ink-2); font-size: 12px; }
 
 /* playback */
@@ -675,7 +678,7 @@ h4 { margin: 0; line-height: 1.25; }
 .sim__head > :nth-child(4) { grid-area: at; }
 .sim__head > :nth-child(5) { grid-area: type; }
 .sim__listbox { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-height: 0; }
-.sim__earlier { align-self: flex-start; }
+.sim__earlier, .sim__later { align-self: flex-start; }
 .sim__list {
   position: relative; flex: 1 1 auto; min-height: 150px; max-height: 55vh; margin: 0; padding: 0; overflow-y: auto; list-style: none;
   border: 1px solid var(--line); border-radius: 8px; overscroll-behavior: contain;
@@ -748,12 +751,26 @@ h4 { margin: 0; line-height: 1.25; }
 @media (min-width: 1024px) {
   /* the tab fills the column: the list takes what the controls leave; with the details open
      the list keeps a few rows and the details take the rest, each scrolling on its own */
-  .sim__body { flex: 1 1 0; min-height: 300px; }
+  .sim__body { flex: 1 1 0; min-height: 220px; }
   .sim__listbox { flex: 1 1 0; }
   .sim__list { flex: 1 1 0; max-height: none; min-height: 120px; }
   .sim.has-details .sim__listbox { flex: 0 0 auto; }
-  .sim.has-details .sim__list { flex: 0 0 150px; }
-  .sim.has-details .sim__details { flex: 1 1 0; min-height: 0; }
+  .sim.has-details .sim__list { flex: 0 0 124px; min-height: 0; }
+  .sim.has-details .sim__details { flex: 1 1 0; min-height: 170px; }
+  /* the details need the room more than these lines, which say what the controls show anyway */
+  .sim.has-details .sim__tracetitle, .sim.has-details .sim__holdhint, .sim.has-details .sim__waitingtitle { display: none; }
+  .sim.has-details .sim__waiting { max-height: 58px; }
+  .sim.has-details.has-waiting .sim__list { flex-basis: 92px; }
+}
+
+/* a narrow tab (a phone, a 1024 px screen): rows of two or three lines; after the rules above */
+@container sim (max-width: 470px) {
+  /* waiting items: where and the flow, then the machine and what */
+  .wait__btn { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: 'where where flow' 'machine what what'; }
+  /* steps: number, time and type, then from → to, then what happened */
+  .step { grid-template-columns: 26px minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: 'n time type' '. last at' '. what what'; }
+  .sim__head { display: none; }
+  .sim__stepof { margin-left: 0; flex-basis: 100%; }
 }
 
 /* the envelope on the topology (decorative: the event list says the same) */
@@ -848,10 +865,6 @@ h4 { margin: 0; line-height: 1.25; }
     grid-template-columns: var(--col-time) minmax(0, 1fr) minmax(0, 1fr);
     grid-template-areas: 'time type type' 'school school machine' 'summary summary summary';
   }
-  /* simulation steps: number, time and type, then from → to, then what happened */
-  .step { grid-template-columns: 26px minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: 'n time type' '. last at' '. what what'; }
-  .sim__head { display: none; }
-  .sim__stepof { margin-left: 0; flex-basis: 100%; }
   .ev__school, .ev__machine { font-size: 11.5px; color: var(--ink-2); }
   .insp__head { display: none; }
   .layout { padding: 12px; }

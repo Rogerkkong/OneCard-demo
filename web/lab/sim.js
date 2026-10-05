@@ -15,12 +15,17 @@ import { renderDetails } from './sim-details.js';
 import { LAYERS, buildSteps, heldSubject, heldWhere, nodeName, preciseTime, sameNode, traceLabel, traceTitle } from './sim-steps.js';
 import { hhmm, prefs, reconcile, reducedMotion, setAttr, setHidden, setText, setTone } from './util.js';
 
-const MAX_ROWS = 200; // rows in the list at once; "show earlier" adds more
+const MAX_ROWS = 200; // rows in the list at once; "show earlier" and "show later" add more
 const MAX_EVENTS = 1500; // events kept for the chosen flow (the lab keeps 500 per trace)
 const MAX_TRACES = 200; // the lab keeps the most recent 200
 const SPEEDS = [0.5, 1, 2];
-const DWELL_MS = 700; // how long a step stays before the next one plays, at 1×
+const DWELL_MS = 600; // how long a step stays before the next one plays, at 1×
 const TRACE_LIST_STALE_MS = 15_000;
+// following a live flow that runs this many steps ahead (a burst: the server back on, the clock
+// moved): the cursor jumps to a few steps before its newest instead of playing each one
+const CATCH_UP_AFTER = 12;
+const CATCH_UP_TO = 4;
+const USER_SCROLL_QUIET_MS = 3000; // after the person scrolled the list, it is theirs for a while
 const narrow = window.matchMedia('(max-width: 1023px)');
 
 /**
@@ -64,6 +69,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     beatsText: q('.sim__beatstext'),
     head: q('.sim__head'),
     earlier: q('.sim__earlier'),
+    later: q('.sim__later'),
     list: q('#sim-list'),
     listLabel: q('#sim-list-label'),
     empty: q('.sim__empty'),
@@ -96,14 +102,21 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     gone: false,
     cursor: null, // seq of the current step
     running: false, // the cursor moves on by itself (play, or keeping up with a live flow)
+    replay: false, // the person pressed play: every step plays, none is skipped
+    startAt: null, // a held item's id: the chosen flow starts where that item was let go
+    quiet: false, // the flow being fetched was chosen by the page itself: no scrolling to it
     speed: SPEEDS.includes(Number(prefs.get('sim.speed', 1))) ? Number(prefs.get('sim.speed', 1)) : 1,
     layers: new Set(savedLayers.length ? savedLayers : LAYERS),
     beats: prefs.get('sim.heartbeats', false) === true,
-    windowFrom: null, // index into visible of the first row drawn (null: the last MAX_ROWS)
+    // the rows drawn, [windowFrom, windowTo) of the visible steps, when the person asked for more
+    // ("show earlier", "show later"); null: at most MAX_ROWS, the newest, or around the cursor
+    windowFrom: null,
+    windowTo: null,
     lastEventAt: 0, // when the chosen flow last got a step from the event stream (performance.now())
     detailsOpen: false,
     tabShown: false,
     busy: false,
+    serverUp: true, // the cloud server (what waits at the platform goes on only while it is on)
   };
 
   let timer = null; // the next automatic step
@@ -119,11 +132,12 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   const stepAt = (seq) => s.steps.find((x) => x.seq === seq) ?? null;
   const visibleIndex = (seq) => s.visible.findIndex((x) => x.seq === seq);
   const isRealtime = () => s.mode !== 'simulation';
+  /** What waits, in words, with the tip that fits the server's state now. */
+  const heldWords = (item) => heldText(item, t, { serverUp: s.serverUp });
   const dwell = () => (reducedMotion.matches ? 1100 : DWELL_MS) / s.speed;
 
-  function showBeats() {
-    return s.beats || ['heartbeat', 'fault'].includes(currentTrace()?.kind);
-  }
+  // routine heartbeats only (flows of many machines, sim-steps.js): a machine's own flow shows its heartbeat
+  const showBeats = () => s.beats;
 
   function isVisible(step) {
     if (!s.layers.has(step.layer)) return false;
@@ -160,7 +174,13 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     return added;
   }
 
-  async function choose(id, { live = false, first = null, toEnd = false } = {}) {
+  /**
+   * Show a flow. live: keep up with its steps as they come; first: its sim.trace event (a flow
+   * that just started); toEnd: start at its newest step; at: a held item's id, start where it
+   * was let go (and keep up from there); quiet: the page chose it by itself (it opened, the
+   * demo was reset), so the page does not scroll to its first step.
+   */
+  async function choose(id, { live = false, first = null, toEnd = false, at = null, quiet = false } = {}) {
     stopTimer();
     s.traceId = id;
     s.events = [];
@@ -170,7 +190,11 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     s.cursor = null;
     s.gone = false;
     s.windowFrom = null;
+    s.windowTo = null;
     s.running = live;
+    s.replay = false;
+    s.startAt = at;
+    s.quiet = quiet;
     s.lastEventAt = live ? performance.now() : 0;
     if (first) addEvents([first]);
     rebuild();
@@ -194,13 +218,23 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       addEvents(Array.isArray(res?.events) ? res.events : []);
       s.loading = false;
       rebuild();
-      if (s.cursor === null && s.visible.length) {
+      const start = s.startAt ? releaseStep(s.startAt) : null;
+      const reveal = !s.quiet;
+      s.startAt = null;
+      s.quiet = false;
+      if (s.cursor === null && start) {
+        // where the item was let go; what follows plays (or, with nothing new, stays)
+        s.cursor = start.seq;
+        showCurrent({ animate: false });
+      } else if (s.cursor === null && s.visible.length) {
         if (toEnd) {
           s.cursor = s.visible[s.visible.length - 1].seq;
-          showCurrent({ animate: false });
+          // at the newest step of a flow that still goes on (something of it waits): keep up with it
+          if (!isFinished()) s.running = true;
+          showCurrent({ animate: false, reveal });
         } else if (!s.running) {
           s.cursor = s.visible[0].seq;
-          showCurrent({ animate: true });
+          showCurrent({ animate: reveal, reveal });
         }
       }
       render();
@@ -216,6 +250,14 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     }
   }
 
+  /** The step where a held item was let go (else where it waited), or the next visible one. */
+  function releaseStep(heldId) {
+    const held = (type) => s.steps.findIndex((x) => x.e.type === type && x.e.data?.id === heldId);
+    let i = held('sim.released');
+    if (i < 0) i = held('sim.held');
+    return i < 0 ? null : (s.steps.slice(i).find(isVisible) ?? null);
+  }
+
   // ---- traces (the picker) --------------------------------------------------------------------
 
   function upsertTrace(summary) {
@@ -229,11 +271,12 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     }
   }
 
-  /** GET /api/lab/sim: the mode, what waits, and the newest flows. */
+  /** GET /api/lab/sim: the mode, what waits, and the newest flows (pick: show the newest, quietly). */
   async function refresh({ choose: pick = false } = {}) {
     try {
+      const requestedAt = performance.now();
       const res = await get('/api/lab/sim?limit=50');
-      applySim(res);
+      applySim(res, requestedAt);
       const fresh = Array.isArray(res.traces) ? res.traces : [];
       // a flow started meanwhile by the event stream stays in the list
       const known = new Map(fresh.map((x) => [x.id, x]));
@@ -246,8 +289,11 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       }
       if (pick || (!s.traceId && s.followTrace) || (s.gone && s.followTrace)) {
         const newest = s.traces[0]?.id ?? null;
-        if (newest !== s.traceId || s.gone) await choose(newest);
+        // a flow that waits at a hop (the page was reloaded meanwhile): show where it waits
+        const waits = s.held.find((x) => x.trace === newest) ?? null;
+        if (newest !== s.traceId || s.gone) await choose(newest, { toEnd: Boolean(waits), quiet: true });
         else render();
+        if (waits) setNotice(heldWords(waits), 'warn', waits.id);
       } else render();
     } catch (err) {
       if (err?.code !== 'NETWORK') toast(errorText(err, t), 'bad');
@@ -259,8 +305,9 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   function setHeld(list) {
     s.held = list;
     anim.setHeld(s.held);
-    // a notice about what waits is out of date once nothing does
-    if (!list.length && el.notice.classList.contains('sim__notice--warn')) setNotice('');
+    // a notice about what waits is out of date once that item (or everything) went on
+    const about = el.notice.dataset.item;
+    if (el.notice.classList.contains('sim__notice--warn') && (!list.length || (about && !list.some((x) => x.id === about)))) setNotice('');
     renderHold();
     // open details say whether their item still waits: draw them again
     if (s.detailsOpen) flushSoon();
@@ -321,8 +368,10 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     const next = s.visible[i + 1];
     if (!next) {
       // at the end: a live flow carries on when its next steps come (kick); a finished one stops
-      if (isFinished()) s.running = false;
-      else {
+      if (isFinished()) {
+        s.running = false;
+        s.replay = false;
+      } else {
         atEnd = true;
         timer = setTimeout(tick, 2600);
       }
@@ -335,6 +384,14 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       renderCursor();
       return;
     }
+    if (!s.replay && s.visible.length - 1 - i > CATCH_UP_AFTER) {
+      // a burst of steps in a live flow: catch up with its newest, then play on
+      s.cursor = s.visible[s.visible.length - CATCH_UP_TO].seq;
+      showCurrent({ animate: false });
+      renderCursor();
+      schedule(dwell());
+      return;
+    }
     s.cursor = next.seq;
     const ms = showCurrent({ animate: true });
     renderCursor();
@@ -343,11 +400,13 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
 
   /** New steps arrived, or play was pressed: move on unless already scheduled. */
   function kick() {
-    if (!s.running || (timer && !atEnd)) return;
+    // a flow being fetched starts where load() puts it
+    if (s.loading || !s.running || (timer && !atEnd)) return;
     schedule(s.cursor === null ? 0 : 60);
   }
 
-  function showCurrent({ animate = true } = {}) {
+  /** Show the current step on the topology. reveal: scroll the page to it if needed (wide screens). */
+  function showCurrent({ animate = true, reveal = true } = {}) {
     const step = stepAt(s.cursor);
     if (!step) {
       anim.show(null);
@@ -358,7 +417,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     const prev = i > 0 ? s.steps[i - 1] : null;
     const stays = prev && (prev.e.type === 'sim.released' || prev.parked) && step.to && sameNode(prev.to, step.to);
     const shown = stays ? { ...step, from: null } : step;
-    return anim.show(shown, { speed: s.speed, animate });
+    return anim.show(shown, { speed: s.speed, animate, reveal });
   }
 
   /** Go to a step because the person asked (a click, a key, a playback button). */
@@ -366,10 +425,11 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     if (seq === null || seq === undefined) return;
     stopTimer();
     s.cursor = seq;
+    s.replay = false;
     // stepping to the newest step keeps up with the flow again; stepping back stops there
     s.running = visibleIndex(seq) === s.visible.length - 1 && s.visible.length > 0 && !isFinished();
     showCurrent({ animate: true });
-    renderCursor();
+    renderCursor({ user: true });
     if (announce && document.activeElement !== el.list) {
       const step = stepAt(seq);
       setText(el.live, step ? t('sim.announce', { n: step.n, m: s.steps.length, what: step.title }) : '');
@@ -393,6 +453,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   function play() {
     if (s.running) {
       s.running = false;
+      s.replay = false;
       stopTimer();
       renderPlayback();
       return;
@@ -402,8 +463,10 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     if (s.cursor === null || visibleIndex(s.cursor) >= s.visible.length - 1) {
       s.cursor = null;
       s.windowFrom = null;
+      s.windowTo = null;
     }
     s.running = true;
+    s.replay = true;
     renderPlayback();
     schedule(0);
   }
@@ -466,13 +529,16 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     // while something waits, the notice and the list say what to do: the general hint gives way
     setHidden(el.holdHint, n > 0);
     if (!el.next.hasAttribute('aria-busy')) setText(el.next, n ? t('sim.next.count', { n }) : t('sim.next'));
-    el.next.disabled = n === 0 || s.busy;
+    // what waits at the platform goes on only while the cloud server is on
+    const releasable = s.held.filter((x) => x.where !== 'platform' || s.serverUp).length;
+    el.next.disabled = releasable === 0 || s.busy;
     if (!el.release.hasAttribute('aria-busy')) setText(el.release, t('sim.release'));
-    el.release.disabled = n === 0 || s.busy;
+    el.release.disabled = releasable === 0 || s.busy;
     // nothing to let go and nothing will wait: the buttons give their room to the steps
     setHidden(el.next.parentElement, n === 0 && !s.hold);
     setText(el.waitingTitle, t('sim.waiting.title', { n }));
     setHidden(el.waitingBox, n === 0);
+    root.classList.toggle('has-waiting', n > 0);
     const traceN = (id) => s.traces.find((x) => x.id === id)?.n ?? '?';
     reconcile(
       el.waiting,
@@ -500,7 +566,9 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
           );
           b.dataset.sig = parts.join('|');
         }
-        setAttr(b, 'aria-label', t('sim.waiting.item', { where, machine, what, flow: parts[3] }));
+        const label = t('sim.waiting.item', { where, machine, what, flow: parts[3] });
+        setAttr(b, 'aria-label', label);
+        setAttr(b, 'title', label);
       },
     );
   }
@@ -537,6 +605,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     s.visible = s.steps.filter(isVisible);
     if (s.cursor !== null && visibleIndex(s.cursor) < 0) rebuild();
     s.windowFrom = null;
+    s.windowTo = null;
     renderFilters();
     renderList();
     renderPlayback();
@@ -544,10 +613,10 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
 
   function rowLabel(step) {
     const opts = { multiSchool: step.multiSchool };
-    const travels = step.from && step.to && !sameNode(step.from, step.to);
+    const travels = Boolean(step.from && step.to && !sameNode(step.from, step.to));
     const last = travels ? nodeName(step.from, t, opts) : '—';
     const at = nodeName(step.to ?? step.from, t, opts);
-    return { last, at };
+    return { last, at, travels };
   }
 
   function createRow(step) {
@@ -574,7 +643,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     li.className = `step step--${step.layer} step--${step.verdict}${step.seq === s.cursor ? ' is-current' : ''}`;
     setText(r.n, step.n);
     setText(r.time, preciseTime(step.e.at));
-    const { last, at } = rowLabel(step);
+    const { last, at, travels } = rowLabel(step);
     setText(r.last, last);
     setText(r.at, at);
     if (r.type.dataset.type !== step.e.type) {
@@ -587,21 +656,45 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     }
     setText(r.what, step.title);
     setAttr(li, 'aria-selected', String(step.seq === s.cursor));
-    setAttr(li, 'aria-label', t('sim.row', { n: step.n, time: preciseTime(step.e.at), last, at, type: step.e.type, what: step.title, verdict: t(`sim.verdict.${step.verdict}`) }));
+    setAttr(li, 'aria-label', t(travels ? 'sim.row' : 'sim.rowAt', { n: step.n, time: preciseTime(step.e.at), last, at, type: step.e.type, what: step.title, verdict: t(`sim.verdict.${step.verdict}`) }));
+  }
+
+  /**
+   * Which rows to draw (a long flow is never drawn whole): what the person asked for, else the
+   * newest MAX_ROWS, else (the cursor is further back) MAX_ROWS from a little before the cursor.
+   */
+  function listWindow() {
+    const n = s.visible.length;
+    const ci = s.cursor === null ? -1 : visibleIndex(s.cursor);
+    let from = s.windowFrom;
+    let to = s.windowTo;
+    if (from === null || to === null || (ci >= 0 && (ci < from || ci >= to))) {
+      // the person's window no longer shows the cursor: back to the automatic one
+      s.windowFrom = null;
+      s.windowTo = null;
+      to = n;
+      from = Math.max(0, n - MAX_ROWS);
+      if (ci >= 0 && ci < from) {
+        from = Math.max(0, ci - 20);
+        to = Math.min(n, from + MAX_ROWS);
+      }
+    }
+    return { ci, from: Math.max(0, Math.min(from, n)), to: Math.min(to, n) };
   }
 
   function renderList() {
     setText(el.listLabel, t('sim.list.label'));
     const vis = s.visible;
-    let from = s.windowFrom ?? Math.max(0, vis.length - MAX_ROWS);
-    const ci = s.cursor === null ? -1 : visibleIndex(s.cursor);
-    if (ci >= 0 && ci < from) from = Math.max(0, ci - 20);
-    if (s.windowFrom !== null) s.windowFrom = from;
-    const rows = vis.slice(from);
+    const { ci, from, to } = listWindow();
+    const rows = vis.slice(from, to);
     reconcile(el.list, rows, (x) => String(x.seq), createRow, updateRow);
     setText(el.earlier, from > 0 ? t('sim.earlier', { n: Math.min(from, MAX_ROWS), total: from }) : '');
     setHidden(el.earlier, from === 0);
     el.earlier.dataset.from = String(from);
+    el.earlier.dataset.to = String(to);
+    const after = vis.length - to;
+    setText(el.later, after > 0 ? t('sim.later', { n: Math.min(after, MAX_ROWS), total: after }) : '');
+    setHidden(el.later, after <= 0);
 
     let empty = '';
     let showAll = false;
@@ -617,23 +710,48 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     setHidden(el.showAll, !showAll);
     setHidden(el.empty, !empty);
     setHidden(el.list, !rows.length);
+    // no rows: the message takes their place, under no column titles
+    setHidden(el.list.parentElement, !rows.length);
+    setHidden(el.head, !rows.length);
     setAttr(el.list, 'aria-activedescendant', ci >= 0 ? `sim-step-${s.cursor}` : null);
     keepCurrentInView();
   }
 
-  /** Scroll the list (only the list, never the page) so the current row shows. */
-  function keepCurrentInView() {
+  // The person scrolling the list themselves (wheel, touch, its scrollbar): for a while the list
+  // is theirs (playback and new steps do not scroll it), until they move the cursor themselves.
+  // A scroll event alone says nothing: the list also scrolls when it grows or shrinks.
+  let listScrolledAt = -Infinity;
+  const personScrolled = () => {
+    listScrolledAt = performance.now();
+  };
+  el.list.addEventListener('wheel', personScrolled, { passive: true });
+  el.list.addEventListener('touchmove', personScrolled, { passive: true });
+  el.list.addEventListener('pointerdown', (ev) => {
+    if (ev.target === el.list) personScrolled(); // its scrollbar
+  });
+
+  /**
+   * Scroll the list (only the list, never the page) so the current row shows. user: the person
+   * moved the cursor (always scrolls); otherwise not while they scroll the list themselves.
+   */
+  function keepCurrentInView({ user = false } = {}) {
+    if (!user && performance.now() - listScrolledAt < USER_SCROLL_QUIET_MS) return;
     const row = s.cursor === null ? null : document.getElementById(`sim-step-${s.cursor}`);
     if (!row || el.list.hidden) return;
     const top = row.offsetParent === el.list ? row.offsetTop : row.offsetTop - el.list.offsetTop;
     const bottom = top + row.offsetHeight;
     const view = el.list.clientHeight;
     if (view <= 0) return;
-    if (top < el.list.scrollTop) el.list.scrollTop = Math.max(0, top - 8);
-    else if (bottom > el.list.scrollTop + view) el.list.scrollTop = bottom - view + 8;
+    let to = null;
+    if (top < el.list.scrollTop) to = Math.max(0, top - 8);
+    else if (bottom > el.list.scrollTop + view) to = Math.min(top - 8, bottom - view + 8);
+    if (to === null || Math.abs(to - el.list.scrollTop) < 1) return;
+    el.list.scrollTop = to;
   }
+  // the list grows or shrinks (the details open, something starts to wait): the current row stays in sight
+  new ResizeObserver(() => keepCurrentInView()).observe(el.list);
 
-  function renderCursor() {
+  function renderCursor({ user = false } = {}) {
     for (const li of el.list.querySelectorAll('.step.is-current')) {
       if (li.dataset.key !== String(s.cursor)) {
         li.classList.remove('is-current');
@@ -647,7 +765,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       setAttr(row, 'aria-selected', 'true');
     }
     setAttr(el.list, 'aria-activedescendant', row ? row.id : null);
-    keepCurrentInView();
+    keepCurrentInView({ user });
     renderPlayback();
     renderDetailsPanel();
   }
@@ -732,26 +850,30 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => {
       const first = s.held.find((x) => x.trace === s.traceId);
-      if (first) setNotice(heldText(first, t), 'warn');
+      if (first) setNotice(heldWords(first), 'warn', first.id);
     }, 120);
   }
 
-  function setNotice(text, tone = 'info') {
+  /** The live-stepping notice; `itemId`: the waiting item it is about (it goes when that item does). */
+  function setNotice(text, tone = 'info', itemId = null) {
     setText(el.notice, text ?? '');
     setTone(el.notice, 'sim__notice--', tone);
     setHidden(el.notice, !text);
+    if (itemId) el.notice.dataset.item = itemId;
+    else delete el.notice.dataset.item;
   }
 
   /** A waiting item was clicked: show its flow at the step where it waits. */
   function openHeld(item) {
     s.followTrace = s.followTrace && item.trace === s.traces[0]?.id;
+    prefs.set('sim.follow', s.followTrace);
     if (s.traceId !== item.trace) {
       choose(item.trace, { toEnd: true });
     } else {
       const at = s.steps.find((x) => x.e.type === 'sim.held' && x.e.data?.id === item.id);
       if (at && isVisible(at)) goTo(at.seq);
     }
-    setNotice(heldText(item, t), 'warn');
+    setNotice(heldWords(item), 'warn', item.id);
   }
 
   async function next() {
@@ -772,7 +894,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     return t('sim.next.item', { what, where: heldWhere(item, t), machine: item.device ?? '—', n: s.traces.find((x) => x.id === item.trace)?.n ?? '?' });
   }
 
-  /** After Next hop: the flow that goes on is the one to watch. */
+  /** After Next hop: the flow that goes on is the one to watch, from where it waited. */
   function followRelease(item) {
     if (item.trace === s.traceId) {
       if (!s.running) {
@@ -784,10 +906,11 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
           showCurrent({ animate: false });
         }
         s.running = true;
+        s.replay = false;
         renderCursor();
         kick();
       }
-    } else if (s.followTrace) choose(item.trace, { live: true, toEnd: true });
+    } else if (s.followTrace) choose(item.trace, { live: true, at: item.id });
   }
 
   async function releaseAll() {
@@ -893,8 +1016,13 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     refilter();
   });
   el.earlier.addEventListener('click', () => {
-    const from = Number(el.earlier.dataset.from ?? 0);
-    s.windowFrom = Math.max(0, from - MAX_ROWS);
+    s.windowFrom = Math.max(0, Number(el.earlier.dataset.from ?? 0) - MAX_ROWS);
+    s.windowTo = Number(el.earlier.dataset.to ?? s.visible.length);
+    renderList();
+  });
+  el.later.addEventListener('click', () => {
+    s.windowFrom = Number(el.earlier.dataset.from ?? 0);
+    s.windowTo = Math.min(s.visible.length, Number(el.earlier.dataset.to ?? 0) + MAX_ROWS);
     renderList();
   });
   el.detailsClose.addEventListener('click', closeDetails);
@@ -908,13 +1036,14 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   root.addEventListener('keydown', (ev) => {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     const target = ev.target;
-    if (target.closest('input, select, textarea, summary, .pd__json')) return;
     const inList = target === el.list;
     if (ev.key === 'Escape' && s.detailsOpen && (el.details.contains(target) || inList)) {
       ev.preventDefault();
       closeDetails();
       return;
     }
+    // form fields, the raw JSON's toggle and its text keep their own keys
+    if (target.closest('input, select, textarea, summary, .pd__json')) return;
     let handled = true;
     if (ev.key === 'ArrowRight' || (inList && ev.key === 'ArrowDown')) step(1);
     else if (ev.key === 'ArrowLeft' || (inList && ev.key === 'ArrowUp')) step(-1);
@@ -939,7 +1068,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     anim.setActive(on);
     if (on) {
       anim.setHeld(s.held);
-      showCurrent({ animate: false });
+      showCurrent({ animate: false, reveal: false });
       kick();
     }
   }
@@ -1026,6 +1155,13 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     /** The polled lab state: mode, hold and what waits. `requestedAt`: when that state was asked for. */
     update(state, requestedAt) {
       if (state?.sim) applySim(state.sim, requestedAt);
+      const up = state?.server?.up !== false;
+      if (state && up !== s.serverUp) {
+        s.serverUp = up;
+        // a notice about what waits says what to do now that the server is on (or off)
+        const item = el.notice.dataset.item ? s.held.find((x) => x.id === el.notice.dataset.item) : null;
+        if (item && el.notice.classList.contains('sim__notice--warn')) setNotice(heldWords(item), 'warn', item.id);
+      }
       renderMode();
       renderHold();
       anim.relayout();
@@ -1047,21 +1183,24 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     },
     /** An action answered early because its flow waits at a hop ({ held: true, trace, item }). */
     noteHeld(answer, { open = true } = {}) {
-      if (answer?.item) addHeld(answer.item);
-      setNotice(heldText(answer?.item, t), 'warn');
+      const item = answer?.item ?? null;
+      if (item) addHeld(item);
+      // (an item let go before its answer came is not news any more)
+      if (!item || !s.released.has(item.id)) setNotice(heldWords(item), 'warn', item?.id ?? null);
       if (open) showTab('sim');
       if (answer?.trace && answer.trace !== s.traceId && s.followTrace) choose(answer.trace, { live: true });
     },
     /** Ask the lab what waits now; @returns the newest item of that machine ('<school>/<DEVICE>'), if any. */
     async syncHeld(key) {
       try {
+        const requestedAt = performance.now();
         const res = await get('/api/lab/sim?limit=5');
-        applySim(res, performance.now());
+        applySim(res, requestedAt);
         for (const x of res.traces ?? []) upsertTrace(x);
         renderTraces();
         const mine = s.held.filter((x) => `${x.school}/${x.device}` === key);
         const item = mine[mine.length - 1] ?? null;
-        if (item) setNotice(heldText(item, t), 'warn');
+        if (item) setNotice(heldWords(item), 'warn', item.id);
         return item;
       } catch {
         return null;

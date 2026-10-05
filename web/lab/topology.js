@@ -5,7 +5,7 @@
 // Simulation tab's envelope shows the hops instead). Elements are patched in place on every refresh.
 
 import { formatRM, formatTimeKL, h, toast } from '/shared/api.js';
-import { directionOf, heldText, parseTopic, reasonText, screenCaption } from './describe.js';
+import { directionOf, heldText, parseTopic, reasonText, screenCaption, sentences } from './describe.js';
 import { hhmm, icon, reconcile, reducedMotion, setAttr, setHidden, setText, setTone } from './util.js';
 
 const FLASH_MS = 900;
@@ -322,7 +322,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     const res = await app.call('/api/lab/cable', { schoolCode: school, deviceCode: code, plugged }, button);
     if (!res.ok) return app.fail(res.error);
     // Simulation mode, hold on: the plug's first heartbeat (then its upload) waits at a hop
-    if (res.held) return toast(`${t(plugged ? 'toast.cablePlugHeld' : 'toast.cableOut', { code })} ${heldText(res.data.item, t)}`, 'info');
+    if (res.held) return toast(sentences(t(plugged ? 'toast.cablePlugHeld' : 'toast.cableOut', { code }), heldText(res.data.item, t, { serverUp: app.state?.server?.up !== false })), 'info');
     const after = res.data.machine;
     if (!plugged) toast(t('toast.cableOut', { code }), 'info');
     else toast(t(after?.connected ? 'toast.cableIn' : 'toast.cableInWait', { code }), after?.connected ? 'good' : 'warn');
@@ -357,7 +357,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
       // Simulation mode, hold on: the console says what waits; the Simulation tab shows it
       const item = await app.sim?.syncHeld(key);
       app.openSim?.();
-      toast(item ? `${code}${t('colon')}${heldText(item, t)}` : t('toast.heldSomewhere', { code }), 'info');
+      toast(item ? `${code}${t('colon')}${heldText(item, t, { serverUp: app.state?.server?.up !== false })}` : t('toast.heldSomewhere', { code }), 'info');
       return;
     }
     if (command === 'heartbeat') toast(t('toast.heartbeat', { code }), 'good');

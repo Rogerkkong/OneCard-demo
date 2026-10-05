@@ -63,11 +63,10 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
         const site = siteOf(n.school);
         if (!site) return null;
         const items = [...site.querySelectorAll('.tray__cards > li')];
-        const found = n.uid
-          ? items.find((li) => li.dataset.key === n.uid)
-          : n.last4
-            ? items.find((li) => String(li.dataset.key ?? '').toUpperCase().endsWith(String(n.last4).toUpperCase()))
-            : null;
+        // the card itself (a copy has a tray key of its own), else one ending in those 4 characters
+        const found =
+          (n.uid ? items.find((li) => li.dataset.key === n.uid) : null) ??
+          (n.last4 ? items.find((li) => String(li.dataset.key ?? '').toUpperCase().endsWith(String(n.last4).toUpperCase())) : null);
         return found ?? site.querySelector('.tray');
       }
       case 'admincard':
@@ -261,7 +260,7 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
    * Show a step: the envelope travels from its from-node to its to-node (or to where it was
    * dropped). @returns {number} how long it takes (ms), so playback can wait for it
    */
-  function show(step, { speed = 1, animate = true } = {}) {
+  function show(step, { speed = 1, animate = true, reveal: scroll = true } = {}) {
     stopMotion();
     unlight();
     drop.hidden = true;
@@ -289,7 +288,7 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
     const still = reducedMotion.matches || !animate;
     light(target, 'sim-at', step.layer);
     if (still && travels) light(step.from, 'sim-from', step.layer);
-    reveal(travels ? [step.from, target] : [target]);
+    if (scroll) reveal(travels ? [step.from, target] : [target]);
 
     const end = pointOf(target);
     if (!end) {
@@ -323,7 +322,7 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
       return 0;
     }
     const total = lengthOf(points);
-    const duration = Math.round(Math.min(1900, Math.max(520, 320 + total * 0.85)) / speed);
+    const duration = Math.round(Math.min(1600, Math.max(480, 300 + total * 0.7)) / speed);
     let walked = 0;
     const frames = points.map((p, i) => {
       if (i > 0) walked += Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y);

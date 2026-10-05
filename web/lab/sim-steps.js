@@ -10,6 +10,7 @@ import {
   RECORD_TYPES,
   callName,
   duration,
+  errorText,
   explain,
   hasKey,
   heldText,
@@ -50,6 +51,22 @@ const machineNode = (school, device) => (school && device ? { kind: 'machine', s
 const cardNode = (school, uid = null, last4 = null) => (school ? { kind: 'card', school, uid, last4 } : null);
 const adminNode = (school) => (school ? { kind: 'admincard', school } : null);
 const internetNode = (school) => ({ kind: 'internet', school: school ?? null });
+/** A card's chip UID without the tray's copy suffix ('04A1…80-copy2' -> '04A1…80'). */
+const chipUid = (uid) => String(uid ?? '').replace(/-copy\d*$/i, '').toUpperCase();
+
+/**
+ * The card a step is about, on the topology: the card the flow names (its title, its lab.action)
+ * when the event matches it, so a copy of a card or another school's card is found in the right
+ * tray; else the card the event itself names (its UID or the last 4 characters of it).
+ */
+function cardFor(ctx, school, { uid = null, last4 = null } = {}) {
+  const c = ctx.card;
+  if (c?.uid) {
+    const same = uid ? chipUid(c.uid) === chipUid(uid) : last4 ? chipUid(c.uid).endsWith(String(last4).toUpperCase()) : true;
+    if (same) return cardNode(c.school ?? school, c.uid, last4 ?? chipUid(c.uid).slice(-4));
+  }
+  return cardNode(school, uid, last4 ?? (uid ? chipUid(uid).slice(-4) : null));
+}
 
 /** Two nodes are the same place on the topology. */
 export function sameNode(a, b) {
@@ -75,7 +92,7 @@ export function nodeName(n, t, { multiSchool = false } = {}) {
     case 'machine':
       return multiSchool ? `${n.school}/${n.device}` : n.device;
     case 'card':
-      return n.last4 || n.uid ? t('sim.node.card', { last4: n.last4 ?? String(n.uid).slice(-4) }) : t('sim.node.cardAny');
+      return n.last4 || n.uid ? t('sim.node.card', { last4: n.last4 ?? chipUid(n.uid).slice(-4) }) : t('sim.node.cardAny');
     case 'admincard':
       return t('sim.node.admincard');
     case 'net':
@@ -143,15 +160,44 @@ export function hopOrder(events) {
 
 // ---- what one trace knows about its messages ----------------------------------------------------
 
-/** Everything the trace's events say about each message (by envelope id) and each held item. */
-export function traceContext(events) {
+/**
+ * The card a flow is about, from its title ("Tap 04A1… on smk-contoh/CANTEEN-01", "Fault: copy
+ * card 04A1… of smk-contoh", ...): { school, uid } or null. The card's school may be another
+ * one than the machine's; the flow's lab.action says so (cardSchool) once it comes.
+ */
+function cardOfTitle(title) {
+  const text = String(title ?? '');
+  let m = /^Fault: a card of (\S+) \((\S+)\) on /.exec(text);
+  if (m) return { school: m[1], uid: m[2] };
+  m = /^Fault: (?:copy|edit) card (\S+) of (\S+?)(?: by hand)?$/.exec(text);
+  if (m) return { school: m[2], uid: m[1] };
+  m = /(?:^|, )[Tt]ap (\S+) on ([^/\s]+)\/\S+/.exec(text);
+  if (m) return { school: m[2], uid: m[1] };
+  return null;
+}
+
+/**
+ * Everything the trace's events say about each message (by envelope id) and each held item,
+ * and about the flow: the card it is about, its card re-reads, whether it is a forged message.
+ */
+export function traceContext(events, trace = null) {
   const messages = new Map();
   const held = new Map();
   const schools = new Set();
+  const reads = new Set(); // machines that have read the card in this flow
+  const rereads = new Set(); // seq of each card read after an earlier one by the same machine
+  let card = cardOfTitle(trace?.title);
   for (const e of events) {
     if (e.school) schools.add(e.school);
     const d = e.data ?? {};
     if (e.type === 'sim.held' && typeof d.id === 'string') held.set(d.id, d);
+    if (e.type === 'device.step' && d.step === 'card.read') {
+      const key = `${e.school}/${d.device}`;
+      if (reads.has(key)) rereads.add(e.seq);
+      reads.add(key);
+    }
+    // a tap's lab.action names the card and, when it is another school's, that school
+    if (e.type === 'lab.action' && d.action === 'tap' && typeof d.uid === 'string') card = { school: d.cardSchool ?? e.school, uid: d.uid };
     const id = typeof d.msgId === 'string' && d.msgId !== '' ? d.msgId : null;
     if (!id) continue;
     const m = messages.get(id) ?? { msgId: id };
@@ -182,6 +228,8 @@ export function traceContext(events) {
         m.type ??= d.type;
         m.device ??= d.device;
         m.school ??= e.school;
+        // the platform found the signature wrong: whoever sent it did not have the machine's secret
+        if (Array.isArray(d.checks) && d.checks.some((c) => c?.step === 'signature' && c.ok === false)) m.forged = true;
         break;
       case 'device.received':
         m.received = { result: d.result, reason: d.reason, kind: d.kind, version: d.version, device: d.device };
@@ -199,14 +247,43 @@ export function traceContext(events) {
     }
     messages.set(id, m);
   }
-  return { messages, held, multiSchool: schools.size > 1 };
+  return {
+    messages,
+    held,
+    multiSchool: schools.size > 1,
+    card,
+    rereads,
+    // the lab's forged-message fault: its message is not signed with the machine's secret
+    forgedFlow: /^Fault: forged message as /.test(String(trace?.title ?? '')),
+    // heartbeats are routine (hidden unless asked for) in a flow of many machines (the clock, the
+    // server, the broker); in one machine's flow its heartbeat is part of what happens
+    routineBeats: !trace?.device,
+  };
 }
 
 // ---- small text helpers ------------------------------------------------------------------------
 
 const money = (sen) => (Number.isSafeInteger(sen) ? formatRM(sen) : '—');
 const tr = (t, key, fallback) => (hasKey(key) ? t(key) : fallback);
+// Why the lab stopped its broker (src/lab/lab.js, closeBroker): the known reasons in the page's language.
+const BROKER_REASONS = { 'server switched off': 'serverOff', restart: 'restart', reset: 'reset', 'lab stopped': 'labStopped' };
+const brokerReason = (reason, t) => (BROKER_REASONS[reason] ? t(`st.broker.reason.${BROKER_REASONS[reason]}`) : String(reason));
 const code = (v) => ({ text: String(v ?? '—'), mono: true });
+// A sentence keeps a space around each value for codes such as CANTEEN-01 ("{who} 离开 broker"),
+// but not between two Chinese characters (who = 平台): that space goes, only at a value's edge.
+const CJK = '\u3000-\u303f\u4e00-\u9fff\uff00-\uffef';
+const CJK_START = new RegExp(`^[${CJK}]`);
+const CJK_END = new RegExp(`[${CJK}]$`);
+const GAP_AFTER = new RegExp(`\u0001 (?=[${CJK}])`, 'g');
+const GAP_BEFORE = new RegExp(`(?<=[${CJK}]) \u0002`, 'g');
+function fill(t, key, vars) {
+  const marked = {};
+  for (const [name, v] of Object.entries(vars ?? {})) {
+    marked[name] = typeof v === 'string' && v !== '' ? `${CJK_START.test(v) ? '\u0002' : ''}${v}${CJK_END.test(v) ? '\u0001' : ''}` : v;
+  }
+  return t(key, marked).replace(GAP_AFTER, '').replace(GAP_BEFORE, '').replace(/[\u0001\u0002]/g, '');
+}
+
 /** 'HH:MM:SS.mmm' (KL) from an ISO time: steps of one flow are milliseconds apart. */
 export function preciseTime(iso) {
   const base = formatTimeKL(iso);
@@ -305,12 +382,19 @@ export function traceLabel(summary, t, hhmm, lang) {
   if (!summary) return '';
   let kind = tr(t, `sim.kind.${summary.kind}`, summary.kind);
   let subject = summary.device ?? null;
+  const title = String(summary.title ?? '');
   if (summary.kind === 'request') {
-    const m = /^(School office|Operator console|Parent app|Mock bank): (\S+) (.+)$/.exec(summary.title ?? '');
+    const m = /^(School office|Operator console|Parent app|Mock bank): (\S+) (.+)$/.exec(title);
     if (m) {
       kind = areaName(m[1], t);
       subject = `${m[2]} ${m[3]}`;
     }
+  } else if (summary.kind === 'server') subject = t(/ off$/.test(title) ? 'sim.subject.off' : 'sim.subject.on');
+  else if (summary.kind === 'broker') subject = t('sim.subject.restart');
+  else if (summary.kind === 'jobs') subject = t('sim.subject.jobs');
+  else if (summary.kind === 'clock') {
+    const m = /forward (.+)$/.exec(title);
+    if (m) subject = `+${durationWords(m[1], t, lang)}`;
   }
   // a flow of no machine (the server, the clock, a fault on the cloud) is named by what it did
   if (!subject) return t('sim.trace.optionTitle', { n: summary.n, title: traceTitle(summary.title, t, lang), time: hhmm(summary.at) });
@@ -362,12 +446,13 @@ export function stepOf(e, ctx) {
     step.titleKey = key;
     step.vars = vars;
   };
-  const isBeat = d.type === 'device.heartbeat';
+  // a routine heartbeat: hidden unless asked for (in a flow of many machines only)
+  const isBeat = d.type === 'device.heartbeat' && ctx.routineBeats !== false;
 
   switch (e.type) {
     // ---- the lab and live stepping --------------------------------------------------------
     case 'sim.trace': {
-      step.to = traceNode(ctx.trace ?? { kind: d.kind, school, device: d.device ?? null });
+      step.to = traceNode(ctx.trace ?? { kind: d.kind, title: d.title, school, device: d.device ?? null }, ctx);
       say('st.trace', { title: traceTitle(d.title, t, ctx.lang) });
       break;
     }
@@ -413,7 +498,7 @@ export function stepOf(e, ctx) {
     case 'card.write': {
       step.layer = 'card';
       step.from = here;
-      step.to = cardNode(school, d.uid);
+      step.to = cardFor(ctx, school, { uid: d.uid });
       say(d.kind === 'credit' ? 'st.card.credit' : 'st.card.debit', { device: dev ?? '—', amount: money(d.amountSen), balance: money(d.balanceAfterSen) });
       step.kinds = ['card'];
       break;
@@ -457,8 +542,14 @@ export function stepOf(e, ctx) {
       step.layer = 'mqtt';
       step.to = here;
       step.heartbeat = isBeat;
-      if (d.inReplyTo) say('st.send.ack', { device: dev ?? '—', type: d.type ?? '—' });
-      else say('st.send', { device: dev ?? '—', type: d.type ?? '—', seq: d.seq ?? '—', bytes: d.bytes ?? '—' });
+      const vars = { device: dev ?? '—', type: d.type ?? '—', seq: d.seq ?? '—', bytes: d.bytes ?? '—' };
+      if (isForged(d.msgId, ctx)) {
+        // the lab's forged-message fault goes out on the machine's own connection, unsigned by it
+        step.verdict = 'warn';
+        step.note = t('st.send.forgedNote');
+        say('st.send.forged', vars);
+      } else if (d.inReplyTo) say('st.send.ack', vars);
+      else say('st.send', vars);
       step.kinds = ['message', 'security', 'mqtt'];
       break;
     }
@@ -475,7 +566,7 @@ export function stepOf(e, ctx) {
         step.from = machineOfLogin(d.from, p.school) ?? machineNode(p.school, p.device);
         say('st.publish.up', { type: d.type ?? '—', device: step.from?.device ?? p.device, channel: tr(t, `sim.channel.${p.channel}`, p.channel) });
       } else {
-        say('st.publish.other', { who: d.from ?? t('ev.someone'), type: d.type ?? '—', topic: d.topic ?? '—' });
+        say('st.publish.other', { who: loginName(d.from, ctx, school), type: d.type ?? '—', topic: d.topic ?? '—' });
       }
       step.kinds = ['message', 'mqtt'];
       break;
@@ -509,7 +600,7 @@ export function stepOf(e, ctx) {
       step.from = d.username === 'platform' ? PLATFORM : who;
       step.to = BROKER;
       step.verdict = e.type === 'mqtt.connect' ? 'ok' : 'warn';
-      say(e.type === 'mqtt.connect' ? 'st.connect' : 'st.disconnect', { who: loginName(d.username, t) });
+      say(e.type === 'mqtt.connect' ? 'st.connect' : 'st.disconnect', { who: loginName(d.username, ctx, school, { start: true }) });
       break;
     }
     case 'mqtt.denied': {
@@ -519,7 +610,7 @@ export function stepOf(e, ctx) {
       step.to = BROKER;
       step.drop = BROKER;
       step.verdict = 'bad';
-      say(d.topic ? 'st.denied.topic' : 'st.denied', { action: tr(t, `ev.action.${d.action}`, d.action ?? ''), who: loginName(d.username, t), topic: d.topic ?? '' });
+      say(d.topic ? 'st.denied.topic' : 'st.denied', { action: tr(t, `ev.action.${d.action}`, d.action ?? ''), who: loginName(d.username, ctx, school), topic: d.topic ?? '' });
       step.kinds = ['mqtt'];
       break;
     }
@@ -527,7 +618,9 @@ export function stepOf(e, ctx) {
       step.layer = 'mqtt';
       step.to = BROKER;
       step.verdict = d.up ? 'ok' : 'warn';
-      say(d.up ? 'st.broker.up' : 'st.broker.down', { reason: d.reason ?? '' });
+      if (d.up) say('st.broker.up');
+      else if (d.reason) say('st.broker.down', { reason: brokerReason(d.reason, t) });
+      else say('st.broker.downPlain');
       break;
 
     // ---- HTTP (the kiosk) -------------------------------------------------------------------------
@@ -564,7 +657,8 @@ export function stepOf(e, ctx) {
       step.layer = 'platform';
       step.from = PLATFORM;
       step.to = DB;
-      say('st.audit', { actor: typeof d.actor === 'string' ? d.actor : JSON.stringify(d.actor ?? ''), action: d.action ?? '' });
+      // the actor as the audit trail keeps it: "Name (stf_…)", or "device:KIOSK-01" (shown as the machine)
+      say('st.audit', { actor: typeof d.actor === 'string' ? d.actor.replace(/^device:/, '') : JSON.stringify(d.actor ?? ''), action: d.action ?? '' });
       break;
     case 'card.issued':
     case 'card.lost':
@@ -654,7 +748,7 @@ export function stepOf(e, ctx) {
     }
   }
 
-  step.title = t(step.titleKey, step.vars);
+  step.title = fill(t, step.titleKey, step.vars);
   const kinds = ['what', ...step.kinds.filter(Boolean), 'raw'];
   delete step.kinds;
   let built = null;
@@ -668,12 +762,22 @@ export function stepOf(e, ctx) {
   return step;
 }
 
-/** Where a trace begins on the topology: its machine, or the cloud for the server's own flows. */
-function traceNode(trace) {
+/**
+ * Where a trace begins on the topology: its machine, the card a card fault is about, or the cloud
+ * server for the server's own flows and the web apps' requests (nothing for the lab clock).
+ */
+function traceNode(trace, ctx) {
   if (trace.device && trace.school) return machineNode(trace.school, trace.device);
-  if (trace.kind === 'broker') return BROKER;
-  if (trace.kind === 'server' || trace.kind === 'jobs' || trace.kind === 'request') return PLATFORM;
+  const title = String(trace.title ?? '');
+  if (ctx.card && /^Fault: (?:copy|edit) card /.test(title)) return cardFor(ctx, ctx.card.school);
+  if (trace.kind === 'broker' || /^Fault: restart the MQTT broker/.test(title)) return BROKER;
+  if (['server', 'jobs', 'request'].includes(trace.kind) || /^Fault: switch the cloud server/.test(title)) return PLATFORM;
   return null;
+}
+
+/** Was this message forged (the lab's fault), not signed with its machine's secret? */
+function isForged(msgId, ctx) {
+  return ctx.forgedFlow === true || ctx.messages?.get(msgId)?.forged === true;
 }
 
 function heldNode(item) {
@@ -681,11 +785,18 @@ function heldNode(item) {
   return machineNode(item.school, item.device);
 }
 
-function loginName(username, t) {
-  if (username === null || username === undefined || username === '') return t('ev.someone');
-  if (username === 'platform') return t('ev.platform');
-  if (username === 'viewer') return t('ev.viewer');
-  return String(username);
+/**
+ * Who a broker login is, in words: a machine by its name, the platform, the viewer, or the login
+ * itself. `start`: the words begin a sentence.
+ */
+function loginName(username, ctx, school, { start = false } = {}) {
+  const { t } = ctx;
+  const word = (name) => t(start ? `sim.who.${name}` : `ev.${name}`);
+  if (username === null || username === undefined || username === '') return word('someone');
+  if (username === 'platform') return word('platform');
+  if (username === 'viewer') return word('viewer');
+  const machine = machineOfLogin(username, school);
+  return machine ? nodeName(machine, t, { multiSchool: ctx.multiSchool }) : String(username);
 }
 
 function diffList(list, t) {
@@ -707,10 +818,12 @@ function deviceStep(step, e, ctx, say, here) {
   switch (d.step) {
     case 'card.read':
       step.layer = 'card';
-      step.from = cardNode(e.school, null, d.last4 ?? null);
+      step.from = cardFor(ctx, e.school, { last4: d.last4 ?? null });
       step.to = here;
-      if (d.ok) say('st.card.read', { device: dev, last4: d.last4 ?? '—', balance: money(d.balanceSen), counter: d.cardSeq ?? '—' });
-      else {
+      if (d.ok) {
+        // the kiosk reads the card again before each write
+        say(ctx.rereads?.has(e.seq) ? 'st.card.reread' : 'st.card.read', { device: dev, last4: d.last4 ?? '—', balance: money(d.balanceSen), counter: d.cardSeq ?? '—' });
+      } else {
         step.verdict = 'bad';
         step.drop = here;
         say('st.card.refused', { device: dev, reason: reasonText(d.reason, t) });
@@ -739,7 +852,7 @@ function deviceStep(step, e, ctx, say, here) {
       step.layer = 'machine';
       step.to = here;
       step.verdict = 'warn';
-      step.heartbeat = d.type === 'device.heartbeat';
+      step.heartbeat = d.type === 'device.heartbeat' && ctx.routineBeats !== false;
       if (d.call) say('st.offline.call', { device: dev, call: callName(d.call, t) });
       else if (d.type === 'card.readback') say('st.offline.readback', { device: dev });
       else if (d.type === 'device.heartbeat') say('st.offline.heartbeat', { device: dev });
@@ -789,14 +902,13 @@ function httpStep(step, e, ctx, say, here) {
   step.from = PLATFORM;
   step.to = here;
   if (d.status === 0 || d.code === 'NETWORK') {
+    // no answer: the request never got through (the lab's lost confirmation is lost on its way
+    // to the platform, which never sees it); the ✗ is on the way between kiosk and platform
     step.verdict = 'bad';
+    step.from = here;
+    step.to = PLATFORM;
     step.drop = internetNode(e.school);
-    if (d.fault === 'confirm-timeout') say('st.http.lost', vars);
-    else {
-      step.from = here;
-      step.to = PLATFORM;
-      say('st.http.network', vars);
-    }
+    say(d.fault === 'confirm-timeout' ? 'st.http.lost' : 'st.http.network', vars);
   } else if (d.ok && d.status === 404) say('st.http.notFound', vars);
   else if (d.ok) say('st.http.ok', vars);
   else {
@@ -812,7 +924,7 @@ function intakeStep(step, e, ctx, say, here) {
   step.layer = 'platform';
   step.from = BROKER;
   step.to = PLATFORM;
-  step.heartbeat = d.type === 'device.heartbeat' && e.type !== 'intake.refused';
+  step.heartbeat = d.type === 'device.heartbeat' && e.type !== 'intake.refused' && ctx.routineBeats !== false;
   step.msgId = d.msgId ?? e.msgId ?? null;
   const vars = { type: d.type ?? '—', device: d.device ?? '—', code: d.code ?? '—', why: tr(t, `refusal.${d.code}`, t('refusal.other')) };
   if (e.type === 'intake.refused') {
@@ -847,7 +959,8 @@ function labActionStep(step, e, ctx, say) {
   step.to = machineNode(e.school, d.device) ?? (d.action === 'server-up' || d.action === 'server-down' || d.action === 'jobs' ? PLATFORM : null);
   if (d.ok === false && d.code) {
     step.verdict = 'bad';
-    say('st.lab.failed', { action: d.action ?? '—', code: d.code, message: d.message ?? '' });
+    const why = errorText({ code: d.code, message: d.message ?? d.code }, t);
+    say('st.lab.failed', { why: why.charAt(0).toUpperCase() + why.slice(1) });
     return;
   }
   if (d.action === 'fault' && d.type === 'cross-device-publish') {
@@ -862,6 +975,14 @@ function labActionStep(step, e, ctx, say) {
       say('st.lab.crossDevice', { device: d.device ?? '—', topic: d.topic ?? '—' });
     } else say('st.lab.crossDeviceNot', { device: d.device ?? '—', topic: d.topic ?? '—' });
     return;
+  }
+  if (d.action === 'fault' && (d.type === 'tamper-card' || d.type === 'clone-card')) {
+    // a card fault happens in the card tray: the copy appears next to the card it copies
+    const card = cardFor(ctx, e.school, { uid: d.uid ?? null });
+    if (d.type === 'clone-card' && d.copy) {
+      step.from = card;
+      step.to = cardNode(card?.school ?? e.school, d.copy, chipUid(d.copy).slice(-4));
+    } else step.to = card;
   }
   if (d.ok === false) step.verdict = 'warn';
   say('st.lab.done', { text: summarize(e, t, ctx.lang) });
@@ -900,11 +1021,10 @@ function ruleText(c, d, t, forList = true) {
 
 function sectionOf(kind, step, e, ctx) {
   const { t } = ctx;
-  const d = e.data ?? {};
-  const msg = step.msgId ? ctx.messages.get(step.msgId) ?? null : null;
+  const msg =step.msgId ? ctx.messages.get(step.msgId) ?? null : null;
   switch (kind) {
     case 'what':
-      return { id: 'what', text: step.title, note: explain(e.type, t) };
+      return { id: 'what', text: step.title, note: step.note ?? explain(e.type, t) };
     case 'raw':
       return { id: 'raw', json: JSON.stringify(e, null, 2), seq: e.seq };
     case 'held':
@@ -1071,7 +1191,8 @@ function messageSection(e, msg, ctx) {
   const txn = m.txn ?? d.txn;
   if (txn) rows.push([t('pd.msg.txn'), code(txn)]);
   if (m.inReplyTo) rows.push([t('pd.msg.reply'), code(m.inReplyTo)]);
-  if (m.sentAt) rows.push([t(m.byPlatform ? 'pd.msg.sentPlatform' : 'pd.msg.sent'), preciseTime(m.sentAt)]);
+  // a message waiting at the machine's hold point has not been sent yet
+  if (m.sentAt && e.type !== 'sim.held') rows.push([t(m.byPlatform ? 'pd.msg.sentPlatform' : 'pd.msg.sent'), preciseTime(m.sentAt)]);
   if (Number.isFinite(m.bytes)) rows.push([t('pd.msg.size'), t('pd.msg.bytes', { n: m.bytes })]);
   return { id: 'message', rows, note: t(m.byPlatform ? 'pd.msg.notePlatform' : 'pd.msg.note') };
 }
@@ -1110,7 +1231,7 @@ function securitySection(e, msg, ctx) {
   return {
     id: 'security',
     rows: [
-      [t('pd.sec.signature'), t('pd.sec.machineSigns', { device })],
+      [t('pd.sec.signature'), t(isForged(m.msgId ?? d.msgId, ctx) ? 'pd.sec.forged' : 'pd.sec.machineSigns', { device })],
       [t('pd.sec.secret'), t('pd.sec.secretHow', { device })],
     ],
     checks: [{
@@ -1249,6 +1370,6 @@ function booksSection(e, t) {
  */
 export function buildSteps(events, options) {
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
-  const ctx = { ...options, ...traceContext(sorted) };
+  const ctx = { ...options, ...traceContext(sorted, options?.trace ?? null) };
   return hopOrder(sorted).map((e, i) => Object.assign(stepOf(e, ctx), { n: i + 1, seq: e.seq, e, multiSchool: ctx.multiSchool }));
 }

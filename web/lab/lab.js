@@ -9,7 +9,7 @@
 import { get, post, toast } from '/shared/api.js';
 import { createI18n } from '/shared/i18n.js';
 import { STRINGS } from './strings.js';
-import { errorText, heldText } from './describe.js';
+import { errorText, heldText, sentences } from './describe.js';
 import { busy, downloadJson, prefs, rich, setHidden, setText, setTone } from './util.js';
 import { createTopology } from './topology.js';
 import { createTrays } from './tray.js';
@@ -81,7 +81,7 @@ const app = {
       if (data && data.held === true) {
         sim.noteHeld(data, { open: path !== '/api/lab/console' });
         if (HELD_AS_MESSAGE.has(path)) {
-          return { ok: false, error: { code: 'HELD', message: `${t(HELD_AS_MESSAGE.get(path))} ${heldText(data.item, t)}` } };
+          return { ok: false, error: { code: 'HELD', message: sentences(t(HELD_AS_MESSAGE.get(path)), heldText(data.item, t, { serverUp: app.state?.server?.up !== false })) } };
         }
         return { ok: true, data, held: true };
       }
