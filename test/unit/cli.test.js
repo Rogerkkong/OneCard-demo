@@ -22,6 +22,7 @@ import {
   portBusyPlan,
   run,
   selfTest,
+  startCommand,
   startWithFallbacks,
   whichPort,
 } from '../../src/cli.js';
@@ -246,6 +247,17 @@ describe('ports in use: the decision', () => {
     assert.match(portBusyPlan({ which: 'console', port: 2323, open: false, labAnswering: false }).message, /LAB_CONSOLE_PORT=2324[\s\S]*LAB_CONSOLE_PORT=0 starts the lab without the machine consoles/);
     assert.match(portBusyPlan({ which: 'mqttTls', port: 8883, open: false, labAnswering: false }).message, /LAB_MQTT_TLS_PORT=8884/);
     assert.equal(portBusyPlan({ which: null, port: 5000, open: true, labAnswering: false }).action, 'stop');
+  });
+
+  test('the example fits the way the lab was started', () => {
+    assert.equal(startCommand(), 'npm start');
+    assert.equal(startCommand({ app: true, program: 'onecard-lab-mac-arm64' }), './onecard-lab-mac-arm64');
+    assert.equal(startCommand({ app: true, program: 'onecard-lab-win-x64.exe' }), '.\\onecard-lab-win-x64.exe');
+    const mac = portBusyPlan({ which: 'mqtt', port: 1883, open: false, labAnswering: false, command: './onecard-lab-mac-arm64' }).message;
+    assert.match(mac, /\n {2}LAB_MQTT_PORT=1884 \.\/onecard-lab-mac-arm64$/);
+    assert.doesNotMatch(mac, /npm start|PowerShell/);
+    const win = portBusyPlan({ which: 'http', port: 8080, open: false, labAnswering: false, command: '.\\onecard-lab-win-x64.exe' }).message;
+    assert.match(win, /\(PowerShell\) \$env:LAB_HTTP_PORT=8081; \.\\onecard-lab-win-x64\.exe$/);
   });
 
   test('other listen failures in plain words', async () => {

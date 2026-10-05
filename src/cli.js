@@ -34,8 +34,8 @@ export class CliError extends Error {
  * @param {{ app?: boolean, program?: string }} [how]  app: the single-file app, started as `program`
  */
 export function helpText({ app = false, program = 'onecard-lab' } = {}) {
-  const windows = app && /\.exe$/i.test(program);
-  const command = app ? (windows ? `.\\${program}` : `./${program}`) : 'npm start';
+  const command = startCommand({ app, program });
+  const windows = /\.exe$/i.test(command);
   const start = app
     ? `  Double-click ${program}, or start it in a terminal: ${command} [options]
   It opens the lab console in your web browser (--no-open: it does not).`
@@ -73,6 +73,19 @@ ${
       ? `For example, in PowerShell: $env:LAB_HTTP_PORT=8090; ${command}`
       : `For example: LAB_HTTP_PORT=8090 ${command}${app ? '' : `\n  (Windows PowerShell: $env:LAB_HTTP_PORT=8090; ${command})`}`
   }`;
+}
+
+/** How the person starts the lab again: `npm start`, or the desktop app's own name. */
+export function startCommand({ app = false, program = 'onecard-lab' } = {}) {
+  if (!app) return 'npm start';
+  return /\.exe$/i.test(program) ? `.\\${program}` : `./${program}`;
+}
+
+/** "Start it with this setting" for the person's system and way of starting. */
+function withSetting(name, value, command) {
+  if (/\.exe$/i.test(command)) return `  (PowerShell) $env:${name}=${value}; ${command}`;
+  if (command !== 'npm start') return `  ${name}=${value} ${command}`;
+  return `  ${name}=${value} npm start\n  (Windows PowerShell: $env:${name}=${value}; npm start)`;
 }
 
 /**
@@ -199,11 +212,12 @@ const nextPort = (port) => (port >= 65535 ? 1024 : port + 1);
  * @param {number} [situation.port]  the busy port
  * @param {boolean} situation.open  started with --open (double-click): nobody can type a setting
  * @param {boolean} situation.labAnswering  a OneCard Lab answers on the lab's web port
+ * @param {string} [situation.command]  how the lab is started (startCommand()), for the example
  * @returns {{ action: 'already-running' } | { action: 'fallback', which: string } | { action: 'stop', message: string }}
  *   already-running: that lab is the one to use; fallback: take a free port and say so in the
  *   banner; stop: the message says what to change
  */
-export function portBusyPlan({ which, port, open, labAnswering }) {
+export function portBusyPlan({ which, port, open, labAnswering, command = 'npm start' }) {
   if (labAnswering) return { action: 'already-running' };
   if (!which) {
     return { action: 'stop', message: `A port the lab needs${port ? ` (${port})` : ''} is already in use by another program. Stop that program, or choose other ports (see --help).` };
@@ -216,8 +230,7 @@ export function portBusyPlan({ which, port, open, labAnswering }) {
     message:
       `Port ${port} (${what}) is already in use${usual ? `, ${usual}` : ' by another program'}.\n` +
       `Stop that program, or start the lab with another port, for example:\n` +
-      `  ${env}=${instead} npm start\n` +
-      `  (Windows PowerShell: $env:${env}=${instead}; npm start)` +
+      withSetting(env, instead, command) +
       (which === 'console' ? `\n${env}=0 starts the lab without the machine consoles.` : ''),
   };
 }
@@ -327,11 +340,12 @@ function listenProblem(failure, which) {
  * @param {boolean} [deps.open]  started with --open
  * @param {(base: string) => Promise<boolean>} [deps.probe]  isLabAt()
  * @param {(host: string) => Promise<number>} [deps.findFreePort]  freePort()
+ * @param {string} [deps.command]  how the lab is started (startCommand()), for the messages
  * @returns {Promise<{ lab: object, started: object, notes: string[] } | { alreadyRunning: string }>}
  *   alreadyRunning: the lab console address of the lab that runs already
  * @throws {CliError} a port problem the person must fix; other errors as they come
  */
-export async function startWithFallbacks({ createLab, options, open = false, probe = isLabAt, findFreePort = freePort }) {
+export async function startWithFallbacks({ createLab, options, open = false, probe = isLabAt, findFreePort = freePort, command = 'npm start' }) {
   let current = { ...options };
   const moved = [];
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -347,7 +361,7 @@ export async function startWithFallbacks({ createLab, options, open = false, pro
       // Whatever is busy: if a OneCard Lab answers on our web port, that is the lab to use.
       const base = current.httpPort ? `http://${reachableHost(current.host)}:${current.httpPort}` : null;
       const labAnswering = base ? await probe(base) : false;
-      const plan = portBusyPlan({ which, port: failure.port, open, labAnswering });
+      const plan = portBusyPlan({ which, port: failure.port, open, labAnswering, command });
       if (plan.action === 'already-running') return { alreadyRunning: `${base}/lab/` };
       if (plan.action === 'stop') throw new CliError(plan.message);
       if (!moved.some((m) => m.which === which)) moved.push({ which, from: failure.port });
@@ -591,7 +605,8 @@ export async function run(argv = [], env = {}, how = {}) {
     }
     const logger = startLogger(complain);
     const options = { ...labOptionsFromEnv(env, { lan: cli.lan }), ...(webRoot ? { webRoot } : {}), log: logger.log };
-    const outcome = await startWithFallbacks({ createLab, options, open: cli.open });
+    const command = startCommand({ app, program });
+    const outcome = await startWithFallbacks({ createLab, options, open: cli.open, command });
     logger.started();
     if (outcome.alreadyRunning) {
       if (cli.open) {
@@ -601,8 +616,7 @@ export async function run(argv = [], env = {}, how = {}) {
       }
       complain(
         `OneCard Lab is already running on this computer: ${outcome.alreadyRunning}\n` +
-          'Use that one, or stop it first (Ctrl+C in its window). A second lab needs other ports, for example:\n' +
-          '  LAB_HTTP_PORT=8090 LAB_MQTT_PORT=1884 LAB_CONSOLE_PORT=2324 npm start',
+          'Use that one, or stop it first (Ctrl+C in its window). A second lab needs other ports: see --help.',
       );
       return 1;
     }

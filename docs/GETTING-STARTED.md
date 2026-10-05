@@ -20,6 +20,9 @@ cards, put there the real way: parent pays, student taps at the kiosk.
 
 ## Step 1 — Install Node.js (one time)
 
+> No Node.js wanted? The **desktop app** is one file with everything inside: see
+> [Desktop app (no Node.js needed)](../README.md#desktop-app-no-nodejs-needed) in the README, then go on at Step 4.
+
 **Windows**
 1. Go to <https://nodejs.org/> and download the **LTS** version (Windows Installer, `.msi`).
 2. Run it and keep the defaults (Next, Next, Install).
@@ -41,6 +44,31 @@ cards, put there the real way: parent pays, student taps at the kiosk.
 
 ## Step 3 — Start the lab
 
+**The easy way: double-click (Mac and Windows)**
+
+1. Open the project folder (the unzipped folder, or the one GitHub Desktop or Git made).
+2. Double-click the launcher:
+   - Mac: **Start OneCard Lab.command**
+   - Windows: **Start OneCard Lab.bat**
+3. A window opens (Terminal on a Mac). The first time, it downloads the two libraries the lab uses
+   (needs the internet, about a minute). Then the lab starts and the **lab console opens in your web
+   browser** by itself.
+
+The first time only, your computer may ask first:
+
+- **Mac**, if the folder came as a ZIP from the internet: macOS says it cannot check the file. Right-click
+  the launcher → **Open** → **Open**. On macOS 15 (Sequoia) and later: double-click it once, close the
+  message, then open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** and
+  confirm. (A folder from Git or GitHub Desktop opens straight away.)
+- **Mac**: if macOS asks whether Terminal may access files in your Desktop (or Documents, Downloads)
+  folder, click **Allow** (or **OK**): the lab's files are there.
+- **Windows**: if SmartScreen says "Windows protected your PC", click **More info** → **Run anyway**.
+  Double-click the launcher in the *unzipped* folder, not inside the ZIP.
+- If Node.js is missing or too old, the window says so (in English and 中文) and opens the Node.js
+  download page: do Step 1, then double-click the launcher again.
+
+**The Terminal way**
+
 1. Open a terminal **in the project folder**:
    - Windows: open the folder in File Explorer, click the address bar, type `powershell`, press Enter.
    - Mac: in Terminal type `cd ` (with a space), drag the folder into the window, press Enter.
@@ -52,6 +80,7 @@ cards, put there the real way: parent pays, student taps at the kiosk.
    ```sh
    npm start
    ```
+   (`npm start -- --open` also opens the lab console in your browser.)
 4. You should see:
    ```text
    OneCard Lab is running (lab data only — nothing here is real).
@@ -63,8 +92,8 @@ cards, put there the real way: parent pays, student taps at the kiosk.
      ...
    ```
 
-Keep this window open: it **is** the server. **Ctrl+C** stops it. Every start begins again
-from the same fresh demo, so you cannot break anything for good.
+Either way, keep the lab's window open: it **is** the server. Closing it, or **Ctrl+C** in it, stops
+the lab. Every start begins again from the same fresh demo, so you cannot break anything for good.
 
 ## Step 4 — Your first tap (browser)
 
@@ -239,7 +268,11 @@ cloud server off, and more.
 |---|---|
 | `node` is not recognized | Close and reopen PowerShell after installing Node.js (or restart Windows). |
 | `OneCard Lab needs Node.js 22.13 or newer` | Install the current LTS from nodejs.org. |
-| `EADDRINUSE` / port already in use | Another program uses 8080, 1883 or 2323. Stop it, or pick other ports, e.g. PowerShell: `$env:LAB_HTTP_PORT=8090; npm start` (Mac: `LAB_HTTP_PORT=8090 npm start`). |
+| `Port 1883 (the MQTT broker) is already in use` (or 8080, 2323) | Another program uses that port. Stop it, or pick other ports, e.g. PowerShell: `$env:LAB_HTTP_PORT=8090; npm start` (Mac: `LAB_HTTP_PORT=8090 npm start`). The double-click launchers and the desktop app take a free port by themselves. |
+| `OneCard Lab is already running` | It is already open in another window: use that one (the double-click launchers open it in the browser for you), or close that window first. |
+| Mac: "cannot be opened", "Apple could not verify…" | Right-click → **Open** → **Open**. macOS 15 and later: try once, then **System Settings → Privacy & Security** → **Open Anyway**. |
+| Windows: "Windows protected your PC" | **More info** → **Run anyway**. |
+| The launcher says some files are missing | You opened it inside the ZIP. Unzip the folder first (Windows: right-click the ZIP → **Extract All**) and double-click the launcher in the unzipped folder. |
 | PuTTY: "Connection refused" | The lab is not running, or you chose SSH instead of **Telnet**, or the port is not 2323. |
 | PuTTY shows every letter twice | In PuTTY → *Terminal*, set *Local echo* to **Auto**. |
 | MQTT Explorer shows nothing | Check port 1883 and the `viewer` / `viewer` login; tap a card to make traffic. |

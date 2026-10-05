@@ -124,6 +124,7 @@ jobs:
             confirm. Or in Terminal: `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64`
             (with your file's name and folder).
           - **macOS 14 and earlier:** right-click the file → **Open** → **Open**.
+          - **macOS**, if it asks whether Terminal may access files in your Downloads folder: **Allow**.
           - **Windows:** if SmartScreen says "Windows protected your PC", click **More info** →
             **Run anyway**.
 

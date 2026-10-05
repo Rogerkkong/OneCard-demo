@@ -20,6 +20,9 @@
 
 ## 第 1 步：安装 Node.js（只需一次）
 
+> 不想装 Node.js？**桌面版**是一个文件，什么都包含在里面：看 README 里的
+> [桌面版（不用装 Node.js）](../README.md#中文简介)，然后直接跳到第 4 步。
+
 **Windows**
 1. 打开 <https://nodejs.org/>，下载 **LTS** 版本（Windows Installer，`.msi`）。
 2. 运行安装程序，全部用默认值（Next、Next、Install）。
@@ -40,6 +43,27 @@
 
 ## 第 3 步：启动实验室
 
+**最简单：双击（Mac 和 Windows）**
+
+1. 打开项目文件夹（解压后的文件夹，或 GitHub Desktop、Git 下载的文件夹）。
+2. 双击启动文件：
+   - Mac：**Start OneCard Lab.command**
+   - Windows：**Start OneCard Lab.bat**
+3. 会打开一个窗口（Mac 上是 Terminal）。第一次会先下载实验室用的两个库（需要网络，大约一分钟）。
+   然后实验室启动，**浏览器会自己打开实验室控制台**。
+
+只有第一次，电脑可能会先问你：
+
+- **Mac**，如果文件夹是从网上下载的 ZIP：macOS 会说无法检查这个文件。右键点启动文件 → **打开** → **打开**。
+  macOS 15（Sequoia）以后：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
+  （用 Git 或 GitHub Desktop 拿到的文件夹不会这样。）
+- **Mac**：如果 macOS 问 Terminal 能不能访问"桌面"（或"文稿""下载"）文件夹里的文件，按 **允许**（或 **好**）：实验室的文件就在那里。
+- **Windows**：如果 SmartScreen 显示"Windows 已保护你的电脑"，按 **更多信息** → **仍要运行**。
+  要在*解压后*的文件夹里双击，不要在 ZIP 里面双击。
+- 如果没有 Node.js 或版本太旧，窗口会（用英文和中文）说明，并打开 Node.js 下载页：做完第 1 步，再双击一次启动文件。
+
+**用终端（Terminal）**
+
 1. 在**项目文件夹里**打开终端：
    - Windows：用文件资源管理器打开这个文件夹，点一下地址栏，输入 `powershell`，按 Enter。
    - Mac：在 Terminal 输入 `cd `（后面有一个空格），把文件夹拖进窗口，按 Enter。
@@ -51,6 +75,7 @@
    ```sh
    npm start
    ```
+   （`npm start -- --open` 会顺便在浏览器里打开实验室控制台。）
 4. 你会看到：
    ```text
    OneCard Lab is running (lab data only — nothing here is real).
@@ -62,7 +87,8 @@
      ...
    ```
 
-这个窗口不要关：**它就是服务器**。按 **Ctrl+C** 停止。每次启动都会回到同一份全新的示范资料，所以怎么玩都不会弄坏。
+不管用哪种方法，实验室的窗口都不要关：**它就是服务器**。关掉它，或在里面按 **Ctrl+C**，就会停止实验室。
+每次启动都会回到同一份全新的示范资料，所以怎么玩都不会弄坏。
 
 ## 第 4 步：刷第一张卡（浏览器）
 
@@ -220,7 +246,11 @@ onecard> exit
 |---|---|
 | `node` 不是内部或外部命令 | 装好 Node.js 后关掉 PowerShell 再重新打开（或重启 Windows）。 |
 | `OneCard Lab needs Node.js 22.13 or newer` | 到 nodejs.org 装最新的 LTS。 |
-| `EADDRINUSE`／端口被占用 | 有别的程序在用 8080、1883 或 2323。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。 |
+| `Port 1883 (the MQTT broker) is already in use`（或 8080、2323）／端口被占用 | 有别的程序在用这个端口。把它关掉，或换端口，例如 PowerShell：`$env:LAB_HTTP_PORT=8090; npm start`（Mac：`LAB_HTTP_PORT=8090 npm start`）。双击启动和桌面版会自己换一个空的端口。 |
+| `OneCard Lab is already running` | 另一个窗口里已经开着实验室：用那一个就好（双击启动会直接在浏览器里打开它），或先关掉那个窗口。 |
+| Mac："无法打开"、"Apple 无法验证……" | 右键 → **打开** → **打开**。macOS 15 以后：先试一次，再到 **系统设置 → 隐私与安全性** → **仍要打开**。 |
+| Windows："Windows 已保护你的电脑" | **更多信息** → **仍要运行**。 |
+| 启动文件说文件不全 | 你是在 ZIP 里面打开的。先把文件夹解压（Windows：右键点 ZIP → **全部解压缩**），再在解压后的文件夹里双击启动文件。 |
 | PuTTY 显示 "Connection refused" | 实验室没在跑，或选了 SSH 而不是 **Telnet**，或端口不是 2323。 |
 | PuTTY 每个字出现两次 | PuTTY → *Terminal*，把 *Local echo* 设为 **Auto**。 |
 | MQTT Explorer 什么都没有 | 检查端口 1883 和账号 `viewer` / `viewer`；去刷一张卡制造一些消息。 |

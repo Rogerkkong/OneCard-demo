@@ -161,6 +161,19 @@ function say(text) {
   process.stdout.write(`${text}\n`);
 }
 
+/** `fn` that runs only the first time: a child that fails to start may report 'error' and 'exit'. */
+function once(fn) {
+  let done = false;
+  return function () {
+    if (done) return;
+    done = true;
+    fn.apply(null, arguments);
+  };
+}
+
+/** Signals that mean someone stopped the lab (Ctrl+C, a closed window, kill), not that it broke. */
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGKILL'];
+
 /** Open a page in the default browser, detached; a missing browser changes nothing. */
 function openInBrowser(url, platform) {
   let command = 'xdg-open';
@@ -209,22 +222,24 @@ function startLab(argv) {
       });
     });
   }
-  child.on('error', (err) => {
-    say(messages.cannotRun('Node.js', err));
-    closeAfterEnter(1);
-  });
-  child.on('exit', (code, signal) => {
-    if (signal || code === 0) {
+  const ended = once((code, signal, err) => {
+    if (err) {
+      say(messages.cannotRun('Node.js', err));
+      closeAfterEnter(1);
+    } else if (code === 0 || STOP_SIGNALS.indexOf(signal) >= 0) {
       process.exit(0); // stopped: Ctrl+C, a closed window, or the lab that was already running opened
-      return;
+    } else {
+      say(messages.stopped);
+      closeAfterEnter(code || 1);
     }
-    say(messages.stopped);
-    closeAfterEnter(code || 1);
   });
+  child.on('error', (err) => ended(null, null, err));
+  child.on('exit', (code, signal) => ended(code, signal, null));
 }
 
 /** npm install, then `done(ok)`. */
-function install(done) {
+function install(callback) {
+  const done = once(callback);
   const how = npmInvocation(process.platform, process.execPath, exists);
   const child = childProcess.spawn(how.command, how.args, {
     cwd: ROOT,

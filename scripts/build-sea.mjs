@@ -11,7 +11,7 @@
 // without them. esbuild and postject are dev dependencies: `npm install` (not --omit=dev) first.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MANIFEST_KEY, makeManifest } from '../src/app/assets.js';
 
@@ -97,6 +97,14 @@ async function main() {
   if (!node.includes(`${SEA_FUSE}:0`)) {
     throw new Error(`this Node.js binary (${process.execPath}) cannot be made into a single-file app: it has no unused SEA fuse. Use the official build from nodejs.org.`);
   }
+  // Homebrew's and Linux distributions' node use the computer's own copies of some libraries: the
+  // app would start only where those are installed too.
+  const shared = Object.entries(process.config?.variables ?? {})
+    .filter(([name, value]) => name.startsWith('node_shared') && (value === true || value === 'true'))
+    .map(([name]) => name.replace(/^node_shared_?/, '') || 'libnode');
+  if (shared.length) {
+    console.warn(`Note: this Node.js uses this computer's own ${shared.join(', ')} libraries, so the app will start only where they are installed too. To share the app, build it with the official Node.js from nodejs.org.`);
+  }
   const { build } = await import('esbuild');
   const { inject } = (await import('postject')).default;
   const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
@@ -159,6 +167,7 @@ async function main() {
   chmodSync(target, 0o755);
   const mac = process.platform === 'darwin';
   if (mac) sh('codesign', ['--remove-signature', target]);
+  if (process.platform === 'linux') console.log("(postject may now print \"Can't find string offset for section name\": harmless.)");
   await inject(target, 'NODE_SEA_BLOB', readFileSync(blobFile), {
     sentinelFuse: SEA_FUSE,
     ...(mac ? { machoSegmentName: 'NODE_SEA' } : {}),
@@ -169,8 +178,9 @@ async function main() {
   console.log(`Built ${shown} (${mb(statSync(target).size)}) from Node.js ${process.versions.node}.`);
 }
 
-// Run when started as a script (tests import the helpers above without building anything).
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run when started as a script (tests import the helpers above without building anything). By
+// name: a full path can differ through a symbolic link or, on Windows, the drive letter's case.
+if (basename(process.argv[1] ?? '') === 'build-sea.mjs') {
   main().catch((err) => {
     console.error(`The app was not built: ${err?.message ?? err}`);
     process.exit(1);

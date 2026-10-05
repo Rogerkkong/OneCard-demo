@@ -75,7 +75,8 @@ What happens the first time:
 - **Mac**, if the folder came as a ZIP from the internet: macOS may say it cannot check the launcher.
   Right-click it → **Open** → **Open**. On macOS 15 (Sequoia) and later: double-click it once, close the
   message, then **System Settings → Privacy & Security** → **Open Anyway**. (A folder from `git clone` or
-  GitHub Desktop opens straight away.)
+  GitHub Desktop opens straight away.) If macOS asks whether Terminal may access files in your Desktop,
+  Documents or Downloads folder, click **Allow** (or **OK**).
 - **Windows**: unzip the folder first (right-click the ZIP → **Extract All**); a launcher inside the ZIP
   cannot find the rest. If SmartScreen says "Windows protected your PC": **More info** → **Run anyway**.
 
@@ -110,6 +111,8 @@ The apps are not signed, so the first time:
   **System Settings → Privacy & Security**, scroll down, click **Open Anyway** and confirm. Or in Terminal:
   `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64` (your file's name and folder).
 - **macOS 14 and earlier**: right-click the file → **Open** → **Open**.
+- If macOS asks whether Terminal may access files in your Downloads (or Desktop, Documents) folder, click
+  **Allow** (or **OK**).
 - **Windows**: if SmartScreen says "Windows protected your PC", click **More info** → **Run anyway**.
 - A Mac or Linux file from an **Actions run** loses its "can run" mark in the download (Release ZIPs keep
   it). In Terminal: `chmod +x ~/Downloads/onecard-lab-mac-arm64`.
@@ -305,6 +308,7 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
 - 它会下载实验室用的两个库（需要网络，大约一分钟）。以后更新了（`git pull` 或下载了新版本），它会自己再装一次。
 - **Mac**：如果文件夹是从网上下载的 ZIP，macOS 可能说无法检查这个启动文件。右键点它 → **打开** → **打开**。macOS 15（Sequoia）
   以后：先双击一次、关掉提示，再到 **系统设置 → 隐私与安全性** → **仍要打开**。（用 `git clone` 或 GitHub Desktop 拿到的文件夹不会这样。）
+  如果 macOS 问 Terminal 能不能访问"桌面""文稿"或"下载"文件夹里的文件，按 **允许**（或 **好**）。
 - **Windows**：先把 ZIP 解压（右键点 ZIP → **全部解压缩**），在 ZIP 里面直接双击会找不到其他文件。如果 SmartScreen 显示
   "Windows 已保护你的电脑"：按 **更多信息** → **仍要运行**。
 
@@ -324,6 +328,7 @@ Windows（64 位）用 `onecard-lab-win-x64.exe`，Linux（64 位）用 `onecard
 - **macOS 15（Sequoia）以后**：先双击一次、关掉提示，再打开 **系统设置 → 隐私与安全性**，往下拉，按 **仍要打开** 并确认。
   或在 Terminal 输入 `xattr -d com.apple.quarantine ~/Downloads/onecard-lab-mac-arm64`（换成你的文件名和文件夹）。
 - **macOS 14 以前**：右键点这个文件 → **打开** → **打开**。
+- 如果 macOS 问 Terminal 能不能访问"下载"（或"桌面""文稿"）文件夹里的文件，按 **允许**（或 **好**）。
 - **Windows**：如果 SmartScreen 显示"Windows 已保护你的电脑"，按 **更多信息** → **仍要运行**。
 - 从 **Actions 运行** 下载的 Mac 和 Linux 文件会丢掉"可以运行"的标记（Release 的 ZIP 不会）。在 Terminal 输入
   `chmod +x ~/Downloads/onecard-lab-mac-arm64`。

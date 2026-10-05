@@ -1,4 +1,5 @@
 @echo off
+title OneCard Lab
 rem OneCard Lab for Windows: double-click this file. A window opens and starts the lab, and the
 rem lab console opens in your web browser. Close the window, or press Ctrl+C, to stop the lab.
 rem (docs/DESIGN.md section 13. This file only finds Node.js; scripts\launch.cjs does the rest:

@@ -7,6 +7,7 @@
 # the lab in the web browser. Close the window, or press Ctrl+C, to stop the lab.
 
 cd "$(dirname "$0")" || exit 1
+[ -t 1 ] && printf '\033]0;OneCard Lab\007' # the window's title, to find it again
 
 if [ ! -f scripts/launch.cjs ]; then
   echo
