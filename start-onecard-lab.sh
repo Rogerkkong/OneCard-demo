@@ -23,10 +23,11 @@ has_node() { command -v node >/dev/null 2>&1; }
 # 22.13 or newer, asked in syntax any Node.js understands
 new_enough() { "$1" -e 'var v=process.versions.node.split(".");process.exit(+v[0]>22||(+v[0]==22&&+v[1]>=13)?0:1)' >/dev/null 2>&1; }
 
-# A double-click from Finder does not always read the shell setup that puts node on PATH: look in
-# the usual places, and take the first Node.js that is new enough (else the first one found, and
-# launch.cjs says it is too old).
-if ! has_node; then
+# A double-click from Finder (or a file manager) does not always read the shell setup that puts
+# node on PATH, and an older Node.js may come first there: then look in the usual places too, and
+# take the first Node.js that is new enough (else keep the one on PATH, or take the first one
+# found, and launch.cjs says it is too old).
+if ! has_node || ! new_enough node; then
   nvm_node=""
   if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
     nvm_node=$(export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; command -v node 2>/dev/null)
