@@ -287,7 +287,7 @@ test('16.4 hold at the platform: the message waits there while the server is off
   // the server's own flow: the platform republished every retained setting, and the plugged
   // machines' first heartbeats on the new broker belong to it (they wait at their outboxes)
   assert.ok(inTrace(on.trace, 'platform.send', (e) => e.data.retained).length >= 3);
-  await waitFor(() => heldNow((h) => h.trace === on.trace && h.device === 'CANTEEN-01' && h.type === 'device.heartbeat').length === 1, {
+  await waitFor(() => heldNow((h) => h.trace === on.trace && h.school === SMK && h.device === 'CANTEEN-01' && h.type === 'device.heartbeat').length === 1, {
     timeout: 15_000,
     message: 'CANTEEN-01 back, its first heartbeat held in the server-up flow',
   });
@@ -295,7 +295,7 @@ test('16.4 hold at the platform: the message waits there while the server is off
   // back to realtime: everything held goes on
   const realtime = lab.setSim({ mode: 'realtime' });
   assert.deepEqual(realtime.held, []);
-  await waitFor(() => inTrace(on.trace, 'intake.accepted', (e) => e.data.device === 'CANTEEN-01' && e.data.type === 'device.heartbeat').length === 1, {
+  await waitFor(() => inTrace(on.trace, 'intake.accepted', (e) => e.school === SMK && e.data.device === 'CANTEEN-01' && e.data.type === 'device.heartbeat').length === 1, {
     message: 'the heartbeat in the server-up flow',
   });
   assert.equal(posted().length, 1, 'counted once');
