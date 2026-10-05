@@ -669,6 +669,48 @@ test('broker logins join their flow: a pull, a plug and its first heartbeat, the
   await booksBalance();
 });
 
+test('a refused login of a made-up machine is in no flow, even while the server comes up (only the lab\'s machines are)', NET, async () => {
+  await lab.reset();
+  await lab.setServer({ up: false });
+  // the platform takes its time coming back: the broker is open, and the server-on is still opening it
+  const { platform } = lab;
+  const connectMqtt = platform.connectMqtt;
+  let release;
+  const late = new Promise((resolve) => {
+    release = resolve;
+  });
+  platform.connectMqtt = async (...args) => {
+    await late;
+    return connectMqtt(...args);
+  };
+  const username = `${SMK}.CANTEEN-99`; // no machine of the lab, nor of the platform
+  let on;
+  try {
+    on = lab.setServer({ up: true });
+    await waitFor(() => lab.broker !== null, { message: 'the broker open' });
+    const mark = lab.ctx.events.lastSeq();
+    const outsider = mqtt.connect(lab.broker.url, { username, password: 'a-guess', clientId: username, reconnectPeriod: 0, connectTimeout: 10_000 });
+    outsider.on('error', () => {});
+    try {
+      await waitFor(() => eventsSince(mark, 'mqtt.denied', (e) => e.data.username === username).length === 1, { timeout: 10_000, message: 'the refusal' });
+    } finally {
+      outsider.end(true);
+    }
+    const [denied] = eventsSince(mark, 'mqtt.denied', (e) => e.data.username === username);
+    assert.equal(denied.trace, undefined, JSON.stringify(denied));
+  } finally {
+    platform.connectMqtt = connectMqtt;
+    release();
+  }
+  const answer = await on;
+  // the lab's own machines that knocked meanwhile are the server-on's
+  await waitFor(() => inTrace(answer.trace, 'mqtt.connect', (e) => e.data.username === `${SMK}.CANTEEN-01`).length === 1, {
+    timeout: 15_000,
+    message: "CANTEEN-01's login in the server-on flow",
+  });
+  await booksBalance();
+});
+
 test('broker.status: every one the lab emits says why with a stable code next to the English reason', NET, async () => {
   const mark = lab.ctx.events.lastSeq();
   await lab.reset();
@@ -705,6 +747,21 @@ test("the cross-device-publish fault: the copied login, the machine knocked off,
     ['mqtt.connect', reader, null], // the real reader back
   ]);
   assert.equal(machine('CANTEEN-01').connected, true);
+  await booksBalance();
+});
+
+test('a cross-device publish to a made-up machine code still runs (the broker refuses it); its subject cuts the code to fit', NET, async () => {
+  const toDevice = `X${'Y'.repeat(149)}`; // no such machine: the fault takes the code as given
+  const cross = await lab.fault({ type: 'cross-device-publish', schoolCode: SMK, deviceCode: 'CANTEEN-01', toDeviceCode: toDevice });
+  assert.equal(cross.ok, true, cross.summary);
+  assert.deepEqual(lab.tracer.get(cross.trace).trace.subject, {
+    fault: 'cross-device-publish',
+    school: SMK,
+    device: 'CANTEEN-01',
+    toSchool: SMK,
+    toDevice: `${toDevice.slice(0, 119)}…`,
+  });
+  await waitFor(() => machine('CANTEEN-01').connected, { timeout: 15_000, message: 'the real reader back' });
   await booksBalance();
 });
 

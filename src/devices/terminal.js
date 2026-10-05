@@ -403,7 +403,7 @@ export class Terminal {
    * broker's report of it (mqtt.connect, mqtt.disconnect):
    * - 'connect': the flow kept for the next connection by a cable plug or traceNextConnect().
    *   The post-connect routine does not use it up (the broker may report the login after it
-   *   started); it lasts until connectTraceMs is over.
+   *   started); it lasts until connectTraceMs is over, or until that connection is lost.
    * - 'disconnect': the flow that pulled the cable or switched the machine off (setCable(false),
    *   stop()), for DISCONNECT_TRACE_MS (5 s), and only until the machine is connected again.
    * - anything else: null.
@@ -435,7 +435,8 @@ export class Terminal {
 
   /**
    * The kept flow for this post-connect routine, if still fresh, and only for the first
-   * routine after it was kept. It stays for linkContext('connect') until it expires.
+   * routine after it was kept. It stays for linkContext('connect') until it expires or the
+   * connection ends (#onClose).
    */
   #takeConnectContext() {
     const kept = this.#connectContext;
@@ -541,7 +542,12 @@ export class Terminal {
         // the client's store is already closed: nothing left to resend
       }
     }
-    if (client === this.#client) this.#stopHeartbeat();
+    if (client === this.#client) {
+      this.#stopHeartbeat();
+      // The connection a plug or traceNextConnect() kept its flow for is over: a later login
+      // (after a kick, say) is not that flow's doing (linkContext('connect')).
+      if (this.#connectContext?.used) this.#connectContext = null;
+    }
   }
 
   #startHeartbeat(client) {

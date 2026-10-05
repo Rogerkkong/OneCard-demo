@@ -393,3 +393,55 @@ test('12.6 Simulation: an add with its cable plugged in replays as one flow: reg
   ok(await lab$.post('/api/lab/sim', { mode: 'realtime' }));
   await booksBalance();
 });
+
+test('12.7 a reset removes what the lab console added, and an add the reset overtakes answers LAB_BUSY (503)', NET, async () => {
+  await lab.reset();
+  ok(await lab$.post('/api/lab/schools', { name: 'SMK Awal (fictional)', code: 'smk-awal', students: 1 }));
+  ok(await lab$.post('/api/lab/devices', { schoolCode: SMK, type: 'CANTEEN' }));
+  await lab.reset();
+  assert.equal(await siteOf('smk-awal'), undefined, 'the added school is gone');
+  assert.deepEqual([...lab.terminals.keys()].filter((k) => k.startsWith('smk-awal/') || k === `${SMK}/CANTEEN-03`), []);
+  assert.deepEqual([...lab.cards.keys()].filter((k) => k.startsWith('smk-awal/')), []);
+  assert.equal(await nextCode(SMK, 'CANTEEN'), 'CANTEEN-03');
+
+  // The platform registers, then answers late (as while it waits for the broker): a reset gets in
+  // between, and the machines the adds were waiting for belong to the old demo.
+  const { platform } = lab;
+  const original = { registerDevice: platform.registerDevice, createTenant: platform.createTenant };
+  let release;
+  const late = new Promise((resolve) => {
+    release = resolve;
+  });
+  platform.registerDevice = async (args) => {
+    const out = await original.registerDevice(args);
+    await late;
+    return out;
+  };
+  platform.createTenant = async (args) => {
+    const out = await original.createTenant(args);
+    await late;
+    return out;
+  };
+  try {
+    const adds = Promise.allSettled([
+      lab.addDevice({ schoolCode: SMK, type: 'WATER' }),
+      lab.addSchool({ code: 'smk-lewat', name: 'SMK Lewat (fictional)', students: 0 }),
+    ]);
+    await waitFor(() => machine(`${SMK}/WATER-02`) && machine('smk-lewat/KIOSK-01'), { message: 'both adds installed' });
+    const resetting = lab.reset();
+    await waitFor(() => !machine(`${SMK}/WATER-02`) && !machine('smk-lewat/KIOSK-01'), { message: 'the reset took them away' });
+    release();
+    const [device, school] = await adds;
+    for (const [what, outcome] of [['add machine', device], ['add school', school]]) {
+      assert.equal(outcome.status, 'rejected', what);
+      assert.deepEqual([outcome.reason.code, outcome.reason.status], ['LAB_BUSY', 503], `${what}: ${outcome.reason.message}`);
+    }
+    await resetting;
+  } finally {
+    Object.assign(platform, original);
+    release();
+  }
+  assert.equal(await siteOf('smk-lewat'), undefined);
+  assert.equal(machine(`${SMK}/WATER-02`), undefined);
+  await booksBalance();
+});

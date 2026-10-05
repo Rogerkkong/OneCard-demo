@@ -729,7 +729,7 @@ export function createLab(options = {}) {
    * the broker reports it in that flow. First the copied login of a fault while it runs; then a
    * machine's own (a cable plug or pull, a reboot, the next connect a server action keeps for
    * it); then, for the machines and the platform, the server or broker action opening or
-   * closing the broker right now. Anyone else (the viewer) is in no flow.
+   * closing the broker right now. Anyone else (the viewer, a made-up machine name) is in no flow.
    * @param {string|null} username
    * @param {'connect'|'disconnect'|'denied'} event
    * @returns {{ trace: string } | null}
@@ -741,8 +741,9 @@ export function createLab(options = {}) {
     if (copied) return copied;
     if (username !== PLATFORM_USERNAME) {
       const codes = parseDeviceUsername(username);
-      if (!codes) return null;
-      const own = known(terminals.get(machineKey(codes.schoolCode, codes.deviceCode))?.linkContext(event));
+      const machine = codes ? terminals.get(machineKey(codes.schoolCode, codes.deviceCode)) : undefined;
+      if (!machine) return null; // not one of the lab's machines
+      const own = known(machine.linkContext(event));
       if (own) return own;
     }
     return known(brokerFlow);
@@ -1967,6 +1968,8 @@ export function createLab(options = {}) {
       throw new LabError('INPUT_INVALID', 'name another machine to publish to (toDeviceCode, toSchoolCode)', 400);
     }
     const what = `${keyOf(machine)} publishes on the topic of ${targetSchool}/${targetDevice}`;
+    // toDeviceCode is taken as given (whatever it is, the broker refuses the publish); the
+    // subject cuts it to fit (subjectText)
     return faultAct('cross-device-publish', what, traceOf(machine), async () => {
       const username = `${machine.schoolCode}.${machine.deviceCode}`;
       const topic = topicFor(targetSchool, targetDevice, 'records');
@@ -2084,7 +2087,7 @@ export function createLab(options = {}) {
         machineOfflineMs: offlineMs,
         summary,
       };
-    }, faultMachine(machine), { toSchool: targetSchool, toDevice: targetDevice });
+    }, faultMachine(machine), { toSchool: targetSchool, toDevice: subjectText(targetDevice) });
   }
 
   async function crossSchoolCard({ schoolCode, uid, toSchoolCode, deviceCode, items, ml } = {}) {
@@ -2246,7 +2249,10 @@ export function createLab(options = {}) {
       cableAtInstall.delete(key);
     }
     const machine = terminals.get(key);
-    if (!machine) throw new Error(`the lab could not install ${key}`);
+    if (!machine) {
+      requireRunning(); // a reset (or stop) took it away meanwhile: LAB_BUSY or LAB_NOT_RUNNING (503)
+      throw new Error(`the lab could not install ${key}`);
+    }
     if (plug) await machine.setCable(true);
     emit('lab.action', { action: 'add-device', device: deviceCode, type: kind, cablePlugged: machine.cablePlugged }, school.code);
     return { machine: machineView(machine) };
@@ -2339,7 +2345,10 @@ export function createLab(options = {}) {
     }
     const views = keys.map((key) => {
       const machine = terminals.get(key);
-      if (!machine) throw new Error(`the lab could not install ${key}`);
+      if (!machine) {
+        requireRunning(); // a reset (or stop) took it away meanwhile: LAB_BUSY or LAB_NOT_RUNNING (503)
+        throw new Error(`the lab could not install ${key}`);
+      }
       return machineView(machine);
     });
     emit('lab.action', { action: 'add-school', school: out.school.code, machines: views.length, students: out.members.length }, out.school.code);

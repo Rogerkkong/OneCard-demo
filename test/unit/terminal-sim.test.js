@@ -723,6 +723,34 @@ describe('the flow of a connection', () => {
     assert.equal(at(5500), null);
   });
 
+  test('linkContext: the login flow ends with the connection it was kept for; a login after a kick is in none', NET, async (t) => {
+    const net = await startNet(t, [READER]);
+    const reader = net.build(CanteenReader, READER, { cablePlugged: false, reconnectMs: 20 });
+    reader.provision(INSTALL);
+    await reader.start();
+    await net.ctx.events.withContext({ trace: 'tr_plug' }, () => reader.setCable(true));
+    assert.equal(reader.connected, true);
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug' });
+
+    // the broker throws it off (its school suspended, say) and it knocks again by itself, well
+    // inside connectTraceMs: that login is not the plug's doing
+    const username = `${READER.school}.${READER.code}`;
+    const mark = net.ctx.events.lastSeq();
+    assert.equal(net.broker.kick(username), 1);
+    await waitFor(() => reader.connected && net.ctx.events.since(mark).some((e) => e.type === 'mqtt.connect' && e.data.username === username), {
+      message: 'back on the broker',
+    });
+    assert.equal(reader.linkContext('connect'), null);
+
+    // a failed attempt does not end it: plugged in a flow while the broker refuses it, the flow
+    // still waits for the connection that comes up
+    await net.ctx.events.withContext({ trace: 'tr_pull' }, () => reader.setCable(false));
+    await net.broker.close();
+    await net.ctx.events.withContext({ trace: 'tr_plug2' }, () => reader.setCable(true));
+    assert.equal(reader.connected, false);
+    assert.deepEqual(reader.linkContext('connect'), { trace: 'tr_plug2' });
+  });
+
   test('a machine started inside a flow does not keep it: its connection, PUBACKs and commands run in none', NET, async (t) => {
     const net = await startNet(t, [READER]);
     const reader = net.build(CanteenReader, READER);
