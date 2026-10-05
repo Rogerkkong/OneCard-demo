@@ -12,13 +12,15 @@ import { AdminCard } from '../devices/adminCard.js';
 import { FIRMWARE_VERSION } from '../devices/terminal.js';
 import { createClock, DEFAULT_LAB_START } from '../shared/clock.js';
 import { createEventBus } from '../shared/events.js';
-import { LabError } from '../shared/errors.js';
+import { LabError, isLabError } from '../shared/errors.js';
 import { brokerPassword, normalizeUid, randomSecret, signEnvelope, signPayload } from '../shared/crypto.js';
+import { newId } from '../shared/ids.js';
 import { formatRM, isSen } from '../shared/money.js';
 import { CONFIG_KINDS, buildEnvelope, topicFor } from '../shared/protocol.js';
-import { DAY, formatKL } from '../shared/time.js';
+import { DAY, HOUR, MINUTE, formatKL } from '../shared/time.js';
 import { START_PLAN, seedDemo } from './seed.js';
 import { startConsoleServer } from './telnet.js';
+import { createTracer } from './trace.js';
 
 // The lab (docs/DESIGN.md §8). One process holds the whole virtual system: the virtual cloud
 // server (MQTT broker, platform with its database, the web apps) and every school's site (its
@@ -34,6 +36,13 @@ import { startConsoleServer } from './telnet.js';
 // It follows the platform's events, so a school onboarded in the operator console comes alive
 // at once: device.registered installs the machine, card.issued makes the card, tenant.created
 // gives the school its admin card.
+//
+// Simulation mode (DESIGN §11): every action runs in a trace of its own, so each event it
+// causes, across the MQTT and HTTP hops, carries the trace id and the lab console can replay
+// the flow. In simulation mode with "hold at each hop" on, a traced flow really waits at the
+// hold points (a machine's outbox, the kiosk's API calls, the platform's inbox) until the
+// person presses Next, and the action answers early ({ held: true, trace, ... }). Untraced
+// traffic never waits, and with hold off nothing behaves differently.
 
 /** Faults the lab can inject (DESIGN §8), besides the kiosk faults a tap takes. */
 export const LAB_FAULTS = Object.freeze([
@@ -50,6 +59,15 @@ export const LAB_FAULTS = Object.freeze([
 ]);
 /** Faults of a kiosk tap (TopupKiosk), accepted by fault() too. */
 export const KIOSK_TAP_FAULTS = Object.freeze(['power-cut-before-commit', 'power-cut-after-commit', 'confirm-timeout']);
+/** Simulation mode (DESIGN §11.4): realtime (nothing waits) or simulation (hold at each hop can be switched on). */
+export const SIM_MODES = Object.freeze(['realtime', 'simulation']);
+
+// What a kiosk fault does, in the words of a trace title.
+const KIOSK_FAULT_TITLES = Object.freeze({
+  'power-cut-before-commit': 'power cut before the card write',
+  'power-cut-after-commit': 'power cut after the card write',
+  'confirm-timeout': 'the confirmation is lost',
+});
 
 const VIEWER = Object.freeze({ username: 'viewer', password: 'viewer' }); // public read-only broker login (README)
 const HEARTBEAT_ONLINE_MS = 90_000;
@@ -150,6 +168,10 @@ function labOptions(options) {
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('heartbeatMs must be a whole number of milliseconds');
   const jobsMs = o.jobsMs ?? 5000;
   if (!Number.isSafeInteger(jobsMs) || jobsMs < 0) throw new TypeError('jobsMs must be a whole number of milliseconds (0 = no timer)');
+  const reconnectMs = o.reconnectMs ?? null; // null: the machines' own default
+  if (reconnectMs !== null && (!Number.isSafeInteger(reconnectMs) || reconnectMs < 1 || reconnectMs > 60_000)) {
+    throw new TypeError('reconnectMs must be a whole number of milliseconds, 1 to 60000');
+  }
   if (o.tls != null && (!isPlainObject(o.tls) || !o.tls.key || !o.tls.cert)) throw new TypeError('tls needs { key, cert } (PEM) and optionally port');
   return {
     httpPort: port('httpPort', o.httpPort, 8080),
@@ -160,6 +182,7 @@ function labOptions(options) {
     startAt: o.startAt ?? DEFAULT_LAB_START,
     heartbeatMs,
     jobsMs,
+    reconnectMs,
     tls: o.tls ?? null,
     log: typeof o.log === 'function' ? o.log : defaultLog,
   };
@@ -206,6 +229,24 @@ function parseMl(ml) {
   return n;
 }
 
+/** A promise, or anything that can be awaited like one. */
+function isThenable(value) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function';
+}
+
+/** A clock step in plain words for a trace title: '15 days', '1 h 30 min', '5 s'. */
+function durationText(ms) {
+  const parts = [];
+  let left = ms;
+  for (const [size, one, many] of [[DAY, 'day', 'days'], [HOUR, 'h', 'h'], [MINUTE, 'min', 'min'], [1000, 's', 's']]) {
+    const n = Math.floor(left / size);
+    left -= n * size;
+    if (n > 0) parts.push(`${n} ${n === 1 ? one : many}`);
+  }
+  if (left > 0) parts.push(`${left} ms`);
+  return parts.join(' ');
+}
+
 /**
  * Build the lab. Nothing listens until start().
  * @param {object} [options]
@@ -217,6 +258,8 @@ function parseMl(ml) {
  * @param {number} [options.startAt]  lab time at start (default Mon 05/10/2026 10:00 KL)
  * @param {number} [options.heartbeatMs]  machine heartbeat period (default 15000)
  * @param {number} [options.jobsMs]  scheduled jobs period (default 5000; 0 = no timer)
+ * @param {number} [options.reconnectMs]  a machine's first retry after losing the broker (default
+ *   the machines' own, 1 s; it doubles up to 10 s): lower in tests that switch the server off
  * @param {{ port?: number, key: string, cert: string }} [options.tls]  optional MQTT TLS listener
  * @param {(level: string, message: string, meta?: object) => void} [options.log]  default: errors to stderr
  */
@@ -228,6 +271,8 @@ export function createLab(options = {}) {
   const db = dbRef.db;
   // db first: events emitted inside a transaction are delivered after the commit
   const events = createEventBus({ clock, db, keep: EVENTS_KEPT });
+  // every action and product request starts a trace (DESIGN §11.3); server.js reads lab.tracer
+  const tracer = createTracer(events, { clock });
   const ctx = {
     db,
     clock,
@@ -263,6 +308,11 @@ export function createLab(options = {}) {
   const adminCards = new Map(); // school code -> AdminCard
   const lastResults = new Map(); // machine key -> what its last tap or action came to (for state())
 
+  // Simulation mode (DESIGN §11.4): the mode, whether traced flows wait at each hop, and what waits.
+  const sim = { mode: 'realtime', hold: false };
+  const held = []; // [{ item, release }], oldest first
+  const holdWatchers = new Map(); // trace id -> callbacks of the actions racing their first hold
+
   const services = () => platform.services;
   const loopback = reachableHost(config.host);
   const machineBrokerUrl = () => `mqtt://${loopback}:${brokerPort}`;
@@ -285,6 +335,238 @@ export function createLab(options = {}) {
     const run = lock.then(fn);
     lock = run.catch(() => {});
     return run;
+  }
+
+  // ---- Simulation mode: traces and live stepping (DESIGN §11.3, §11.4) -------------------
+  //
+  // Each action begins its trace before it starts (act()), so even a hold reached before its
+  // first await belongs to it. The gates hold only a flow of a trace the tracer knows, and only
+  // in simulation mode with hold on; everything else (periodic heartbeats, the jobs timer,
+  // automatic reconnects, untraced command acks at the machine) passes, synchronously.
+
+  const holding = () => phase === 'running' && sim.mode === 'simulation' && sim.hold;
+
+  /** Emit in exactly this trace (not in the caller's message context). */
+  function emitInTrace(trace, type, data, schoolCode) {
+    events.untraced(() => events.withContext({ trace }, () => emit(type, data, schoolCode)));
+  }
+
+  /**
+   * Hold one hop of a traced flow until the person lets it go: a held item, announced as
+   * sim.held inside its trace. @returns {Promise<void>} what the gate hands back to wait for
+   */
+  function hold({ trace, where, device, school, ...more }) {
+    const item = { id: newId('held'), trace, where, device: device ?? null, school: school ?? null };
+    for (const key of ['type', 'msgId', 'call', 'txn', 'topic', 'method', 'path']) {
+      if (typeof more[key] === 'string' && more[key] !== '') item[key] = more[key];
+    }
+    item.at = clock.now();
+    let release;
+    const waiting = new Promise((resolve) => {
+      release = resolve;
+    });
+    held.push({ item, release });
+    emitInTrace(trace, 'sim.held', { ...item }, item.school);
+    for (const notify of [...(holdWatchers.get(trace) ?? [])]) {
+      try {
+        notify(item);
+      } catch (err) {
+        note('error', 'a held action could not be told', { error: err?.message });
+      }
+    }
+    return waiting;
+  }
+
+  /** Let one held item go on (sim.released inside its trace first, so the replay reads in order). */
+  function letGo(entry) {
+    const at = held.indexOf(entry);
+    if (at < 0) return false; // already let go (a reset, a stop)
+    held.splice(at, 1);
+    emitInTrace(entry.item.trace, 'sim.released', { id: entry.item.id }, entry.item.school);
+    entry.release();
+    return true;
+  }
+
+  // A message held at the platform's inbox is with the platform: it goes on only while the
+  // platform runs, i.e. while the cloud server is on.
+  const releasable = (entry) => entry.item.where !== 'platform' || serverUp;
+
+  /** The hold point of every machine's outbox and of the kiosk's API calls (Terminal option gate). */
+  function machineGate(info) {
+    if (!holding()) return undefined;
+    const trace = events.context()?.trace;
+    if (!trace || !tracer.has(trace)) return undefined;
+    if (info?.kind === 'http') {
+      return hold({ trace, where: 'kiosk-http', device: info.device, school: info.school, call: info.call, method: info.method, path: info.path });
+    }
+    return hold({ trace, where: 'machine', device: info?.device, school: info?.school, type: info?.type, msgId: info?.msgId, txn: info?.txn, topic: info?.topic });
+  }
+
+  /** The hold point of the platform's inbox: a message whose flow the tracer knows (by its id). */
+  function inboxGate(info) {
+    if (!holding()) return undefined;
+    const trace = tracer.traceOfMessage(info?.msgId);
+    if (!trace) return undefined;
+    return hold({ trace, where: 'platform', device: info.device, school: info.school, type: info.type, msgId: info.msgId, topic: info.topic });
+  }
+
+  /**
+   * The inbox gate is installed only while hold is on: the platform reads every message's type
+   * and id for its gate, and with no gate a message goes to intake exactly as in realtime.
+   * Messages already held keep waiting for their release either way.
+   */
+  function syncInboxGate() {
+    platform.setInboxGate(sim.hold ? inboxGate : null);
+  }
+
+  /** Call `notify(item)` when this trace holds something. @returns {() => void} stop watching */
+  function watchHolds(trace, notify) {
+    let set = holdWatchers.get(trace);
+    if (!set) holdWatchers.set(trace, (set = new Set()));
+    set.add(notify);
+    return () => {
+      set.delete(notify);
+      if (set.size === 0 && holdWatchers.get(trace) === set) holdWatchers.delete(trace);
+    };
+  }
+
+  /**
+   * Run one lab action in a trace of its own (DESIGN §11.3). An async action races its first
+   * hold (§11.4): held first, it answers `{ held: true, trace, item, ...partial(item) }` at once
+   * and finishes in the background (its lab.action event comes when it does; a failure then is
+   * logged and reported as lab.action { ok: false }). Otherwise it answers as always, with
+   * `trace` added to an object answer (unless `tag` is false: a USB file stays the file).
+   * @param {{ kind: string, title: string, school?: string|null, device?: string|null }} meta
+   * @param {() => unknown} fn
+   * @param {{ partial?: (item: object) => object, tag?: boolean, action?: object }} [options]
+   *   action: what lab.action says of a late failure (default { action: meta.kind })
+   */
+  function act(meta, fn, { partial, tag = true, action } = {}) {
+    const trace = tracer.begin(meta);
+    const tagged = (value) => (tag && isPlainObject(value) && !Object.hasOwn(value, 'trace') ? { ...value, trace } : value);
+    let firstHold;
+    const heldFirst = new Promise((resolve) => {
+      firstHold = resolve;
+    });
+    // watching before the action starts: a hop can hold it before its first await
+    const stopWatching = watchHolds(trace, (item) => firstHold(item));
+    let outcome;
+    try {
+      outcome = events.withContext({ trace }, fn);
+    } catch (err) {
+      stopWatching();
+      throw err;
+    }
+    if (!isThenable(outcome)) {
+      stopWatching();
+      return tagged(outcome);
+    }
+    return new Promise((resolve, reject) => {
+      let answered = false;
+      heldFirst.then((item) => {
+        if (answered) return;
+        answered = true;
+        let extra = {};
+        try {
+          extra = partial ? partial(item) : {};
+        } catch (err) {
+          note('warn', 'could not describe a held action', { trace, error: err?.message });
+        }
+        resolve({ held: true, trace, ...extra, item: { ...item } });
+      });
+      Promise.resolve(outcome).then(
+        (value) => {
+          stopWatching();
+          if (answered) return;
+          answered = true;
+          resolve(tagged(value));
+        },
+        (err) => {
+          stopWatching();
+          if (!answered) {
+            answered = true;
+            reject(err);
+            return;
+          }
+          // the person already has the early answer: the failure goes to the log and the trace
+          note(isLabError(err) ? 'info' : 'error', `${meta.title}: failed after it was held`, { trace, error: err?.message });
+          const data = { ...(action ?? { action: meta.kind }), ok: false, code: isLabError(err) ? err.code : 'INTERNAL' };
+          data.message = String(err?.message ?? err).slice(0, 200);
+          emitInTrace(trace, 'lab.action', data, meta.school ?? null);
+        },
+      );
+    });
+  }
+
+  /** @returns {{ mode: 'realtime'|'simulation', hold: boolean, held: object[] }} copies; held: oldest first */
+  function simState() {
+    return { mode: sim.mode, hold: sim.hold, held: held.map((e) => ({ ...e.item })) };
+  }
+
+  function announceMode() {
+    events.untraced(() => emit('sim.mode', { mode: sim.mode, hold: sim.hold }));
+  }
+
+  /** Let every releasable item go on, oldest first. @returns {number} how many */
+  function releaseReleasable() {
+    let n = 0;
+    for (const entry of held.filter(releasable)) if (letGo(entry)) n += 1;
+    return n;
+  }
+
+  /**
+   * Switch Simulation mode (DESIGN §11.4): `mode` 'realtime' | 'simulation', `hold` true | false
+   * (hold only in simulation mode; realtime turns it off). Turning hold off, or going back to
+   * realtime, lets everything releasable go on. Emits sim.mode when something changed.
+   * Code: INPUT_INVALID (400).
+   * @param {{ mode?: string, hold?: boolean }} args
+   * @returns {{ mode: string, hold: boolean, held: object[] }} the new state
+   */
+  function setSim(args = {}) {
+    if (!isPlainObject(args)) throw new LabError('INPUT_INVALID', 'give { mode, hold }', 400);
+    const { mode, hold: wantHold } = args;
+    if (mode === undefined && wantHold === undefined) {
+      throw new LabError('INPUT_INVALID', "give mode ('realtime' or 'simulation'), hold (true or false), or both", 400);
+    }
+    if (mode !== undefined && !SIM_MODES.includes(mode)) throw new LabError('INPUT_INVALID', "mode must be 'realtime' or 'simulation'", 400);
+    if (wantHold !== undefined && typeof wantHold !== 'boolean') throw new LabError('INPUT_INVALID', 'hold must be true or false', 400);
+    const nextMode = mode ?? sim.mode;
+    if (nextMode === 'realtime' && wantHold === true) {
+      throw new LabError('INPUT_INVALID', 'hold at each hop works only in simulation mode: switch to simulation first', 400);
+    }
+    const nextHold = nextMode === 'simulation' && (wantHold ?? sim.hold);
+    const changed = nextMode !== sim.mode || nextHold !== sim.hold;
+    sim.mode = nextMode;
+    sim.hold = nextHold;
+    syncInboxGate();
+    if (changed) announceMode();
+    if (!sim.hold) releaseReleasable();
+    return simState();
+  }
+
+  /**
+   * Let the oldest releasable item go on (a platform item only while the server is up).
+   * @returns {{ released: object|null, waiting: number }}  waiting: items still held
+   */
+  function simNext() {
+    const entry = held.find(releasable);
+    if (entry) letGo(entry);
+    return { released: entry ? { ...entry.item } : null, waiting: held.length };
+  }
+
+  /** Let every releasable item go on, oldest first. @returns {{ released: number }} */
+  function simRelease() {
+    return { released: releaseReleasable() };
+  }
+
+  /** Reset and stop: realtime again, and everything goes on (a platform item too: nothing may wait for ever). */
+  function backToRealtime() {
+    const changed = sim.mode !== 'realtime' || sim.hold;
+    sim.mode = 'realtime';
+    sim.hold = false;
+    syncInboxGate();
+    if (changed) announceMode();
+    for (const entry of [...held]) letGo(entry);
   }
 
   function requireRunning() {
@@ -335,14 +617,18 @@ export function createLab(options = {}) {
 
   async function openBroker() {
     const tls = config.tls ? { key: config.tls.key, cert: config.tls.cert, port: tlsPort } : undefined;
-    const started = await startBroker(ctx, {
-      host: config.host,
-      port: brokerPort,
-      tls,
-      resolveDevice: machineLogin,
-      platformPassword: ctx.settings.platformBrokerPassword,
-      viewer: ctx.settings.viewer,
-    });
+    // Untraced: the broker outlives the action that starts it, and its connection handler
+    // would otherwise hand that action's trace to every later login (DESIGN §11.1).
+    const started = await events.untraced(() =>
+      startBroker(ctx, {
+        host: config.host,
+        port: brokerPort,
+        tls,
+        resolveDevice: machineLogin,
+        platformPassword: ctx.settings.platformBrokerPassword,
+        viewer: ctx.settings.viewer,
+      }),
+    );
     // a restarted broker comes back on the same port, so machines and MQTT Explorer find it again
     brokerPort = started.port;
     if (started.tlsPort) tlsPort = started.tlsPort;
@@ -392,13 +678,34 @@ export function createLab(options = {}) {
       heartbeatMs: config.heartbeatMs,
       cablePlugged,
       log: ctx.log,
+      gate: machineGate,
     };
+    if (config.reconnectMs !== null) options.reconnectMs = config.reconnectMs;
     let machine;
     if (device.type === 'CANTEEN') machine = new CanteenReader(options);
     else if (device.type === 'WATER') machine = new WaterMachine(options);
     else {
-      const api = createKioskApi({ baseUrl: httpUrl, schoolCode, deviceCode: device.code, secret, clock });
+      let kiosk = null; // the API is built first: the kiosk takes it in its constructor
+      const api = createKioskApi({
+        baseUrl: httpUrl,
+        schoolCode,
+        deviceCode: device.code,
+        secret,
+        clock,
+        // No network without the kiosk's cable, and none while the cloud server is off: a
+        // switched-off server answers nothing (NETWORK), as DESIGN §11.4 says. The lab's web
+        // server keeps running for the lab console, but its 503 is not the platform talking.
+        // Nor for a kiosk a reset has taken away: a visit it still finishes (one let go by the
+        // reset) must not reach the new demo's platform.
+        online: () => serverUp && kiosk?.cablePlugged === true && terminals.get(key) === kiosk,
+        // the flow a call belongs to, so the platform's side of it joins the trace (DESIGN §11.3)
+        headers: () => {
+          const trace = events.context()?.trace;
+          return trace ? { 'x-lab-trace': trace } : {};
+        },
+      });
       machine = new TopupKiosk({ ...options, api });
+      kiosk = machine;
     }
     // Terminal.provision skips a kind never published (version 0); what it installed is recorded
     const { configs } = services();
@@ -639,14 +946,17 @@ export function createLab(options = {}) {
 
   function startJobs() {
     if (config.jobsMs === 0 || jobsTimer) return;
-    jobsTimer = setInterval(() => {
-      if (phase !== 'running' || !serverUp) return; // nothing runs on a switched-off server
-      try {
-        platform.runJobs();
-      } catch (err) {
-        note('error', 'scheduled jobs failed', { error: err?.message });
-      }
-    }, config.jobsMs);
+    // untraced: each run of the timer is nobody's action
+    jobsTimer = events.untraced(() =>
+      setInterval(() => {
+        if (phase !== 'running' || !serverUp) return; // nothing runs on a switched-off server
+        try {
+          platform.runJobs();
+        } catch (err) {
+          note('error', 'scheduled jobs failed', { error: err?.message });
+        }
+      }, config.jobsMs),
+    );
     jobsTimer.unref?.();
   }
 
@@ -686,85 +996,102 @@ export function createLab(options = {}) {
    * @returns {Promise<{ httpUrl: string, mqttUrl: string, mqttTlsUrl?: string, consoleAddress?: string }>}
    */
   function start() {
-    return exclusive(async () => {
-      if (phase !== 'new') throw new LabError('LAB_ALREADY_STARTED', 'this lab was already started', 409);
-      phase = 'starting';
-      try {
-        unsubscribe = events.subscribe(onPlatformEvent);
-        seedInfo = seedDemo(platform);
-        await openBroker();
-        await platform.connectMqtt(broker.url);
-        serverUp = true;
-        emit('server.status', { up: true });
-        // loaded here, so the lab's modules load (and the console tests run) on their own
-        const { createHttpServer } = await import('../http/server.js');
-        http = createHttpServer({ lab });
-        const listening = await http.listen(config.httpPort, config.host);
-        httpUrl = `http://${loopback}:${listening.port}`;
-        if (config.consolePort !== 0) consoleServer = await startConsoleServer(lab, { host: config.host, port: config.consolePort });
-        await buildWorld();
-        startJobs();
-        phase = 'running';
-        return urls();
-      } catch (err) {
-        phase = 'stopping';
-        await teardown();
-        phase = 'stopped';
-        throw err;
-      }
-    });
+    // Untraced: the servers, clients and timers made here outlive any flow (DESIGN §11.1).
+    return exclusive(() =>
+      events.untraced(async () => {
+        if (phase !== 'new') throw new LabError('LAB_ALREADY_STARTED', 'this lab was already started', 409);
+        phase = 'starting';
+        try {
+          unsubscribe = events.subscribe(onPlatformEvent);
+          seedInfo = seedDemo(platform);
+          await openBroker();
+          await platform.connectMqtt(broker.url);
+          serverUp = true;
+          emit('server.status', { up: true });
+          // loaded here, so the lab's modules load (and the console tests run) on their own
+          const { createHttpServer } = await import('../http/server.js');
+          http = createHttpServer({ lab });
+          const listening = await http.listen(config.httpPort, config.host);
+          httpUrl = `http://${loopback}:${listening.port}`;
+          if (config.consolePort !== 0) consoleServer = await startConsoleServer(lab, { host: config.host, port: config.consolePort });
+          await buildWorld();
+          startJobs();
+          phase = 'running';
+          return urls();
+        } catch (err) {
+          phase = 'stopping';
+          await teardown();
+          tracer.close();
+          phase = 'stopped';
+          throw err;
+        }
+      }),
+    );
   }
 
-  /** Stop everything and close every port, client and timer. */
+  /** Stop everything and close every port, client and timer. Nothing stays held. */
   function stop() {
+    // released before waiting for the lock: nothing may wait for a Next that never comes
+    backToRealtime();
     return exclusive(async () => {
+      // and again: hold may have been switched on, and something held, while stop() waited
+      backToRealtime();
       if (phase === 'stopped') return;
       if (phase === 'new') {
         phase = 'stopped';
+        tracer.close();
         db.close();
         return;
       }
       phase = 'stopping';
       await teardown();
+      tracer.close();
       phase = 'stopped';
     });
   }
 
   /**
    * Start the demo again from scratch, without closing the web apps or consoles: a fresh
-   * database, clock and broker, the seed, every machine and card, the starting money.
+   * database, clock and broker, the seed, every machine and card, the starting money. Back in
+   * realtime with nothing held, and no traces (they were of the old demo).
    */
   function reset() {
-    return exclusive(async () => {
-      requireRunning();
-      phase = 'resetting';
-      try {
-        await Promise.allSettled([...background]);
-        await Promise.allSettled([...terminals.values()].map((m) => m.stop()));
-        terminals.clear();
-        cards.clear();
-        copies.clear();
-        adminCards.clear();
-        lastResults.clear();
-        await platform.disconnectMqtt();
-        // a fresh broker too: no retained message of the old demo is left behind
-        await closeBroker('reset');
-        dbRef.swap(openDb(':memory:')).close();
-        clockRef.swap(createClock({ startAt: config.startAt, mode: config.clockMode }));
-        seedInfo = seedDemo(platform);
-        await openBroker();
-        await platform.connectMqtt(broker.url);
-        if (!serverUp) {
-          serverUp = true;
-          emit('server.status', { up: true });
-        }
-        await buildWorld();
-        emit('lab.action', { action: 'reset' });
-        return urls();
-      } finally {
-        phase = 'running';
+    backToRealtime();
+    return exclusive(() => events.untraced(() => resetNow()));
+  }
+
+  async function resetNow() {
+    requireRunning();
+    // again: hold may have been switched on, and something held, while reset() waited for the lab
+    backToRealtime();
+    phase = 'resetting';
+    tracer.clear();
+    try {
+      await Promise.allSettled([...background]);
+      await Promise.allSettled([...terminals.values()].map((m) => m.stop()));
+      terminals.clear();
+      cards.clear();
+      copies.clear();
+      adminCards.clear();
+      lastResults.clear();
+      await platform.disconnectMqtt();
+      // a fresh broker too: no retained message of the old demo is left behind
+      await closeBroker('reset');
+      dbRef.swap(openDb(':memory:')).close();
+      clockRef.swap(createClock({ startAt: config.startAt, mode: config.clockMode }));
+      seedInfo = seedDemo(platform);
+      await openBroker();
+      await platform.connectMqtt(broker.url);
+      if (!serverUp) {
+        serverUp = true;
+        emit('server.status', { up: true });
       }
-    });
+      await buildWorld();
+      emit('lab.action', { action: 'reset' });
+      return urls();
+    } finally {
+      phase = 'running';
+    }
   }
 
   // ---- lookups for the actions ---------------------------------------------------------------
@@ -836,6 +1163,8 @@ export function createLab(options = {}) {
 
   /** What a machine's last action came to; the screen never says why, the lab may. */
   function remember(machine, action, result) {
+    // a flow of a machine a reset has taken away (let go by the reset) ends in the old demo
+    if (terminals.get(machineKey(machine.schoolCode, machine.deviceCode)) !== machine) return;
     const entry = { action, ok: Boolean(result?.ok), at: clock.iso() };
     if (result?.reason) entry.reason = result.reason;
     if (result?.error) entry.error = result.error;
@@ -862,32 +1191,79 @@ export function createLab(options = {}) {
   }
 
   // ---- actions ---------------------------------------------------------------------------
+  //
+  // Each action first checks what it was given (a request that never started leaves no
+  // trace), then runs in a trace of its own (act()). The *Now functions do the work, so one
+  // action can use another inside its own trace (a cross-school card is a tap, a server fault
+  // switches the server) without starting a second one.
 
-  /**
-   * Tap a card on a machine: a canteen sale (`items`), a pour (`ml`) or a kiosk visit (`fault`
-   * optional). The card comes from the machine's school's tray, or from `cardSchoolCode`'s.
-   * @returns {Promise<object>} the machine's answer plus `machine` and `card` (balance after)
-   */
-  async function tap(args = {}) {
-    requireRunning();
+  const keyOf = (machine) => machineKey(machine.schoolCode, machine.deviceCode);
+  const traceOf = (machine) => ({ school: machine.schoolCode, device: machine.deviceCode });
+  /** What a machine action held at a hop answers early: the machine as it is now. */
+  const machinePartial = (machine) => () => ({ machine: machineView(machine) });
+
+  /** Check a tap: the machine, the card, what is bought or poured, the kiosk fault. */
+  function prepareTap(args) {
     const { schoolCode, deviceCode, uid, items, ml, fault, cardSchoolCode } = args ?? {};
     const machine = findMachine(schoolCode, deviceCode);
     const found = cardSchoolCode != null ? findCard({ onlySchool: cardSchoolCode }, uid) : findCard({ preferSchool: machine.schoolCode }, uid);
     if (fault != null && machine.deviceType !== 'KIOSK') {
       throw new LabError('FAULT_INVALID', 'power cuts and lost confirmations are kiosk faults: tap the card on a kiosk', 400);
     }
-    let result;
-    if (machine.deviceType === 'CANTEEN') result = await machine.tap(found.card, { items: parseItems(items) });
-    else if (machine.deviceType === 'WATER') result = await machine.tap(found.card, { ml: parseMl(ml) });
-    else result = await machine.tap(found.card, fault != null ? { fault } : {});
+    if (fault != null && !KIOSK_TAP_FAULTS.includes(fault)) {
+      throw new LabError('FAULT_INVALID', `fault must be one of ${KIOSK_TAP_FAULTS.join(', ')}`, 400);
+    }
+    let order = {};
+    if (machine.deviceType === 'CANTEEN') order = { items: parseItems(items) };
+    else if (machine.deviceType === 'WATER') order = { ml: parseMl(ml) };
+    else if (fault != null) order = { fault };
+    return { machine, found, order, fault: fault ?? null };
+  }
+
+  /** The tap itself, in the caller's trace. */
+  async function tapNow({ machine, found, order, fault }) {
+    const result = await machine.tap(found.card, order);
     remember(machine, fault ? `tap (${fault})` : 'tap', result);
-    const key = machineKey(machine.schoolCode, machine.deviceCode);
     const data = { action: 'tap', device: machine.deviceCode, uid: found.uid, ok: result.ok, screen: result.screen };
     if (found.schoolCode !== machine.schoolCode) data.cardSchool = found.schoolCode;
     if (result.reason) data.reason = result.reason;
     if (fault) data.fault = fault;
     emit('lab.action', data, machine.schoolCode);
-    return { ...result, machine: key, card: cardSummary(found) };
+    return { ...result, machine: keyOf(machine), card: cardSummary(found) };
+  }
+
+  /**
+   * What the machine has shown in this flow so far (null: nothing yet). Its last screen may be
+   * an earlier visitor's: a kiosk shows nothing until the end of a visit.
+   */
+  function screenOf(trace) {
+    const shown = (tracer.get(trace)?.events ?? []).filter((e) => e.type === 'device.screen');
+    return shown.at(-1)?.data?.text ?? null;
+  }
+
+  /** A tap held at a hop: what the machine has shown in this flow, and the card as it is now. */
+  const tapPartial = ({ machine, found }) => (item) => ({ machine: keyOf(machine), screen: screenOf(item.trace), card: cardSummary(found) });
+
+  function tapTitle({ machine, found, order, fault }) {
+    if (fault) return `Fault: ${KIOSK_FAULT_TITLES[fault]}, tap ${found.uid} on ${keyOf(machine)}`;
+    if (order.ml !== undefined) return `Tap ${found.uid} on ${keyOf(machine)} for ${order.ml} ml`;
+    return `Tap ${found.uid} on ${keyOf(machine)}`;
+  }
+
+  /**
+   * Tap a card on a machine: a canteen sale (`items`), a pour (`ml`) or a kiosk visit (`fault`
+   * optional). The card comes from the machine's school's tray, or from `cardSchoolCode`'s.
+   * @returns {Promise<object>} the machine's answer plus `machine` and `card` (balance after);
+   *   held at a hop: `{ held: true, trace, item, machine, screen, card }`
+   */
+  async function tap(args = {}) {
+    requireRunning();
+    const prepared = prepareTap(args);
+    const { machine, fault } = prepared;
+    return act({ kind: fault ? 'fault' : 'tap', title: tapTitle(prepared), ...traceOf(machine) }, () => tapNow(prepared), {
+      partial: tapPartial(prepared),
+      action: fault ? { action: 'tap', device: machine.deviceCode, fault } : { action: 'tap', device: machine.deviceCode },
+    });
   }
 
   /** Plug or pull a machine's network cable. */
@@ -896,8 +1272,29 @@ export function createLab(options = {}) {
     const { schoolCode, deviceCode, plugged } = args ?? {};
     if (typeof plugged !== 'boolean') throw new LabError('INPUT_INVALID', 'plugged must be true or false', 400);
     const machine = findMachine(schoolCode, deviceCode);
-    await machine.setCable(plugged);
-    return { machine: machineView(machine) };
+    const title = plugged ? `Plug in the cable of ${keyOf(machine)}` : `Pull the cable of ${keyOf(machine)}`;
+    // a plug's first heartbeat and upload belong to this trace (the machine keeps it, DESIGN §11.3)
+    return act(
+      { kind: 'cable', title, ...traceOf(machine) },
+      async () => {
+        await machine.setCable(plugged);
+        return { machine: machineView(machine) };
+      },
+      { partial: machinePartial(machine) },
+    );
+  }
+
+  /** An admin-card action held at a hop: what the machine has shown in this flow, and the admin card as it is now. */
+  const adminCardPartial = (card, machine) => (item) => ({
+    machine: keyOf(machine),
+    screen: screenOf(item.trace),
+    adminCard: adminCardSummary(card.schoolCode),
+  });
+
+  async function adminCardUploadNow(card, kiosk) {
+    const result = await kiosk.uploadAdminCardReceipts(card);
+    remember(kiosk, 'admin-card upload', result);
+    return { ...result, machine: keyOf(kiosk), adminCard: adminCardSummary(card.schoolCode) };
   }
 
   /** Load the school's admin card at its kiosk (the newest packs and a fresh token). */
@@ -906,9 +1303,15 @@ export function createLab(options = {}) {
     const { schoolCode, deviceCode } = args ?? {};
     const card = requireAdminCard(schoolCode);
     const kiosk = schoolKiosk(card.schoolCode, deviceCode);
-    const result = await kiosk.loadAdminCard(card);
-    remember(kiosk, 'admin-card load', result);
-    return { ...result, machine: machineKey(kiosk.schoolCode, kiosk.deviceCode), adminCard: adminCardSummary(card.schoolCode) };
+    return act(
+      { kind: 'admin-card', title: `Load the admin card of ${card.schoolCode} at ${keyOf(kiosk)}`, ...traceOf(kiosk) },
+      async () => {
+        const result = await kiosk.loadAdminCard(card);
+        remember(kiosk, 'admin-card load', result);
+        return { ...result, machine: keyOf(kiosk), adminCard: adminCardSummary(card.schoolCode) };
+      },
+      { partial: adminCardPartial(card, kiosk), action: { action: 'admin-card load', device: kiosk.deviceCode } },
+    );
   }
 
   /** Hand the admin card's receipts over at the kiosk, which uploads them. */
@@ -917,9 +1320,11 @@ export function createLab(options = {}) {
     const { schoolCode, deviceCode } = args ?? {};
     const card = requireAdminCard(schoolCode);
     const kiosk = schoolKiosk(card.schoolCode, deviceCode);
-    const result = await kiosk.uploadAdminCardReceipts(card);
-    remember(kiosk, 'admin-card upload', result);
-    return { ...result, machine: machineKey(kiosk.schoolCode, kiosk.deviceCode), adminCard: adminCardSummary(card.schoolCode) };
+    return act(
+      { kind: 'admin-card', title: `Upload the admin card receipts of ${card.schoolCode} at ${keyOf(kiosk)}`, ...traceOf(kiosk) },
+      () => adminCardUploadNow(card, kiosk),
+      { partial: adminCardPartial(card, kiosk), action: { action: 'admin-card upload', device: kiosk.deviceCode } },
+    );
   }
 
   /** Tap the admin card on a reader or water machine; at a kiosk the tap hands over the receipts. */
@@ -928,12 +1333,20 @@ export function createLab(options = {}) {
     const { schoolCode, deviceCode } = args ?? {};
     const card = requireAdminCard(schoolCode);
     const machine = findMachine(card.schoolCode, deviceCode);
-    if (machine.deviceType === 'KIOSK') return adminCardUpload({ schoolCode: card.schoolCode, deviceCode });
-    const { results } = machine.tapAdminCard(card);
-    const screen = machine.state.lastScreen?.text ?? '';
-    const answer = { ok: true, screen, results };
-    remember(machine, 'admin-card tap', answer);
-    return { ...answer, machine: machineKey(machine.schoolCode, machine.deviceCode), adminCard: adminCardSummary(card.schoolCode) };
+    const meta = { kind: 'admin-card', title: `Tap the admin card of ${card.schoolCode} on ${keyOf(machine)}`, ...traceOf(machine) };
+    if (machine.deviceType === 'KIOSK') {
+      return act(meta, () => adminCardUploadNow(card, machine), {
+        partial: adminCardPartial(card, machine),
+        action: { action: 'admin-card upload', device: machine.deviceCode },
+      });
+    }
+    return act(meta, () => {
+      const { results } = machine.tapAdminCard(card);
+      const screen = machine.state.lastScreen?.text ?? '';
+      const answer = { ok: true, screen, results };
+      remember(machine, 'admin-card tap', answer);
+      return { ...answer, machine: keyOf(machine), adminCard: adminCardSummary(card.schoolCode) };
+    });
   }
 
   /** The machine's whole journal as its signed USB export file (to import in the school office). */
@@ -941,38 +1354,65 @@ export function createLab(options = {}) {
     requireRunning();
     const { schoolCode, deviceCode } = args ?? {};
     const machine = findMachine(schoolCode, deviceCode);
-    const file = machine.exportJournal();
-    emit('lab.action', { action: 'usb.export', device: machine.deviceCode, count: file.count }, machine.schoolCode);
-    return file;
+    // the answer is the file itself: no trace field in it
+    return act(
+      { kind: 'usb', title: `Export the journal of ${keyOf(machine)} to USB`, ...traceOf(machine) },
+      () => {
+        const file = machine.exportJournal();
+        emit('lab.action', { action: 'usb.export', device: machine.deviceCode, count: file.count }, machine.schoolCode);
+        return file;
+      },
+      { tag: false },
+    );
   }
 
   /** Send a heartbeat now. @returns {Promise<{ sent: boolean, machine: object }>} */
   async function heartbeat(args = {}) {
     requireRunning();
     const machine = findMachine(args?.schoolCode, args?.deviceCode);
-    const sent = await machine.heartbeat();
-    return { sent, machine: machineView(machine) };
+    return act(
+      { kind: 'heartbeat', title: `Heartbeat now from ${keyOf(machine)}`, ...traceOf(machine) },
+      async () => {
+        const sent = await machine.heartbeat();
+        return { sent, machine: machineView(machine) };
+      },
+      { partial: machinePartial(machine) },
+    );
   }
 
   /** Upload every unsent journal record now. */
   async function upload(args = {}) {
     requireRunning();
     const machine = findMachine(args?.schoolCode, args?.deviceCode);
-    const connected = machine.connected;
-    const outcome = await machine.flushJournal();
-    return { connected, ...outcome, machine: machineView(machine) };
+    return act(
+      { kind: 'upload', title: `Upload the unsent records of ${keyOf(machine)}`, ...traceOf(machine) },
+      async () => {
+        const connected = machine.connected;
+        const outcome = await machine.flushJournal();
+        return { connected, ...outcome, machine: machineView(machine) };
+      },
+      { partial: machinePartial(machine) },
+    );
   }
 
   /** Switch a machine off and on again; its counters and journal survive (DESIGN §6). */
   async function reboot(args = {}) {
     requireRunning();
     const machine = findMachine(args?.schoolCode, args?.deviceCode);
-    await machine.stop();
-    machine.screen('Starting…', 'info');
-    await machine.start();
-    machine.screen('Ready', 'info');
-    emit('lab.action', { action: 'reboot', device: machine.deviceCode }, machine.schoolCode);
-    return { machine: machineView(machine) };
+    return act(
+      { kind: 'reboot', title: `Reboot ${keyOf(machine)}`, ...traceOf(machine) },
+      async () => {
+        await machine.stop();
+        machine.screen('Starting…', 'info');
+        // its first heartbeat and upload after the restart belong to the reboot (DESIGN §11.3)
+        if (machine.cablePlugged) machine.traceNextConnect();
+        await machine.start();
+        machine.screen('Ready', 'info');
+        emit('lab.action', { action: 'reboot', device: machine.deviceCode }, machine.schoolCode);
+        return { machine: machineView(machine) };
+      },
+      { partial: machinePartial(machine), action: { action: 'reboot', device: machine.deviceCode } },
+    );
   }
 
   /** Move the lab clock forward; connected machines report in and the jobs run (if the server is on). */
@@ -982,6 +1422,12 @@ export function createLab(options = {}) {
     if (!Number.isSafeInteger(step) || step < 1 || step > MAX_CLOCK_STEP_MS) {
       throw new LabError('INPUT_INVALID', 'ms must be a whole number of milliseconds, up to 400 days', 400);
     }
+    return act({ kind: 'clock', title: `Move the lab clock forward ${durationText(step)}` }, () => advanceClockNow(step), {
+      partial: () => ({ clock: clockView() }),
+    });
+  }
+
+  async function advanceClockNow(step) {
     clock.advance(step);
     emit('lab.clock', { advancedMs: step, now: clock.iso(), kl: formatKL(clock.now()) });
     // machines would have sent heartbeats all along; one now keeps them "online" at the new time
@@ -1004,34 +1450,59 @@ export function createLab(options = {}) {
   function runJobs() {
     requireRunning();
     if (!serverUp) throw new LabError('SERVER_DOWN', 'the cloud server is switched off: nothing runs on it', 409);
-    const result = platform.runJobs();
-    const { cancelled, refunded, parked, gaps, lag } = result;
-    emit('lab.action', { action: 'jobs', cancelled, refunded, parked, gaps, lag });
-    return result;
+    return act({ kind: 'jobs', title: 'Run the scheduled jobs now' }, () => {
+      const result = platform.runJobs();
+      const { cancelled, refunded, parked, gaps, lag } = result;
+      emit('lab.action', { action: 'jobs', cancelled, refunded, parked, gaps, lag });
+      return result;
+    });
+  }
+
+  /** A server or broker action held at a hop (a plugged machine's first heartbeat): the server as it is now. */
+  const serverPartial = () => ({ server: { up: serverUp }, broker: brokerStatus() });
+
+  /** Every plugged machine's next post-connect routine belongs to the current flow (DESIGN §11.3). */
+  function traceNextConnects() {
+    for (const m of terminals.values()) if (m.cablePlugged) m.traceNextConnect();
   }
 
   /**
-   * Switch the whole virtual cloud server off or on (DESIGN §2). Off: the platform leaves the
-   * broker, the broker stops and the product APIs answer 503; machines keep working offline.
-   * On: a broker on the same port, the platform back on it (republishing every retained
-   * setting); plugged machines reconnect by themselves and upload what they kept.
+   * Take the broker down, then the platform's link. In this order the broker never takes a
+   * message it cannot deliver: with the platform gone first, it would still acknowledge a
+   * machine's record (which then counts it as sent) and queue it for the platform's session,
+   * a queue that dies with the broker. The platform stays on until the broker has closed, so
+   * it receives what the broker acknowledged (passed on before it closes, see broker.js).
    */
-  function setServer(args = {}) {
-    const { up } = args ?? {};
-    if (typeof up !== 'boolean') return Promise.reject(new LabError('INPUT_INVALID', 'up must be true or false', 400));
+  async function closeBrokerAndLink(reason) {
+    try {
+      await closeBroker(reason);
+    } finally {
+      await platform.disconnectMqtt();
+    }
+  }
+
+  /** The server switch itself, in the caller's trace. */
+  function switchServer(up) {
     return exclusive(async () => {
       requireRunning();
       const changed = up !== serverUp;
       if (changed && !up) {
         serverUp = false;
         emit('server.status', { up: false });
-        await platform.disconnectMqtt();
-        await closeBroker('server switched off');
+        await closeBrokerAndLink('server switched off');
       } else if (changed) {
+        // messages that waited at the platform's door while it was off: they go on once it is back
+        const parked = held.filter((e) => e.item.where === 'platform');
+        traceNextConnects();
         await openBroker();
+        // inside this trace: the platform's first subscribe and republish belong to it
         await platform.connectMqtt(broker.url);
         serverUp = true;
         emit('server.status', { up: true });
+        for (const entry of parked) letGo(entry);
+        // Hold may have gone off while the server came up. What reached the platform's door
+        // meanwhile could not go on then (the server was not on yet); it goes on now.
+        if (!holding()) releaseReleasable();
       }
       emit('lab.action', { action: up ? 'server-up' : 'server-down', changed });
       return { changed, server: { up: serverUp }, broker: brokerStatus() };
@@ -1039,16 +1510,27 @@ export function createLab(options = {}) {
   }
 
   /**
-   * Restart only the broker: its retained messages are lost, and the platform, back on the new
-   * broker, publishes them again. The platform leaves first and reconnects at once (not on its
-   * own retry a second later), so no machine uploads to a broker nobody listens on.
+   * Switch the whole virtual cloud server off or on (DESIGN §2). Off: the broker stops, the
+   * platform leaves it and the product APIs answer 503; machines keep working offline.
+   * On: a broker on the same port, the platform back on it (republishing every retained
+   * setting); plugged machines reconnect by themselves and upload what they kept. Messages
+   * held at the platform's inbox while it was off go on as soon as it is back.
    */
-  function restartBroker() {
+  function setServer(args = {}) {
+    const { up } = args ?? {};
+    if (typeof up !== 'boolean') return Promise.reject(new LabError('INPUT_INVALID', 'up must be true or false', 400));
+    return act({ kind: 'server', title: up ? 'Switch the cloud server on' : 'Switch the cloud server off' }, () => switchServer(up), {
+      partial: serverPartial,
+      action: { action: up ? 'server-up' : 'server-down' },
+    });
+  }
+
+  function restartBrokerNow() {
     return exclusive(async () => {
       requireRunning();
       requireServerUp();
-      await platform.disconnectMqtt();
-      await closeBroker('restart');
+      await closeBrokerAndLink('restart');
+      traceNextConnects();
       await openBroker();
       await platform.connectMqtt(broker.url);
       emit('lab.action', { action: 'broker-restart' });
@@ -1056,44 +1538,71 @@ export function createLab(options = {}) {
     });
   }
 
+  /**
+   * Restart only the broker: its retained messages are lost, and the platform, back on the new
+   * broker, publishes them again. The old broker goes first (it must not acknowledge what it
+   * can no longer deliver); the platform leaves it and reconnects at once (not on its own retry
+   * a second later), so no machine uploads to a broker nobody listens on.
+   */
+  function restartBroker() {
+    return act({ kind: 'broker', title: 'Restart the MQTT broker' }, () => restartBrokerNow(), {
+      partial: serverPartial,
+      action: { action: 'broker-restart' },
+    });
+  }
+
   // ---- faults ----------------------------------------------------------------------------
+
+  /** Run a fault in its own trace (kind fault, "Fault: <what>"). */
+  function faultAct(type, what, where, fn, partial) {
+    const { school = null, device = null } = where ?? {};
+    return act({ kind: 'fault', title: `Fault: ${what}`, school, device }, fn, {
+      // the held item goes through: a tap's partial reads the flow's screen from it
+      partial: (item) => ({ fault: type, ...(partial ? partial(item) : {}) }),
+      action: device ? { action: 'fault', type, device } : { action: 'fault', type },
+    });
+  }
 
   function cloneCard({ schoolCode, uid } = {}) {
     const found = findCard({ preferSchool: schoolCode }, uid);
-    const base = found.uid.replace(COPY_SUFFIX_RE, '$1');
-    let n = 1;
-    const copyId = (i) => `${base}-copy${i === 1 ? '' : i}`;
-    while (cards.has(`${found.schoolCode}/${copyId(n)}`)) n += 1;
-    const id = copyId(n);
-    const key = `${found.schoolCode}/${id}`;
-    cards.set(key, found.card.clone());
-    copies.set(key, found.key);
-    emit('lab.action', { action: 'fault', type: 'clone-card', uid: found.uid, copy: id }, found.schoolCode);
-    return {
-      fault: 'clone-card',
-      ok: true,
-      uid: id,
-      copyOf: found.uid,
-      card: cardSummary({ ...found, uid: id, card: cards.get(key) }),
-      summary: `Card ${found.uid} copied byte for byte as ${id}: same balance ${formatRM(found.card.balanceSen)}, same counter ` +
-        `${found.card.cardSeq}, valid security code. Spend on both and the platform finds two purchases with one card counter.`,
-    };
+    return faultAct('clone-card', `copy card ${found.uid} of ${found.schoolCode}`, { school: found.schoolCode }, () => {
+      const base = found.uid.replace(COPY_SUFFIX_RE, '$1');
+      let n = 1;
+      const copyId = (i) => `${base}-copy${i === 1 ? '' : i}`;
+      while (cards.has(`${found.schoolCode}/${copyId(n)}`)) n += 1;
+      const id = copyId(n);
+      const key = `${found.schoolCode}/${id}`;
+      cards.set(key, found.card.clone());
+      copies.set(key, found.key);
+      emit('lab.action', { action: 'fault', type: 'clone-card', uid: found.uid, copy: id }, found.schoolCode);
+      return {
+        fault: 'clone-card',
+        ok: true,
+        uid: id,
+        copyOf: found.uid,
+        card: cardSummary({ ...found, uid: id, card: cards.get(key) }),
+        summary: `Card ${found.uid} copied byte for byte as ${id}: same balance ${formatRM(found.card.balanceSen)}, same counter ` +
+          `${found.card.cardSeq}, valid security code. Spend on both and the platform finds two purchases with one card counter.`,
+      };
+    });
   }
 
   function tamperCard({ schoolCode, uid, balanceSen } = {}) {
     const found = findCard({ preferSchool: schoolCode }, uid);
     const target = balanceSen ?? found.card.balanceSen + 10_000;
     if (!isSen(target)) throw new LabError('INPUT_INVALID', 'balanceSen must be whole sen, 0 or more', 400);
-    found.card.tamper({ balanceSen: target });
-    emit('lab.action', { action: 'fault', type: 'tamper-card', uid: found.uid, balanceSen: target }, found.schoolCode);
-    return {
-      fault: 'tamper-card',
-      ok: true,
-      uid: found.uid,
-      card: cardSummary(found),
-      summary: `Card ${found.uid} edited by hand to show ${formatRM(target)}. Its security code no longer matches, ` +
-        'so every machine refuses it (Card unavailable).',
-    };
+    return faultAct('tamper-card', `edit card ${found.uid} of ${found.schoolCode} by hand`, { school: found.schoolCode }, () => {
+      found.card.tamper({ balanceSen: target });
+      emit('lab.action', { action: 'fault', type: 'tamper-card', uid: found.uid, balanceSen: target }, found.schoolCode);
+      return {
+        fault: 'tamper-card',
+        ok: true,
+        uid: found.uid,
+        card: cardSummary(found),
+        summary: `Card ${found.uid} edited by hand to show ${formatRM(target)}. Its security code no longer matches, ` +
+          'so every machine refuses it (Card unavailable).',
+      };
+    });
   }
 
   function requireConnected(machine) {
@@ -1102,30 +1611,35 @@ export function createLab(options = {}) {
     }
   }
 
+  /** A machine fault held at a hop: which machine. */
+  const faultMachine = (machine) => () => ({ machine: keyOf(machine) });
+
   async function duplicateUpload({ schoolCode, deviceCode } = {}) {
     const machine = findMachine(schoolCode, deviceCode);
     const [last] = machine.journal({ limit: 1 });
     if (!last) throw new LabError('NOTHING_TO_SEND', `${machine.deviceCode} has no record to send again`, 409);
     requireConnected(machine);
     const { record } = last;
-    const mark = events.lastSeq();
-    const sent = await machine.publishUp(record.kind === 'WATER' ? 'water.recorded' : 'sale.recorded', { record }, { txn: record.txn });
-    if (!sent) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message: the machine lost its connection', 409);
-    const verdict = await nextEvent(
-      (e) => e.type === 'purchase.received' && e.school === machine.schoolCode && e.data?.txn === record.txn,
-      mark,
-    );
-    const status = verdict?.data?.status ?? null;
-    emit('lab.action', { action: 'fault', type: 'duplicate-upload', device: machine.deviceCode, txn: record.txn, platform: status }, machine.schoolCode);
-    return {
-      fault: 'duplicate-upload',
-      ok: status === 'DUPLICATE',
-      txn: record.txn,
-      platform: verdict ? { status, code: verdict.data.code ?? null } : null,
-      summary: status === 'DUPLICATE'
-        ? `Record ${record.txn} sent again in a new message: the platform answered DUPLICATE, so it still counts once.`
-        : `Record ${record.txn} sent again: the platform answered ${status ?? 'nothing yet'}.`,
-    };
+    return faultAct('duplicate-upload', `duplicate upload from ${keyOf(machine)}`, traceOf(machine), async () => {
+      const mark = events.lastSeq();
+      const sent = await machine.publishUp(record.kind === 'WATER' ? 'water.recorded' : 'sale.recorded', { record }, { txn: record.txn });
+      if (!sent) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message: the machine lost its connection', 409);
+      const verdict = await nextEvent(
+        (e) => e.type === 'purchase.received' && e.school === machine.schoolCode && e.data?.txn === record.txn,
+        mark,
+      );
+      const status = verdict?.data?.status ?? null;
+      emit('lab.action', { action: 'fault', type: 'duplicate-upload', device: machine.deviceCode, txn: record.txn, platform: status }, machine.schoolCode);
+      return {
+        fault: 'duplicate-upload',
+        ok: status === 'DUPLICATE',
+        txn: record.txn,
+        platform: verdict ? { status, code: verdict.data.code ?? null } : null,
+        summary: status === 'DUPLICATE'
+          ? `Record ${record.txn} sent again in a new message: the platform answered DUPLICATE, so it still counts once.`
+          : `Record ${record.txn} sent again: the platform answered ${status ?? 'nothing yet'}.`,
+      };
+    }, faultMachine(machine));
   }
 
   /** The platform's refusal of a message of this type from this machine (the machine's own traffic goes on meanwhile). */
@@ -1143,81 +1657,85 @@ export function createLab(options = {}) {
     const found = services().devices.resolveByCodes(machine.schoolCode, machine.deviceCode);
     const lastSeq = found?.device.lastSeq ?? 0;
     if (lastSeq < 1) throw new LabError('NOTHING_TO_ROLL_BACK', 'the platform has not accepted a message from this machine yet', 409);
-    // properly signed and new, but numbered behind what the platform already accepted (a replayed or restored machine)
-    const seq = Math.max(1, lastSeq - 1);
-    const s = machine.state;
-    const envelope = signEnvelope(
-      found.secret,
-      buildEnvelope({
-        school: machine.schoolCode,
-        device: machine.deviceCode,
+    return faultAct('sequence-rollback', `sequence rollback on ${keyOf(machine)}`, traceOf(machine), async () => {
+      // properly signed and new, but numbered behind what the platform already accepted (a replayed or restored machine)
+      const seq = Math.max(1, lastSeq - 1);
+      const s = machine.state;
+      const envelope = signEnvelope(
+        found.secret,
+        buildEnvelope({
+          school: machine.schoolCode,
+          device: machine.deviceCode,
+          seq,
+          at: clock.iso(),
+          type: 'device.heartbeat',
+          body: { fw: FIRMWARE_VERSION, health: 'OK', listVersions: s.versions, journalUnsent: s.journal.unsent },
+        }),
+      );
+      const mark = events.lastSeq();
+      if (!(await machine.publishEnvelope(envelope))) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message', 409);
+      const verdict = await refusalOf(machine, 'device.heartbeat', mark, 'SEQUENCE_ROLLBACK');
+      emit('lab.action', { action: 'fault', type: 'sequence-rollback', device: machine.deviceCode, seq, lastSeq }, machine.schoolCode);
+      return {
+        fault: 'sequence-rollback',
+        ok: Boolean(verdict),
         seq,
-        at: clock.iso(),
-        type: 'device.heartbeat',
-        body: { fw: FIRMWARE_VERSION, health: 'OK', listVersions: s.versions, journalUnsent: s.journal.unsent },
-      }),
-    );
-    const mark = events.lastSeq();
-    if (!(await machine.publishEnvelope(envelope))) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message', 409);
-    const verdict = await refusalOf(machine, 'device.heartbeat', mark, 'SEQUENCE_ROLLBACK');
-    emit('lab.action', { action: 'fault', type: 'sequence-rollback', device: machine.deviceCode, seq, lastSeq }, machine.schoolCode);
-    return {
-      fault: 'sequence-rollback',
-      ok: Boolean(verdict),
-      seq,
-      lastSeq,
-      platform: verdict ? { result: 'REFUSED', code: 'SEQUENCE_ROLLBACK' } : null,
-      summary: verdict
-        ? `A signed message with seq ${seq} (the platform had already accepted ${lastSeq}) was refused with SEQUENCE_ROLLBACK; ` +
-          'see the device log in the school office.'
-        : 'The message was sent, but the platform has not answered yet.',
-    };
+        lastSeq,
+        platform: verdict ? { result: 'REFUSED', code: 'SEQUENCE_ROLLBACK' } : null,
+        summary: verdict
+          ? `A signed message with seq ${seq} (the platform had already accepted ${lastSeq}) was refused with SEQUENCE_ROLLBACK; ` +
+            'see the device log in the school office.'
+          : 'The message was sent, but the platform has not answered yet.',
+      };
+    }, faultMachine(machine));
   }
 
   async function forgedMessage({ schoolCode, deviceCode } = {}) {
     const machine = findMachine(schoolCode, deviceCode);
     requireConnected(machine);
-    const found = services().devices.resolveByCodes(machine.schoolCode, machine.deviceCode);
-    const at = clock.iso();
-    const record = (kind) => ({
-      txn: `${machine.deviceCode}-999999`,
-      origin: machine.deviceCode,
-      kind,
-      card: '0'.repeat(64),
-      last4: '0000',
-      cardSeq: 1,
-      amountSen: kind === 'SALE' ? 5000 : 100,
-      ...(kind === 'SALE' ? { items: [{ code: 'NASI-LEMAK', qty: 1, priceSen: 5000 }] } : { ml: 5000, perLitreSen: 20 }),
-      priceVersion: 1,
-      listVersion: 1,
-      balanceBeforeSen: 5000,
-      balanceAfterSen: kind === 'SALE' ? 0 : 4900,
-      at,
-      currency: 'MYR',
-    });
-    const [type, body] =
-      machine.deviceType === 'CANTEEN' ? ['sale.recorded', { record: record('SALE') }]
-        : machine.deviceType === 'WATER' ? ['water.recorded', { record: record('WATER') }]
-          : ['device.heartbeat', { fw: FIRMWARE_VERSION, health: 'OK', listVersions: machine.state.versions, journalUnsent: 0 }];
-    // signed with a key that is not the machine's: someone without its secret
-    const envelope = signEnvelope(
-      randomSecret(),
-      buildEnvelope({ school: machine.schoolCode, device: machine.deviceCode, seq: (found?.device.lastSeq ?? 0) + 1, at, type, txn: body.record?.txn, body }),
-    );
-    const mark = events.lastSeq();
-    if (!(await machine.publishEnvelope(envelope))) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message', 409);
-    const verdict = await refusalOf(machine, type, mark);
-    const code = verdict?.data?.code ?? null;
-    emit('lab.action', { action: 'fault', type: 'forged-message', device: machine.deviceCode, messageType: type, platform: code }, machine.schoolCode);
-    return {
-      fault: 'forged-message',
-      ok: code === 'SIGNATURE_INVALID',
-      messageType: type,
-      platform: verdict ? { result: 'REFUSED', code } : null,
-      summary: code === 'SIGNATURE_INVALID'
-        ? `A ${type} not signed with the machine's secret was refused with SIGNATURE_INVALID; see the device log in the school office.`
-        : `A forged ${type} was sent; the platform ${code ? `refused it with ${code}` : 'has not refused it'}.`,
-    };
+    return faultAct('forged-message', `forged message as ${keyOf(machine)}`, traceOf(machine), async () => {
+      const found = services().devices.resolveByCodes(machine.schoolCode, machine.deviceCode);
+      const at = clock.iso();
+      const record = (kind) => ({
+        txn: `${machine.deviceCode}-999999`,
+        origin: machine.deviceCode,
+        kind,
+        card: '0'.repeat(64),
+        last4: '0000',
+        cardSeq: 1,
+        amountSen: kind === 'SALE' ? 5000 : 100,
+        ...(kind === 'SALE' ? { items: [{ code: 'NASI-LEMAK', qty: 1, priceSen: 5000 }] } : { ml: 5000, perLitreSen: 20 }),
+        priceVersion: 1,
+        listVersion: 1,
+        balanceBeforeSen: 5000,
+        balanceAfterSen: kind === 'SALE' ? 0 : 4900,
+        at,
+        currency: 'MYR',
+      });
+      const [type, body] =
+        machine.deviceType === 'CANTEEN' ? ['sale.recorded', { record: record('SALE') }]
+          : machine.deviceType === 'WATER' ? ['water.recorded', { record: record('WATER') }]
+            : ['device.heartbeat', { fw: FIRMWARE_VERSION, health: 'OK', listVersions: machine.state.versions, journalUnsent: 0 }];
+      // signed with a key that is not the machine's: someone without its secret
+      const envelope = signEnvelope(
+        randomSecret(),
+        buildEnvelope({ school: machine.schoolCode, device: machine.deviceCode, seq: (found?.device.lastSeq ?? 0) + 1, at, type, txn: body.record?.txn, body }),
+      );
+      const mark = events.lastSeq();
+      if (!(await machine.publishEnvelope(envelope))) throw new LabError('MACHINE_OFFLINE', 'the broker did not take the message', 409);
+      const verdict = await refusalOf(machine, type, mark);
+      const code = verdict?.data?.code ?? null;
+      emit('lab.action', { action: 'fault', type: 'forged-message', device: machine.deviceCode, messageType: type, platform: code }, machine.schoolCode);
+      return {
+        fault: 'forged-message',
+        ok: code === 'SIGNATURE_INVALID',
+        messageType: type,
+        platform: verdict ? { result: 'REFUSED', code } : null,
+        summary: code === 'SIGNATURE_INVALID'
+          ? `A ${type} not signed with the machine's secret was refused with SIGNATURE_INVALID; see the device log in the school office.`
+          : `A forged ${type} was sent; the platform ${code ? `refused it with ${code}` : 'has not refused it'}.`,
+      };
+    }, faultMachine(machine));
   }
 
   /**
@@ -1245,11 +1763,12 @@ export function createLab(options = {}) {
     if (!targetDevice || (targetSchool === machine.schoolCode && targetDevice === machine.deviceCode)) {
       throw new LabError('INPUT_INVALID', 'name another machine to publish to (toDeviceCode, toSchoolCode)', 400);
     }
-    const username = `${machine.schoolCode}.${machine.deviceCode}`;
-    const topic = topicFor(targetSchool, targetDevice, 'records');
-    const wasConnected = machine.connected;
-    const payload = JSON.stringify(
-      signEnvelope(
+    const what = `${keyOf(machine)} publishes on the topic of ${targetSchool}/${targetDevice}`;
+    return faultAct('cross-device-publish', what, traceOf(machine), async () => {
+      const username = `${machine.schoolCode}.${machine.deviceCode}`;
+      const topic = topicFor(targetSchool, targetDevice, 'records');
+      const wasConnected = machine.connected;
+      const envelope = signEnvelope(
         from.secret,
         buildEnvelope({
           school: targetSchool,
@@ -1259,76 +1778,83 @@ export function createLab(options = {}) {
           type: 'device.heartbeat',
           body: { fw: FIRMWARE_VERSION, health: 'OK', listVersions: {}, journalUnsent: 0 },
         }),
-      ),
-    );
-    const mark = events.lastSeq();
-    const throwaway = await new Promise((resolve) => {
-      const outcome = { loggedIn: false, published: false, closedByBroker: false, error: null, loggedInAt: null };
-      const client = mqtt.connect(broker.url, {
-        clientId: username,
-        username,
-        password: brokerPassword(from.secret),
-        clean: true,
-        reconnectPeriod: 0,
-        connectTimeout: 3000,
+      );
+      const payload = JSON.stringify(envelope);
+      // the copied login's send, announced in this fault's flow as a machine announces its own:
+      // the broker's refusal names the message (mqtt.denied msgId) and joins the flow by it
+      const sending = { device: machine.deviceCode, msgId: envelope.id, type: envelope.type, seq: envelope.seq, topic, bytes: Buffer.byteLength(payload) };
+      const flow = events.context()?.trace ?? null;
+      const mark = events.lastSeq();
+      const throwaway = await new Promise((resolve) => {
+        const outcome = { loggedIn: false, published: false, closedByBroker: false, error: null, loggedInAt: null };
+        const client = mqtt.connect(broker.url, {
+          clientId: username,
+          username,
+          password: brokerPassword(from.secret),
+          clean: true,
+          reconnectPeriod: 0,
+          connectTimeout: 3000,
+        });
+        let timer = null;
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          client.end(true, () => resolve(outcome));
+        };
+        client.on('error', (err) => {
+          outcome.error = err?.code ?? err?.message ?? 'error';
+        });
+        client.on('connect', () => {
+          outcome.loggedIn = true;
+          outcome.loggedInAt = Date.now();
+          if (flow) emitInTrace(flow, 'device.send', sending, machine.schoolCode);
+          else emit('device.send', sending, machine.schoolCode);
+          client.publish(topic, payload, { qos: 0 });
+          outcome.published = true;
+          timer = setTimeout(finish, THROWAWAY_WAIT_MS);
+          timer.unref?.();
+        });
+        client.on('close', () => {
+          if (outcome.loggedIn) outcome.closedByBroker = true;
+          finish();
+        });
       });
-      let timer = null;
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        client.end(true, () => resolve(outcome));
+      const denied = throwaway.published
+        ? await nextEvent((e) => e.type === 'mqtt.denied' && e.data?.action === 'publish' && e.data?.username === username && e.data?.topic === topic, mark, 1000)
+        : null;
+      const delivered = events.since(mark).some((e) => e.type === 'mqtt.publish' && e.data?.from === username && e.data?.topic === topic);
+      let offlineMs = null;
+      if (throwaway.loggedIn && wasConnected && machine.cablePlugged) {
+        const back = await waitUntil(() => machine.connected, RECONNECT_WAIT_MS);
+        offlineMs = back ? Date.now() - throwaway.loggedInAt : null;
+      }
+      const ok = Boolean(denied) && !delivered;
+      emit('lab.action', { action: 'fault', type: 'cross-device-publish', device: machine.deviceCode, topic, refused: Boolean(denied) }, machine.schoolCode);
+      let summary;
+      if (!throwaway.loggedIn) {
+        summary = `The broker refused the login of ${username} (${throwaway.error ?? 'connection closed'}): nothing was published.`;
+      } else if (ok) {
+        summary = `Logged in as ${username} and published to ${topic}: the broker refused the publish and closed that ` +
+          'connection; nothing reached the platform.' +
+          (offlineMs !== null ? ` The copied login knocked the real ${machine.deviceCode} off the broker for about ${Math.max(1, Math.round(offlineMs / 1000))} s.` : '');
+      } else {
+        summary = `Published to ${topic} as ${username}: the broker did NOT refuse it.`;
+      }
+      return {
+        fault: 'cross-device-publish',
+        ok,
+        from: username,
+        topic,
+        loggedIn: throwaway.loggedIn,
+        brokerRefused: Boolean(denied),
+        connectionClosed: throwaway.closedByBroker,
+        reachedPlatform: delivered,
+        machineOfflineMs: offlineMs,
+        summary,
       };
-      client.on('error', (err) => {
-        outcome.error = err?.code ?? err?.message ?? 'error';
-      });
-      client.on('connect', () => {
-        outcome.loggedIn = true;
-        outcome.loggedInAt = Date.now();
-        client.publish(topic, payload, { qos: 0 });
-        outcome.published = true;
-        timer = setTimeout(finish, THROWAWAY_WAIT_MS);
-        timer.unref?.();
-      });
-      client.on('close', () => {
-        if (outcome.loggedIn) outcome.closedByBroker = true;
-        finish();
-      });
-    });
-    const denied = throwaway.published
-      ? await nextEvent((e) => e.type === 'mqtt.denied' && e.data?.action === 'publish' && e.data?.username === username && e.data?.topic === topic, mark, 1000)
-      : null;
-    const delivered = events.since(mark).some((e) => e.type === 'mqtt.publish' && e.data?.from === username && e.data?.topic === topic);
-    let offlineMs = null;
-    if (throwaway.loggedIn && wasConnected && machine.cablePlugged) {
-      const back = await waitUntil(() => machine.connected, RECONNECT_WAIT_MS);
-      offlineMs = back ? Date.now() - throwaway.loggedInAt : null;
-    }
-    const ok = Boolean(denied) && !delivered;
-    emit('lab.action', { action: 'fault', type: 'cross-device-publish', device: machine.deviceCode, topic, refused: Boolean(denied) }, machine.schoolCode);
-    let summary;
-    if (!throwaway.loggedIn) {
-      summary = `The broker refused the login of ${username} (${throwaway.error ?? 'connection closed'}): nothing was published.`;
-    } else if (ok) {
-      summary = `Logged in as ${username} and published to ${topic}: the broker refused the publish and closed that ` +
-        'connection; nothing reached the platform.' +
-        (offlineMs !== null ? ` The copied login knocked the real ${machine.deviceCode} off the broker for about ${Math.max(1, Math.round(offlineMs / 1000))} s.` : '');
-    } else {
-      summary = `Published to ${topic} as ${username}: the broker did NOT refuse it.`;
-    }
-    return {
-      fault: 'cross-device-publish',
-      ok,
-      from: username,
-      topic,
-      loggedIn: throwaway.loggedIn,
-      brokerRefused: Boolean(denied),
-      connectionClosed: throwaway.closedByBroker,
-      reachedPlatform: delivered,
-      machineOfflineMs: offlineMs,
-      summary,
-    };
+    }, faultMachine(machine));
   }
 
   async function crossSchoolCard({ schoolCode, uid, toSchoolCode, deviceCode, items, ml } = {}) {
@@ -1346,18 +1872,22 @@ export function createLab(options = {}) {
     } else if (machine.deviceType === 'WATER') {
       order = { ml: ml ?? 250 };
     }
-    const result = await tap({ schoolCode: toSchool, deviceCode: machine.deviceCode, uid, cardSchoolCode: fromSchool, ...order });
-    return {
-      ...result,
-      fault: 'cross-school-card',
-      refused: !result.ok,
-      summary: result.ok
-        ? `A ${fromSchool} card was ACCEPTED by ${toSchool}/${machine.deviceCode}: that must never happen.`
-        : `A ${fromSchool} card on ${toSchool}/${machine.deviceCode}: "${result.screen}" (the card means nothing to another school's machines).`,
-    };
+    const prepared = prepareTap({ schoolCode: toSchool, deviceCode: machine.deviceCode, uid, cardSchoolCode: fromSchool, ...order });
+    const what = `a card of ${fromSchool} (${prepared.found.uid}) on ${keyOf(machine)}`;
+    return faultAct('cross-school-card', what, traceOf(machine), async () => {
+      const result = await tapNow(prepared);
+      return {
+        ...result,
+        fault: 'cross-school-card',
+        refused: !result.ok,
+        summary: result.ok
+          ? `A ${fromSchool} card was ACCEPTED by ${toSchool}/${machine.deviceCode}: that must never happen.`
+          : `A ${fromSchool} card on ${toSchool}/${machine.deviceCode}: "${result.screen}" (the card means nothing to another school's machines).`,
+      };
+    }, tapPartial(prepared));
   }
 
-  /** One of LAB_FAULTS, or a kiosk tap fault (`{ type, schoolCode, deviceCode, uid }`). */
+  /** One of LAB_FAULTS, or a kiosk tap fault (`{ type, schoolCode, deviceCode, uid }`). Each runs in its own trace. */
   async function fault(args = {}) {
     requireRunning();
     const { type, ...rest } = args ?? {};
@@ -1377,11 +1907,15 @@ export function createLab(options = {}) {
       case 'cross-school-card':
         return crossSchoolCard(rest);
       case 'server-down':
-        return { fault: type, ...(await setServer({ up: false })) };
-      case 'server-up':
-        return { fault: type, ...(await setServer({ up: true })) };
+      case 'server-up': {
+        const up = type === 'server-up';
+        return faultAct(type, up ? 'switch the cloud server on' : 'switch the cloud server off', null, async () => ({
+          fault: type,
+          ...(await switchServer(up)),
+        }), serverPartial);
+      }
       case 'broker-restart':
-        return { fault: type, ...(await restartBroker()) };
+        return faultAct(type, 'restart the MQTT broker', null, async () => ({ fault: type, ...(await restartBrokerNow()) }), serverPartial);
       default:
         if (KIOSK_TAP_FAULTS.includes(type)) return { ...(await tap({ ...rest, fault: type })), fault: type };
         throw new LabError('FAULT_INVALID', `fault type must be one of ${[...LAB_FAULTS, ...KIOSK_TAP_FAULTS].join(', ')}`, 400);
@@ -1396,9 +1930,9 @@ export function createLab(options = {}) {
   }
 
   /**
-   * The whole lab for the lab console (DESIGN §8): clock, server, broker, and every school's
-   * machines (state, location, platform view, last result), cards (chip balance, counter,
-   * member, platform status, copy) and admin card.
+   * The whole lab for the lab console (DESIGN §8): clock, server, broker, Simulation mode
+   * (§11.5: mode, hold, what is held), and every school's machines (state, location, platform
+   * view, last result), cards (chip balance, counter, member, platform status, copy) and admin card.
    */
   function state() {
     const base = {
@@ -1407,6 +1941,7 @@ export function createLab(options = {}) {
       server: { up: serverUp },
       broker: brokerStatus(),
       platform: { connected: platform.mqttStatus().connected },
+      sim: simState(),
       urls: phase === 'stopped' ? null : urls(),
       schools: [],
     };
@@ -1506,6 +2041,12 @@ export function createLab(options = {}) {
     runJobs,
     setServer,
     restartBroker,
+    /** The traces of every action and product request (src/lab/trace.js; server.js reads it on every request). */
+    tracer,
+    simState,
+    setSim,
+    simNext,
+    simRelease,
     /** Is this tray card a copy (clone-card)? */
     isCopy: (schoolCode, uid) => copies.has(`${String(schoolCode).toLowerCase()}/${uid}`),
   };

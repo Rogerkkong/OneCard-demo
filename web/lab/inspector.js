@@ -4,10 +4,12 @@
 
 import { formatKL, formatTimeKL, h } from '/shared/api.js';
 import { KINDS, explain, isHeartbeat, isTrouble, kindOf, machineOf, summarize } from './describe.js';
+import { eventSentence } from './sim-steps.js';
 import { prefs, reducedMotion, setAttr, setHidden, setText } from './util.js';
 
 const MAX_ITEMS = 1500; // events kept in memory
 const MAX_ROWS = 400; // rows in the list at once
+const MAX_KNOWN = 300; // flows and waiting items remembered for the summaries of Simulation mode's events
 const narrow = window.matchMedia('(max-width: 1023px)');
 
 /** 'intake.accepted' with a line-break chance after each dot, so a narrow column breaks there. */
@@ -47,6 +49,19 @@ export function createInspector(app, root) {
   let matching = 0;
   let selectedId = null;
   let live = 'connecting';
+  // Simulation mode's events (a machine's steps, its sends, the broker's acknowledgements, the
+  // flows and what waits) have no summary of their own: they say what their step of a flow says
+  const flows = new Map(); // trace id -> its sim.trace (title, device): a forged message's flow, the card it is about
+  const waiting = new Map(); // held item id -> the item (sim.held), for its sim.released
+  const remember = (map, key, value) => {
+    map.set(key, value);
+    if (map.size > MAX_KNOWN) map.delete(map.keys().next().value);
+  };
+  function summaryOf(e) {
+    const text = summarize(e, t, app.i18n.lang);
+    if (text) return text;
+    return eventSentence(e, { t, lang: app.i18n.lang, trace: flows.get(e.trace) ?? null, held: waiting });
+  }
   const filters = {
     school: String(prefs.get('insp.school', '') ?? ''),
     kinds: new Set([].concat(prefs.get('insp.kinds', KINDS)).filter((k) => KINDS.includes(k))),
@@ -111,7 +126,7 @@ export function createInspector(app, root) {
       h('span', { class: 'ev__school' }, e.school ?? t('insp.server')),
       h('span', { class: 'ev__machine' }, item.machine || '—'),
       h('span', { class: 'ev__type' }, h('span', { class: 'ev__dot', 'aria-hidden': 'true' }), h('span', {}, breakable(e.type))),
-      h('span', { class: 'ev__summary' }, summarize(e, t, app.i18n.lang)),
+      h('span', { class: 'ev__summary' }, summaryOf(e)),
     );
     button.addEventListener('click', (ev) => openDetail(item, ev.detail === 0));
     const li = h('li', { class: `ev ev--${item.kind}${item.trouble ? ' ev--trouble' : ''}`, dataset: { id: String(item.id) } }, button);
@@ -181,6 +196,9 @@ export function createInspector(app, root) {
 
   /** A new event from the stream. */
   function add(e) {
+    const d = e.data ?? {};
+    if (e.type === 'sim.trace' && typeof d.id === 'string') remember(flows, d.id, { id: d.id, kind: d.kind, title: d.title, school: e.school ?? null, device: d.device ?? null });
+    if (e.type === 'sim.held' && typeof d.id === 'string') remember(waiting, d.id, d);
     const item = { id: nextId++, e, kind: kindOf(e), hb: isHeartbeat(e), trouble: isTrouble(e), machine: machineOf(e) };
     if (paused) {
       pending.push(item);
@@ -233,7 +251,7 @@ export function createInspector(app, root) {
     if (!item) return;
     const e = item.e;
     setText(detailTitle, `${e.type} · ${formatKL(e.at)}:${formatTimeKL(e.at).slice(6)}`);
-    setText(detailExplain, `${explain(e.type, t)} ${summarize(e, t, app.i18n.lang)}`);
+    setText(detailExplain, `${explain(e.type, t)} ${summaryOf(e)}`);
     setText(detailJson, JSON.stringify(e, null, 2));
   }
 

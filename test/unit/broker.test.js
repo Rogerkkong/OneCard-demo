@@ -489,11 +489,11 @@ test('a device publishes its own records and status, and the platform receives t
   assert.deepEqual(eventsOf(ctx, 'mqtt.publish').map((e) => [e.school, e.data]), [
     [A, {
       from: CANTEEN_A, topic: topicOf(CANTEEN_A, 'records'), type: 'sale.recorded', txn: 'CANTEEN-01-000001',
-      retained: false, bytes: Buffer.byteLength(sale),
+      msgId: envelope.id, qos: 1, retained: false, bytes: Buffer.byteLength(sale),
     }],
     [A, {
       from: CANTEEN_A, topic: topicOf(CANTEEN_A, 'status'), type: 'device.heartbeat', txn: null,
-      retained: false, bytes: Buffer.byteLength(heartbeat),
+      msgId: envelope.id, qos: 1, retained: false, bytes: Buffer.byteLength(heartbeat),
     }],
   ]);
   assert.notEqual(Buffer.byteLength(sale), sale.length); // bytes, not characters
@@ -847,19 +847,20 @@ test('mqtt.connect and mqtt.disconnect events carry the account, the client id a
   ]);
 });
 
-test('mqtt.publish events: type and txn come from a JSON envelope when there is one', NET, async (t) => {
+test('mqtt.publish events: type, txn and msgId come from a JSON envelope when there is one', NET, async (t) => {
   const { ctx, broker, as, connect } = await setup(t);
   const device = await connect(as.device(CANTEEN_A));
   const records = topicOf(CANTEEN_A, 'records');
+  const id = newUuid();
   const payloads = [
-    JSON.stringify({ type: 'journal.batch', txn: 'BATCH-0001', body: { count: 0 } }),
+    JSON.stringify({ id, type: 'journal.batch', txn: 'BATCH-0001', body: { count: 0 } }),
     'not json at all',
     '[1,2,3]',
-    JSON.stringify({ type: 42, txn: ['CANTEEN-01-000001'] }),
+    JSON.stringify({ id: 12345678, type: 42, txn: ['CANTEEN-01-000001'] }),
     '',
-    // a type or txn longer than 64 characters is no envelope's, and is not copied into events
-    JSON.stringify({ type: 'x'.repeat(65), txn: 'T'.repeat(100_000) }),
-    JSON.stringify({ type: 'y'.repeat(64), txn: 'U'.repeat(64) }),
+    // a type, txn or id longer than 64 characters is no envelope's, and is not copied into events
+    JSON.stringify({ id: 'i'.repeat(65), type: 'x'.repeat(65), txn: 'T'.repeat(100_000) }),
+    JSON.stringify({ id: 'j'.repeat(64), type: 'y'.repeat(64), txn: 'U'.repeat(64) }),
   ];
   for (const payload of payloads) await device.publishAsync(records, payload, { qos: 1 });
   // a message the server itself sends has no sender account
@@ -869,23 +870,94 @@ test('mqtt.publish events: type and txn come from a JSON envelope when there is 
     (err) => (err ? reject(err) : resolve()),
   ));
   await waitFor(() => eventsOf(ctx, 'mqtt.publish').length === payloads.length + 1, { message: 'publish events' });
-  const base = { from: CANTEEN_A, topic: records, retained: false };
+  const base = { from: CANTEEN_A, topic: records, qos: 1, retained: false };
+  const nothing = { type: null, txn: null, msgId: null };
   assert.deepEqual(eventsOf(ctx, 'mqtt.publish').map((e) => e.data), [
-    { ...base, type: 'journal.batch', txn: 'BATCH-0001', bytes: Buffer.byteLength(payloads[0]) },
-    { ...base, type: null, txn: null, bytes: Buffer.byteLength(payloads[1]) },
-    { ...base, type: null, txn: null, bytes: Buffer.byteLength(payloads[2]) },
-    { ...base, type: null, txn: null, bytes: Buffer.byteLength(payloads[3]) },
-    { ...base, type: null, txn: null, bytes: 0 },
-    { ...base, type: null, txn: null, bytes: Buffer.byteLength(payloads[5]) },
-    { ...base, type: 'y'.repeat(64), txn: 'U'.repeat(64), bytes: Buffer.byteLength(payloads[6]) },
+    { ...base, type: 'journal.batch', txn: 'BATCH-0001', msgId: id, bytes: Buffer.byteLength(payloads[0]) },
+    { ...base, ...nothing, bytes: Buffer.byteLength(payloads[1]) },
+    { ...base, ...nothing, bytes: Buffer.byteLength(payloads[2]) },
+    { ...base, ...nothing, bytes: Buffer.byteLength(payloads[3]) },
+    { ...base, ...nothing, bytes: 0 },
+    { ...base, ...nothing, bytes: Buffer.byteLength(payloads[5]) },
+    { ...base, type: 'y'.repeat(64), txn: 'U'.repeat(64), msgId: 'j'.repeat(64), bytes: Buffer.byteLength(payloads[6]) },
     {
-      from: null, topic: topicOf(CANTEEN_A, 'commands/control'), type: 'control.upload-journal', txn: null,
-      retained: false, bytes: fromServer.length,
+      from: null, topic: topicOf(CANTEEN_A, 'commands/control'), type: 'control.upload-journal', txn: null, msgId: null,
+      qos: 0, retained: false, bytes: fromServer.length,
     },
   ]);
   assert.ok(eventsOf(ctx, 'mqtt.publish').every((e) => e.school === A));
   // the broker's own $SYS messages (one per connect, subscribe, ...) are not reported
   assert.ok(eventsOf(ctx, 'mqtt.publish').every((e) => !e.data.topic.startsWith('$')));
+});
+
+test('mqtt.publish events carry the QoS each message was sent with', NET, async (t) => {
+  const { ctx, as, connect } = await setup(t);
+  const device = await connect(as.device(CANTEEN_A));
+  const records = topicOf(CANTEEN_A, 'records');
+  for (const qos of [0, 1, 2]) await device.publishAsync(records, JSON.stringify({ id: `qos-test-${qos}`, type: 'sale.recorded' }), { qos });
+  await waitFor(() => eventsOf(ctx, 'mqtt.publish').length === 3, { message: 'publish events' });
+  assert.deepEqual(eventsOf(ctx, 'mqtt.publish').map((e) => [e.data.msgId, e.data.qos]), [['qos-test-0', 0], ['qos-test-1', 1], ['qos-test-2', 2]]);
+});
+
+test('mqtt.publish is announced when the broker accepts a message: before its PUBACK and before any subscriber has it', NET, async (t) => {
+  // Simulation mode replays a flow hop by hop (machine, broker, platform): the broker's hop
+  // must not come after the platform's handling of the same message.
+  const { ctx, as, connect } = await setup(t);
+  const platform = await connect(as.platform());
+  await grants(platform, ['lab/v1/+/+/records']);
+  platform.on('message', (topic, payload) => ctx.events.emit('test.delivered', { msgId: JSON.parse(payload.toString()).id }));
+  const device = await connect(as.device(CANTEEN_A));
+  const ids = [1, 2, 3, 4, 5].map((i) => `hop-order-${i}`);
+  for (const id of ids) {
+    await device.publishAsync(topicOf(CANTEEN_A, 'records'), JSON.stringify({ id, type: 'sale.recorded' }), { qos: 1 });
+    ctx.events.emit('test.acked', { msgId: id });
+  }
+  await waitFor(() => eventsOf(ctx, 'test.delivered').length === ids.length && eventsOf(ctx, 'mqtt.publish').length === ids.length, {
+    message: 'every message delivered and announced',
+  });
+  const seqOf = (type, id) => eventsOf(ctx, type).find((e) => e.data.msgId === id).seq;
+  for (const id of ids) {
+    assert.ok(seqOf('mqtt.publish', id) < seqOf('test.acked', id), `${id}: announced before the PUBACK reached the device`);
+    assert.ok(seqOf('mqtt.publish', id) < seqOf('test.delivered', id), `${id}: announced before the platform had it`);
+  }
+});
+
+test('a broker started inside a flow keeps none of it: logins, publishes, refusals and disconnects carry no trace', NET, async (t) => {
+  // The lab starts and restarts the broker inside an action's trace (server up, broker
+  // restart); every later event of the broker must belong to no flow (DESIGN §11.1).
+  const ctx = createTestCtx();
+  const devices = fakeDevices();
+  const broker = await ctx.events.withContext({ trace: 'tr_brokerstart01' }, () =>
+    startBroker(ctx, { port: 0, resolveDevice: (username) => devices.get(username) ?? null }),
+  );
+  const opened = [];
+  t.after(async () => {
+    await Promise.all(opened.map((client) => client.endAsync(true).catch(() => {})));
+    await broker.close();
+    ctx.db.close();
+  });
+  const login = (username, extra = {}) => ({
+    username, password: devices.get(username).password, clientId: username, reconnectPeriod: 0, connectTimeout: 3000, ...extra,
+  });
+  const connect = async (options) => {
+    const client = await mqtt.connectAsync(broker.url, options, false);
+    opened.push(client);
+    client.on('error', () => {});
+    return client;
+  };
+  const platform = await connect({ username: PLATFORM_USERNAME, password: ctx.settings.platformBrokerPassword, clientId: 'platform-trace', reconnectPeriod: 0 });
+  await grants(platform, ['lab/v1/+/+/records']);
+  const device = await connect(login(CANTEEN_A));
+  await device.publishAsync(topicOf(CANTEEN_A, 'records'), JSON.stringify({ id: newUuid(), type: 'sale.recorded' }), { qos: 1 });
+  assert.deepEqual(await grants(device, [topicOf(CANTEEN_A2, 'commands/#')]), [128]);
+  await assert.rejects(mqtt.connectAsync(broker.url, { ...login(CANTEEN_A2), password: 'wrong', reconnectPeriod: 0 }, false));
+  const gone = onClose(device);
+  broker.kick(CANTEEN_A);
+  await gone;
+  await waitFor(() => eventsOf(ctx, 'mqtt.disconnect').length === 1, { message: 'the kicked device to be gone' });
+  const types = new Set(ctx.events.since(0).map((e) => e.type));
+  for (const type of ['mqtt.connect', 'mqtt.publish', 'mqtt.denied', 'mqtt.disconnect']) assert.ok(types.has(type), type);
+  assert.deepEqual(ctx.events.since(0).filter((e) => 'trace' in e || 'msgId' in e), []);
 });
 
 // --- close and TLS --------------------------------------------------------------------------

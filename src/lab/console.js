@@ -1,6 +1,6 @@
 import { isLabError } from '../shared/errors.js';
 import { formatRM } from '../shared/money.js';
-import { DAY, HOUR, MINUTE, formatKL, parseIso } from '../shared/time.js';
+import { DAY, HOUR, KL_OFFSET_MS, MINUTE, formatKL, parseIso } from '../shared/time.js';
 import { KIOSK_FAULTS } from '../devices/kiosk.js';
 
 // The PuTTY-style consoles of the lab (docs/DESIGN.md §8 "Machine and server consoles"): log in
@@ -11,6 +11,10 @@ import { KIOSK_FAULTS } from '../devices/kiosk.js';
 // Output is plain text: aligned columns, at most 100 characters a line, money as RM 0.00 and
 // times as DD/MM/YYYY HH:MM in Kuala Lumpur, so it reads the same in PuTTY, a terminal and
 // the browser.
+//
+// Simulation mode (DESIGN §11.5) is worked from onecard> and server#: switch it on, hold each
+// traced flow at every hop, let the next hop go, and read a flow back step by step. Commands
+// trace through the lab actions they call; a console line starts no trace of its own.
 
 /** Longest line the console prints. */
 export const MAX_LINE = 100;
@@ -27,6 +31,21 @@ const LIST_MAX = 200;
 const MAX_ADVANCE_DAYS = 400;
 const UNITS = Object.freeze({ m: MINUTE, h: HOUR, d: DAY });
 const UNIT_NAMES = Object.freeze({ m: 'minute', h: 'hour', d: 'day' });
+const TRACES_LISTED = 20; // show traces: the most recent flows
+const TRACES_SEARCHED = 200; // show trace <n>: every trace the lab keeps
+// Simulation mode commands, at onecard> and server# (DESIGN §11.5).
+const SIM_HELP = Object.freeze([
+  ['simulation on|off', 'Simulation mode on, or back to realtime'],
+  ['hold on|off', 'stop every traced flow at each hop (simulation mode)'],
+  ['next', 'let the oldest held hop go on'],
+  ['show held', 'what waits at a hop, oldest first'],
+  ['show traces', 'the most recent flows: every action starts one'],
+  ['show trace <n>', 'one flow step by step, e.g. show trace 3'],
+]);
+// Where a held hop waits, in a word for show held.
+const WHERE_WORDS = Object.freeze({ machine: 'outbox', 'kiosk-http': 'kiosk call', platform: 'platform' });
+// The early answer of a held action, riding on the lines that describe it (heldLines -> run).
+const HELD = Symbol('held');
 
 // ---- text helpers ---------------------------------------------------------------------
 
@@ -82,6 +101,165 @@ function countArg(text, fallback) {
   if (!/^\d{1,4}$/.test(text)) return null;
   const n = Number(text);
   return n >= 1 ? Math.min(n, LIST_MAX) : null;
+}
+
+// ---- the steps of a trace (show trace <n>) ---------------------------------------------
+
+/** Lab time (ISO-8601) as HH:MM:SS, Kuala Lumpur: steps of one flow are seconds apart. */
+function clockTime(at) {
+  const ms = parseIso(at);
+  return Number.isFinite(ms) ? new Date(ms + KL_OFFSET_MS).toISOString().slice(11, 19) : '-';
+}
+
+/**
+ * The steps in the order of the hops. Events are kept in the order they were emitted, which at
+ * two places is not the order of the hops: the platform announces its verdict on a message
+ * (intake.*) only after the books have committed what the message caused, so the verdict is
+ * shown before that work (the events carrying the message's id just before it); and a broker
+ * that reports passing a message only once it has delivered it (mqtt.publish) has the pass
+ * shown right after the send it belongs to. Nothing else moves.
+ */
+function hopOrder(events) {
+  const isSend = (e) => (e.type === 'device.send' || e.type === 'platform.send') && typeof e.data?.msgId === 'string';
+  const sent = new Set(events.filter(isSend).map((e) => e.data.msgId));
+  const isPass = (e) => e.type === 'mqtt.publish' && sent.has(e.data?.msgId);
+  const isVerdict = (e) => e.type.startsWith('intake.') && typeof e.msgId === 'string';
+  const passes = new Map(); // msgId -> the broker's passes of it, in order
+  for (const e of events.filter(isPass)) passes.set(e.data.msgId, [...(passes.get(e.data.msgId) ?? []), e]);
+  const out = [];
+  for (const e of events) {
+    if (isPass(e)) continue;
+    if (isVerdict(e)) {
+      // what the platform did with this message came at its commit, right before the verdict
+      let at = out.length;
+      while (at > 0 && out[at - 1].msgId === e.msgId && !isVerdict(out[at - 1])) at -= 1;
+      out.splice(at, 0, e);
+      continue;
+    }
+    out.push(e);
+    if (isSend(e) && passes.has(e.data.msgId)) {
+      out.push(...passes.get(e.data.msgId));
+      passes.delete(e.data.msgId);
+    }
+  }
+  return out;
+}
+
+const money = (sen) => (Number.isSafeInteger(sen) ? formatRM(sen) : '-');
+
+function deviceStepText(d) {
+  const dev = d.device ?? '-';
+  switch (d.step) {
+    case 'card.read':
+      if (!d.ok) return `${dev} cannot use the card: ${d.reason ?? 'refused'}`;
+      return `${dev} read card ..${d.last4}: ${money(d.balanceSen)}, counter ${d.cardSeq}, ${plural(d.records ?? 0, 'record')}`;
+    case 'rules': {
+      const failed = Array.isArray(d.checks) ? d.checks.find((c) => !c.ok) : null;
+      return failed ? `${dev} rules: ${failed.rule} failed (${money(d.amountSen)})` : `${dev} rules passed for ${money(d.amountSen)}`;
+    }
+    case 'journal':
+      return `${dev} saved ${d.txn} in its journal (${d.unsent} unsent)`;
+    case 'offline':
+      return `${dev} has no network: ${d.type ?? d.call ?? 'it'} not sent`;
+    default:
+      return `${dev} ${d.step}: ${d.ok ? 'ok' : 'failed'}`;
+  }
+}
+
+function labActionText(d) {
+  if (d.ok === false && d.code) return `${d.action} failed: ${d.code}`;
+  switch (d.action) {
+    case 'tap':
+      return `done: tap on ${d.device}, ${d.ok ? 'ok' : `refused (${d.reason ?? 'no'})`}`;
+    case 'fault':
+      return `done: fault ${d.type}`;
+    case 'server-up':
+    case 'server-down':
+      return `done: cloud server ${d.action === 'server-up' ? 'on' : 'off'}${d.changed === false ? ' (already)' : ''}`;
+    default:
+      return `done: ${d.action}${d.device ? ` on ${d.device}` : ''}`;
+  }
+}
+
+/** Short `key=value` pairs of the plain fields, for event types without a summary of their own. */
+function plainFields(d) {
+  return Object.entries(d ?? {})
+    .filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 6)
+    .map(([key, value]) => `${key}=${typeof value === 'string' && !Number.isNaN(parseIso(value)) && /T\d/.test(value) ? when(value) : value}`)
+    .join(' ');
+}
+
+/** What became of the records of one message: 'POSTED', or '3 POSTED, 1 DUPLICATE'. */
+function recordResults(results) {
+  const counts = new Map();
+  for (const r of results) counts.set(r?.status, (counts.get(r?.status) ?? 0) + 1);
+  return [...counts].map(([status, n]) => (results.length === 1 ? `${status}` : `${n} ${status}`)).join(', ');
+}
+
+/** One step of a flow in plain words (show trace <n>). */
+function stepText(e) {
+  const d = e.data ?? {};
+  const dev = d.device ?? '-';
+  switch (e.type) {
+    case 'sim.trace':
+      return d.title ?? '';
+    case 'sim.held':
+      return `waits at the ${WHERE_WORDS[d.where] ?? d.where}: ${d.type ?? d.call ?? 'a message'} of ${dev}`;
+    case 'sim.released':
+      return 'goes on (next)';
+    case 'device.step':
+      return deviceStepText(d);
+    case 'device.send':
+      return `${dev} sends ${d.type} (seq ${d.seq}${d.txn ? `, ${d.txn}` : ''})`;
+    case 'device.acked':
+      return d.ok ? `${dev}: the broker took ${d.type} (${d.ms} ms)` : `${dev}: ${d.type} not acknowledged (${d.reason})`;
+    case 'device.received':
+      return `${dev} got ${d.type ?? 'a command'}${d.version ? ` v${d.version}` : ''}: ${d.result}${d.reason ? ` (${d.reason})` : ''}`;
+    case 'device.http':
+      return `${dev} ${d.method} ${d.path}: ${d.status === 0 ? 'no answer' : d.status}${d.code ? ` ${d.code}` : ''}`;
+    case 'device.screen':
+      return `${dev} shows "${d.text}"`;
+    case 'device.cable':
+      return `${dev} cable ${d.plugged ? 'plugged in' : 'pulled out'}`;
+    case 'card.write':
+      return `${dev} ${d.kind === 'debit' ? 'took' : 'added'} ${money(d.amountSen)}: the card now holds ${money(d.balanceAfterSen)}`;
+    case 'mqtt.publish':
+      return `the broker passes ${d.type ?? 'a message'} from ${d.from ?? '-'}${d.retained ? ' (retained)' : ''}`;
+    case 'mqtt.denied':
+      return `the broker refuses ${d.action} by ${d.username ?? 'someone'}: ${d.reason ?? ''}`;
+    case 'intake.accepted': {
+      const results = Array.isArray(d.results) && d.results.length > 0 ? `: ${recordResults(d.results)}` : '';
+      const snap = d.snapshot?.checked ? (d.snapshot.match ? ', card = books' : `, card differs (${d.snapshot.code ?? 'mismatch'})`) : '';
+      return `the platform accepts ${d.type} from ${dev}${results}${snap}`;
+    }
+    case 'intake.refused':
+      return `the platform refuses ${d.type ?? 'a message'} from ${dev}: ${d.code}`;
+    case 'intake.duplicate':
+      return `the platform has ${d.type} from ${dev} already: counted once`;
+    case 'purchase.received':
+      return `purchase ${d.txn}: ${d.status} ${money(d.amountSen)}${d.code ? ` (${d.code})` : ''}`;
+    case 'ledger.posting':
+      return `books: ${d.kind} ${money(d.amountSen)}`;
+    case 'topup.status':
+      return `top-up ${d.orderId}: ${d.status} ${money(d.amountSen)}`;
+    case 'platform.send':
+      return `the platform sends ${d.type} to ${dev}${d.retained ? ' (retained)' : ''}`;
+    case 'http.kiosk':
+      return `the platform answers ${d.method} ${d.path} of ${dev}: ${d.status}${d.code ? ` ${d.code}` : ''}`;
+    case 'config.published':
+      return `${d.kind} v${d.version} published`;
+    case 'server.status':
+      return `the cloud server is ${d.up ? 'on' : 'off'}`;
+    case 'broker.status':
+      return `the MQTT broker is ${d.up ? 'up' : 'down'}`;
+    case 'lab.clock':
+      return `the lab clock now shows ${when(d.now)}`;
+    case 'lab.action':
+      return labActionText(d);
+    default:
+      return plainFields(d);
+  }
 }
 
 const machineKeyOf = (text) => {
@@ -149,6 +327,7 @@ export function createConsole(lab) {
           ['connect <school>/<DEVICE>', 'log in to a machine, e.g. connect smk-contoh/CANTEEN-01'],
           ['connect server', 'log in to the virtual cloud server'],
           ['clock', 'the lab clock'],
+          ...SIM_HELP,
           ['help or ?', 'this list'],
           ['exit', 'close this session'],
         ]),
@@ -164,6 +343,7 @@ export function createConsole(lab) {
         ['broker restart', 'restart only the MQTT broker (its retained messages are lost)'],
         ['clock advance <n>m|h|d', 'move the lab clock forward, e.g. clock advance 15d'],
         ['jobs run', 'run the scheduled jobs now (refunds, parking, reconciliation)'],
+        ...SIM_HELP,
         ...tail,
       ]);
     }
@@ -189,6 +369,7 @@ export function createConsole(lab) {
       rows.push(['admin-card upload', 'upload the receipts machines wrote on the admin card']);
     }
     if (machine.deviceType !== 'KIOSK') rows.push(['admin-card tap', "read the school's admin card (lists and prices)"]);
+    rows.push(['next | show held', 'let a held hop go on, or list them (simulation mode)']);
     return helpList(`Commands at ${session.target}> (${TYPE_NAMES[machine.deviceType]})`, [...rows, ...tail]);
   }
 
@@ -322,6 +503,7 @@ export function createConsole(lab) {
 
   async function serverSwitch(up) {
     const result = await lab.setServer({ up });
+    if (result.held) return heldLines(result, `Switching the cloud server ${up ? 'on' : 'off'}.`);
     if (!result.changed) return `% The cloud server is already ${up ? 'on' : 'off'}.`;
     if (!up) {
       return [
@@ -338,6 +520,7 @@ export function createConsole(lab) {
 
   async function brokerRestart() {
     const result = await lab.restartBroker();
+    if (result.held) return heldLines(result, 'Restarting the MQTT broker.');
     return [
       'MQTT broker restarted: its retained messages were lost.',
       result.platformReconnected
@@ -362,6 +545,8 @@ export function createConsole(lab) {
     const ms = n * UNITS[unit];
     if (n < 1 || ms > MAX_ADVANCE_DAYS * DAY) return `% Invalid input: from 1 minute to ${MAX_ADVANCE_DAYS} days.`;
     const result = await lab.advanceClock(ms);
+    // the machines' heartbeats at the new time wait at their outboxes; the jobs run after them
+    if (result.held) return heldLines(result, `Lab clock moved forward ${plural(n, UNIT_NAMES[unit])}: now ${result.clock?.kl ?? '-'} (KL).`);
     return [
       `Lab clock moved forward ${plural(n, UNIT_NAMES[unit])}: now ${result.clock.kl} (KL).`,
       result.jobs ? jobsLine(result.jobs) : 'The jobs did not run: the cloud server is off.',
@@ -386,12 +571,13 @@ export function createConsole(lab) {
   async function serverCommand(words) {
     const [cmd, arg] = [words[0].toLowerCase(), words[1]?.toLowerCase()];
     if (cmd === 'show') {
-      if (!arg) return '% Incomplete command. Usage: show schools | clients | status';
-      if (words.length > 2) return '% Invalid input. Usage: show schools | clients | status';
+      const usage = 'Usage: show schools | clients | status | held | traces | trace <n>';
+      if (!arg) return `% Incomplete command. ${usage}`;
+      if (words.length > 2) return `% Invalid input. ${usage}`;
       if (arg === 'schools') return showSchools();
       if (arg === 'clients') return showClients();
       if (arg === 'status') return showServerStatus();
-      return '% Invalid input. Usage: show schools | clients | status';
+      return `% Invalid input. ${usage}`;
     }
     if (cmd === 'server') {
       if (words.length === 2 && (arg === 'down' || arg === 'up')) return serverSwitch(arg === 'up');
@@ -407,6 +593,151 @@ export function createConsole(lab) {
       return words.length === 1 ? '% Incomplete command. Usage: jobs run' : '% Invalid input. Usage: jobs run';
     }
     return UNKNOWN_COMMAND;
+  }
+
+  // ---- Simulation mode (DESIGN §11.5) ------------------------------------------------------
+
+  /** '#3' for a trace the lab keeps, '-' for one it no longer does. */
+  function traceNumber(id) {
+    const found = lab.tracer?.list({ limit: TRACES_SEARCHED }).find((t) => t.id === id);
+    return found ? `#${found.n}` : '-';
+  }
+
+  /** A held hop in plain words: what waits, and where. */
+  function describeHeld(item) {
+    const machine = `${item?.school ?? '-'}/${item?.device ?? '-'}`;
+    if (item?.where === 'kiosk-http') return `the ${item.call ?? 'API'} call of ${machine}`;
+    if (item?.where === 'platform') return `${item.type ?? 'a message'} from ${machine} at the platform's inbox`;
+    return `${item?.type ?? 'a message'} in the outbox of ${machine}`;
+  }
+
+  /**
+   * What an action answers when its flow is held at a hop: it goes on with next. The lines carry
+   * the action's early answer ({ trace, item }) for run(), which adds it to the console's answer.
+   */
+  function heldLines(result, first) {
+    const lines = [
+      ...(first ? [first] : []),
+      `Held at a hop: ${describeHeld(result.item)} (trace ${traceNumber(result.trace)}).`,
+      'Type next to let it go on (show held lists what waits); the rest of the flow follows.',
+    ];
+    return Object.defineProperty(lines, HELD, { value: { trace: result.trace, item: result.item } });
+  }
+
+  /** After hold off or realtime: what still waits (the platform's hops, while the server is off). */
+  function stillWaiting(state) {
+    const n = state.held.length;
+    return n > 0 ? [`${plural(n, 'message')} still ${n === 1 ? 'waits' : 'wait'} at the platform until the cloud server is on again.`] : [];
+  }
+
+  function simulationSwitch(words) {
+    const arg = words[1]?.toLowerCase();
+    if (words.length !== 2 || (arg !== 'on' && arg !== 'off')) {
+      return words.length === 1 ? '% Incomplete command. Usage: simulation on|off' : '% Invalid input. Usage: simulation on|off';
+    }
+    const before = lab.simState();
+    if (arg === 'on') {
+      if (before.mode === 'simulation') return 'Simulation mode is already on.';
+      lab.setSim({ mode: 'simulation' });
+      return [
+        'Simulation mode on: every action and request is traced (show traces, show trace <n>).',
+        'Type hold on to stop each traced flow at every hop.',
+      ];
+    }
+    if (before.mode === 'realtime') return 'Already in realtime mode: nothing waits at the hops.';
+    const after = lab.setSim({ mode: 'realtime' });
+    const freed = before.held.length - after.held.length;
+    return [`Realtime mode: nothing waits at the hops any more${freed > 0 ? ` (${plural(freed, 'held hop')} let go)` : ''}.`, ...stillWaiting(after)];
+  }
+
+  function holdSwitch(words) {
+    const arg = words[1]?.toLowerCase();
+    if (words.length !== 2 || (arg !== 'on' && arg !== 'off')) {
+      return words.length === 1 ? '% Incomplete command. Usage: hold on|off' : '% Invalid input. Usage: hold on|off';
+    }
+    const before = lab.simState();
+    if (arg === 'on') {
+      if (before.mode !== 'simulation') return '% Hold works only in simulation mode: type simulation on first.';
+      if (before.hold) return 'Hold at each hop is already on.';
+      lab.setSim({ hold: true });
+      return [
+        "Hold at each hop on: every traced flow waits at each hop (a machine's outbox, the kiosk's",
+        "API calls, the platform's inbox). Type next to let the oldest go on.",
+      ];
+    }
+    if (!before.hold) return 'Hold is already off.';
+    const after = lab.setSim({ hold: false });
+    const freed = before.held.length - after.held.length;
+    return [`Hold off: flows run through again${freed > 0 ? `; ${plural(freed, 'held hop')} let go` : ''}.`, ...stillWaiting(after)];
+  }
+
+  function nextHop() {
+    const { released, waiting } = lab.simNext();
+    const rest = waiting === 0 ? 'Nothing else waits.' : `${waiting} still ${waiting === 1 ? 'waits' : 'wait'} (show held).`;
+    if (released) return [`Let go: ${describeHeld(released)} (trace ${traceNumber(released.trace)}).`, rest];
+    if (waiting > 0) {
+      return `% Nothing can go on now: ${plural(waiting, 'message')} ${waiting === 1 ? 'waits' : 'wait'} at the platform ` +
+        'while the cloud server is off (server up).';
+    }
+    return lab.simState().hold ? 'Nothing waits at a hop.' : 'Nothing waits at a hop (hold is off).';
+  }
+
+  function showHeld() {
+    const { mode, hold, held } = lab.simState();
+    const how = `Mode ${mode}, hold ${hold ? 'on' : 'off'}.`;
+    if (held.length === 0) return `Nothing waits at a hop. ${how}`;
+    const rows = held.map((h, i) => [i + 1, WHERE_WORDS[h.where] ?? h.where, `${h.school ?? '-'}/${h.device ?? '-'}`, h.type ?? h.call ?? '-',
+      traceNumber(h.trace), when(h.at)]);
+    const lines = [
+      `${plural(held.length, 'hop')} waiting, oldest first: next lets the oldest go on. ${how}`,
+      ...table([{ title: '#' }, { title: 'WHERE' }, { title: 'MACHINE', max: 28 }, { title: 'WHAT', max: 20 }, { title: 'TRACE' }, { title: 'SINCE' }], rows),
+    ];
+    if (!lab.server.up && held.some((h) => h.where === 'platform')) lines.push("The platform's hops wait until the cloud server is on again.");
+    return lines;
+  }
+
+  function showTraces() {
+    const list = lab.tracer.list({ limit: TRACES_LISTED });
+    if (list.length === 0) return 'No traces yet: every lab action, and every change made in the web apps, starts one.';
+    return [
+      'The most recent flows, newest first (show trace <n> for the steps):',
+      ...table(
+        [{ title: '#' }, { title: 'KIND', max: 10 }, { title: 'TITLE', max: 46 }, { title: 'EVENTS' }, { title: 'STARTED' }],
+        list.map((t) => [`#${t.n}`, t.kind, t.title, t.events, when(t.at)]),
+      ),
+    ];
+  }
+
+  function showTrace(arg, extra) {
+    const usage = 'Usage: show trace <n>, e.g. show trace 3';
+    if (arg === undefined) return `% Incomplete command. ${usage}`;
+    if (extra || !/^#?\d{1,6}$/.test(arg)) return `% Invalid input. ${usage}`;
+    const n = Number(arg.replace('#', ''));
+    const found = lab.tracer.list({ limit: TRACES_SEARCHED }).find((t) => t.n === n);
+    const kept = found ? lab.tracer.get(found.id) : null;
+    if (!kept) return `% No trace #${n}: show traces lists the ones the lab keeps.`;
+    const { trace, events } = kept;
+    const steps = hopOrder(events);
+    const count = trace.events > events.length ? `${trace.events} events (${events.length} kept)` : plural(trace.events, 'event');
+    return [
+      `Trace #${trace.n} (${trace.kind}): ${trace.title}`,
+      `${count}, started ${when(trace.at)}. Steps in hop order; TIME is the lab clock (KL).`,
+      ...table([{ title: '#' }, { title: 'TIME' }, { title: 'TYPE', max: 19 }, { title: 'WHAT' }],
+        steps.map((e, i) => [i + 1, clockTime(e.at), e.type, stepText(e)])),
+    ];
+  }
+
+  /** The Simulation mode commands of onecard> and server#, or null for any other line. */
+  function simCommand(words) {
+    const cmd = words[0].toLowerCase();
+    const arg = words[1]?.toLowerCase();
+    if (cmd === 'simulation') return simulationSwitch(words);
+    if (cmd === 'hold') return holdSwitch(words);
+    if (cmd === 'next') return words.length > 1 ? '% Invalid input. Usage: next' : nextHop();
+    if (cmd === 'show' && arg === 'held') return words.length > 2 ? '% Invalid input. Usage: show held' : showHeld();
+    if (cmd === 'show' && arg === 'traces') return words.length > 2 ? '% Invalid input. Usage: show traces' : showTraces();
+    if (cmd === 'show' && arg === 'trace') return showTrace(words[2], words.length > 3);
+    return null;
   }
 
   // ---- a machine's prompt ------------------------------------------------------------------
@@ -550,7 +881,10 @@ export function createConsole(lab) {
     const plugged = arg === 'plug';
     const before = machine.state;
     if (before.cablePlugged === plugged && (!plugged || before.connected)) return `The cable is already ${plugged ? 'plugged in' : 'out'}.`;
-    const { machine: after } = await lab.setCable({ ...codes(key), plugged });
+    const result = await lab.setCable({ ...codes(key), plugged });
+    // plugged in: its first heartbeat (and then its upload) waits at the outbox
+    if (result.held) return heldLines(result, plugged ? 'Cable plugged in: connected to the broker.' : 'Cable pulled out.');
+    const after = result.machine;
     if (!plugged) return 'Cable pulled out: the machine keeps working offline; its records wait in the journal.';
     if (after.connected) {
       const uploaded = before.journal.unsent - after.journal.unsent;
@@ -562,7 +896,9 @@ export function createConsole(lab) {
   }
 
   async function heartbeat(key) {
-    const { sent, machine } = await lab.heartbeat(codes(key));
+    const result = await lab.heartbeat(codes(key));
+    if (result.held) return heldLines(result, 'Heartbeat signed.');
+    const { sent, machine } = result;
     if (!sent) return '% Not connected to the broker: no heartbeat sent.';
     const ver = machine.versions;
     return `Heartbeat sent: prices ${v(ver.prices)}, settings ${v(ver.settings)}, block list ${v(ver.blocklist)}, ${machine.journal.unsent} unsent.`;
@@ -570,6 +906,7 @@ export function createConsole(lab) {
 
   async function upload(key) {
     const result = await lab.upload(codes(key));
+    if (result.held) return heldLines(result, 'Upload started.');
     if (!result.connected) return `% Not connected to the broker: ${plural(result.unsent, 'record')} ${result.unsent === 1 ? 'waits' : 'wait'} in the journal.`;
     if (result.records === 0) return result.unsent === 0 ? 'Nothing to upload: every record is sent.' : `% The upload did not go through: ${result.unsent} unsent.`;
     return `Uploaded ${plural(result.records, 'record')} in ${plural(result.batches, 'batch', 'batches')}; ${result.unsent} unsent.`;
@@ -584,7 +921,10 @@ export function createConsole(lab) {
   }
 
   async function reboot(key) {
-    const { machine } = await lab.reboot(codes(key));
+    const result = await lab.reboot(codes(key));
+    // switched on again: its first heartbeat after the restart waits at the outbox
+    if (result.held) return heldLines(result, 'Rebooted.');
+    const { machine } = result;
     return `Rebooted. Counters kept: seq ${machine.seq}, txn ${machine.txnCounter}; journal ${plural(machine.journal.total, 'record')} ` +
       `(${machine.journal.unsent} unsent). Broker link ${machine.connected ? 'up' : 'down'}.`;
   }
@@ -600,6 +940,8 @@ export function createConsole(lab) {
   }
 
   function saleLines(result) {
+    // paid on the card already; the record waits at a hop on its way to the platform
+    if (result.held) return heldLines(result, `Screen: ${result.screen}`);
     const lines = [`Screen: ${result.screen}`];
     if (result.ok && result.record) {
       lines.push(lastBalance(result));
@@ -629,6 +971,7 @@ export function createConsole(lab) {
       return ['% Invalid input. Usage: tap <uid> [fault]', `  fault: ${KIOSK_FAULTS.join(', ')}`];
     }
     const result = await lab.tap({ ...codes(key), uid: args[0], ...(fault ? { fault } : {}) });
+    if (result.held) return heldLines(result, `Card ${result.card?.uid ?? args[0]} read.`);
     const lines = [`Screen: ${result.screen}`];
     for (const a of result.added ?? []) {
       lines.push(`  added ${formatRM(a.amountSen)}  order ${a.orderId}  ${a.kioskTxn}  ${a.confirmed ? 'confirmed' : 'NOT confirmed yet'}`);
@@ -650,12 +993,14 @@ export function createConsole(lab) {
     const ids = codes(key);
     if (machine.deviceType === 'KIOSK' && arg === 'load') {
       const r = await lab.adminCardLoad(ids);
+      if (r.held) return heldLines(r);
       const lines = [`Screen: ${r.screen}`, ...why(r)];
       if (r.ok) lines.push(`Admin card now carries ${r.adminCard.packs.map((p) => `${p.kind} ${v(p.version)}`).join(', ')} (token ${r.adminCard.token}).`);
       return lines;
     }
     if (machine.deviceType === 'KIOSK' && arg === 'upload') {
       const r = await lab.adminCardUpload(ids);
+      if (r.held) return heldLines(r);
       return [`Screen: ${r.screen}`, ...why(r)];
     }
     if (machine.deviceType !== 'KIOSK' && arg === 'tap') {
@@ -677,17 +1022,22 @@ export function createConsole(lab) {
     const arg = words[1]?.toLowerCase();
     switch (cmd) {
       case 'show': {
-        if (!arg) return '% Incomplete command. Usage: show status | config | prices | blocklist | journal [n] | log [n]';
+        const usage = 'Usage: show status | config | prices | blocklist | journal [n] | log [n] | held';
+        if (!arg) return `% Incomplete command. ${usage}`;
         const extra = words.length > 2;
         if (arg === 'journal') return words.length > 3 ? '% Invalid input. Usage: show journal [n]' : showJournal(key, words[2]);
         if (arg === 'log') return words.length > 3 ? '% Invalid input. Usage: show log [n]' : showLog(key, words[2]);
-        if (extra) return '% Invalid input. Usage: show status | config | prices | blocklist | journal [n] | log [n]';
+        if (extra) return `% Invalid input. ${usage}`;
         if (arg === 'status') return showStatus(key);
         if (arg === 'config') return showConfig(key);
         if (arg === 'prices') return showPrices(key);
         if (arg === 'blocklist') return showBlocklist(key);
-        return '% Invalid input. Usage: show status | config | prices | blocklist | journal [n] | log [n]';
+        // a flow started here can be stepped from here (simulation mode)
+        if (arg === 'held') return showHeld();
+        return `% Invalid input. ${usage}`;
       }
+      case 'next':
+        return words.length > 1 ? '% Invalid input. Usage: next' : nextHop();
       case 'cable':
         return words.length > 2 ? '% Invalid input. Usage: cable plug | cable unplug' : cable(key, arg);
       case 'heartbeat':
@@ -733,6 +1083,10 @@ export function createConsole(lab) {
       default:
         break;
     }
+    if (session.target === null || session.target === 'server') {
+      const answer = simCommand(words);
+      if (answer !== null) return answer;
+    }
     if (session.target === 'server') return serverCommand(words);
     if (session.target) return machineCommand(session.target, words);
     return UNKNOWN_COMMAND;
@@ -747,7 +1101,8 @@ export function createConsole(lab) {
    * Run one command line.
    * @param {{ target: string|null }} session  updated by connect / disconnect / exit
    * @param {string} line
-   * @returns {Promise<{ output: string, prompt: string, exit?: boolean }>}
+   * @returns {Promise<{ output: string, prompt: string, exit?: boolean, held?: true, trace?: string, item?: object }>}
+   *   held, trace, item: the line's action was held at a hop (Simulation mode), as its early answer said
    */
   async function run(session, line) {
     const s = session ?? { target: null };
@@ -767,7 +1122,10 @@ export function createConsole(lab) {
     }
     try {
       const output = await dispatch(s, words);
-      return { output: finish(output), prompt: prompt(s) };
+      const answer = { output: finish(output), prompt: prompt(s) };
+      // a held action: the web page reads what waits from the answer, not from the text
+      if (output?.[HELD]) Object.assign(answer, { held: true, ...output[HELD] });
+      return answer;
     } catch (err) {
       if (isLabError(err)) return { output: finish(`% ${capital(err.message)}${err.message.endsWith('.') ? '' : '.'}`), prompt: prompt(s) };
       try {

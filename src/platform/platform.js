@@ -10,6 +10,7 @@ import {
   TOPIC_ROOT,
   buildEnvelope,
   commandTopic,
+  parseTopic,
 } from '../shared/protocol.js';
 import { toIso } from '../shared/time.js';
 import { createSchools } from './schools.js';
@@ -20,7 +21,7 @@ import { createDifferences } from './differences.js';
 import { createTopups } from './topups.js';
 import { createSettlement } from './settlement.js';
 import { createReconcile } from './reconcile.js';
-import { createIntake } from './intake.js';
+import { createIntake, MAX_MESSAGE_BYTES } from './intake.js';
 
 // The platform facade (docs/DESIGN.md §4.9): builds every service, keeps the platform's own
 // MQTT connection, and runs the actions that span several services and the network: a lost
@@ -33,6 +34,12 @@ import { createIntake } from './intake.js';
 // silently: without a broker connection it fails with BROKER_UNAVAILABLE (503). Retained
 // settings are published again after every (re)connect, because a restarted broker has lost
 // them.
+//
+// Simulation mode (docs/DESIGN.md §11): every command is announced (platform.send) in the
+// event context of whoever sent it, so the lab console can follow it into the machine. The
+// platform's MQTT client lives long, so it is created untraced: only the first subscribe and
+// republish of a connectMqtt() call belong to its caller's flow. And with an inbox gate set,
+// the lab may hold a machine's message at the platform's door until the person presses Next.
 
 /** Client id of the platform's broker connection. Its session is kept (clean: false) across reconnects. */
 export const PLATFORM_CLIENT_ID = 'onecard-platform';
@@ -59,11 +66,50 @@ const DEMO_FAMILY_NAMES = Object.freeze(['Contoh', 'Teladan', 'Sampel', 'Ujian']
 const demoName = (n) =>
   `${DEMO_GIVEN_NAMES[(n - 1) % DEMO_GIVEN_NAMES.length]} ${DEMO_FAMILY_NAMES[Math.floor((n - 1) / DEMO_GIVEN_NAMES.length) % DEMO_FAMILY_NAMES.length]}`;
 
+const MAX_PEEK_CHARS = 64; // longest type or id the inbox gate is shown (real ones are shorter)
+
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const brokerUnavailable = (reason) =>
   new LabError('BROKER_UNAVAILABLE', 'the platform is not connected to the MQTT broker', 503, reason ? { reason: String(reason).slice(0, 200) } : undefined);
 const isBlockEntry = (e) => isPlainObject(e) && typeof e.card === 'string' && typeof e.last4 === 'string';
 const isVersion = (v) => Number.isSafeInteger(v) && v >= 0;
+
+/**
+ * Type and envelope id of a machine message, for the inbox gate. Never throws: a payload that
+ * cannot be read gives nulls, and intake refuses it in its turn.
+ * @returns {{ type: string|null, msgId: string|null }}
+ */
+function peekMessage(payload) {
+  const none = { type: null, msgId: null };
+  let text;
+  if (typeof payload === 'string') {
+    if (Buffer.byteLength(payload) > MAX_MESSAGE_BYTES) return none;
+    text = payload;
+  } else if (payload instanceof Uint8Array) {
+    if (payload.byteLength > MAX_MESSAGE_BYTES) return none;
+    text = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).toString('utf8');
+  } else {
+    return none;
+  }
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return none;
+  }
+  if (!isPlainObject(value)) return none;
+  const short = (v) => (typeof v === 'string' && v.length <= MAX_PEEK_CHARS ? v : null);
+  return { type: short(value.type), msgId: short(value.id) };
+}
+
+/** A promise, or anything that can be awaited like one: what an inbox gate returns to hold a message. */
+function isThenable(value) {
+  try {
+    return value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function';
+  } catch {
+    return false; // a `then` getter that throws: not something to wait for
+  }
+}
 
 /**
  * The whole platform: every service, the MQTT link to the broker and the cross-service actions.
@@ -109,6 +155,16 @@ export function createPlatform(ctx, deps = {}) {
     if (!school) throw new LabError('SCHOOL_NOT_FOUND', 'no such school', 404);
     return school;
   }
+
+  // ---- event context (Simulation mode, DESIGN §11.1) --------------------------------------
+  // An older bus without contexts works too: then there is simply nothing to carry.
+
+  /** The calling code's event context ({ trace?, msgId? }), or null. */
+  const callerContext = () => (typeof events?.context === 'function' ? events.context() : null);
+  /** Run `fn` with no event context: for what outlives the call that creates it. */
+  const untraced = (fn) => (typeof events?.untraced === 'function' ? events.untraced(fn) : fn());
+  /** Run `fn` in a context captured earlier (null: in whatever context runs now). */
+  const inContext = (context, fn) => (context && typeof events?.withContext === 'function' ? events.withContext(context, fn) : fn());
 
   // ---- broker: kicking machines --------------------------------------------------------
 
@@ -198,7 +254,11 @@ export function createPlatform(ctx, deps = {}) {
     return seq;
   }
 
-  /** Sign a command with the machine's own secret and publish it on the kind's own sub-topic. */
+  /**
+   * Sign a command with the machine's own secret and publish it on the kind's own sub-topic.
+   * Announced first as platform.send, in the sender's event context: the lab console follows
+   * the command from there by its id (broker, machine, the machine's ack).
+   */
   async function sendCommand(c, school, device, type, body, retain) {
     const found = devices.resolveByCodes(school.code, device.code);
     if (!found) throw new LabError('DEVICE_NOT_FOUND', 'no such device in this school', 404);
@@ -206,7 +266,9 @@ export function createPlatform(ctx, deps = {}) {
       found.secret,
       buildEnvelope({ school: school.code, device: device.code, seq: nextCommandSeq(device.id), at: clock.iso(), type, body }),
     );
-    await publishRaw(c, commandTopic(school.code, device.code, DOWN_TYPES[type]), JSON.stringify(envelope), retain);
+    const topic = commandTopic(school.code, device.code, DOWN_TYPES[type]);
+    events.emit('platform.send', { msgId: envelope.id, topic, type, device: device.code, retained: Boolean(retain) }, school.code);
+    await publishRaw(c, topic, JSON.stringify(envelope), retain);
     return envelope;
   }
 
@@ -362,16 +424,84 @@ export function createPlatform(ctx, deps = {}) {
     return failed.length === 0;
   }
 
-  // ---- MQTT: the connection -------------------------------------------------------------
+  // ---- MQTT: the inbox (Simulation mode's platform hold point, DESIGN §11.4) ----------------
 
-  /** Device messages go straight to intake, which never throws. */
-  function onMessage(topic, payload) {
+  let inboxGate = null;
+  // Messages waiting at the inbox per machine ('<school>/<DEVICE>'), oldest first. A machine is
+  // listed only while one of its messages is held; its later messages then wait behind it, so
+  // every machine's messages reach intake in the order they arrived. Other machines go on.
+  const inbox = new Map();
+  let inboxSize = 0;
+
+  /** One message to intake, which never throws (guarded all the same: this may run in a promise callback). */
+  function toIntake(topic, payload) {
     try {
       intake.handle(topic, payload);
     } catch (err) {
       note('error', 'intake threw', { topic, error: err?.message });
     }
   }
+
+  /** The gate's answer for a message: a promise to hold it until it settles, or null to let it through. */
+  function askGate(gate, topic, where, payload) {
+    const { type, msgId } = peekMessage(payload);
+    let answer;
+    try {
+      answer = gate({ topic, school: where?.school ?? null, device: where?.device ?? null, type, msgId });
+    } catch (err) {
+      note('error', 'the inbox gate failed; the message goes on', { topic, error: err?.message });
+      return null;
+    }
+    return isThenable(answer) ? answer : null;
+  }
+
+  /** Hand a machine's released messages to intake, oldest first, up to the first one still held. */
+  function drainInbox(key) {
+    const queue = inbox.get(key);
+    if (!queue) return;
+    while (queue.length > 0 && queue[0].released) {
+      const { topic, payload } = queue.shift();
+      inboxSize -= 1;
+      toIntake(topic, payload);
+    }
+    if (queue.length === 0) inbox.delete(key);
+  }
+
+  /**
+   * A machine message from the broker (already acknowledged to it: the platform has it). With no
+   * gate and nothing of this machine waiting it goes straight to intake, synchronously, as in
+   * realtime. Otherwise the gate may hold it, and it waits behind any held message of its machine.
+   */
+  function onMessage(topic, payload) {
+    const where = parseTopic(topic);
+    const key = where ? `${where.school}/${where.device}` : `topic:${String(topic)}`;
+    const queue = inbox.get(key);
+    const gate = inboxGate;
+    if (!gate && !queue) {
+      toIntake(topic, payload);
+      return;
+    }
+    const hold = gate ? askGate(gate, topic, where, payload) : null;
+    if (!hold && !queue) {
+      toIntake(topic, payload);
+      return;
+    }
+    const entry = { topic, payload, released: !hold };
+    if (queue) queue.push(entry);
+    else inbox.set(key, [entry]);
+    inboxSize += 1;
+    if (!hold) return; // not held itself: it goes as soon as the messages before it have gone
+    const release = () => {
+      entry.released = true;
+      drainInbox(key);
+    };
+    Promise.resolve(hold).then(release, (err) => {
+      note('warn', 'the inbox gate failed while holding a message; it goes on', { topic, error: err?.message });
+      release();
+    });
+  }
+
+  // ---- MQTT: the connection -------------------------------------------------------------
 
   /** On every (re)connect: subscribe, then republish the retained settings. @returns {Promise<boolean>} subscribed */
   async function whenConnected(c) {
@@ -445,34 +575,44 @@ export function createPlatform(ctx, deps = {}) {
     if (typeof brokerUrl !== 'string' || brokerUrl === '') {
       return Promise.reject(new LabError('BROKER_URL_INVALID', 'brokerUrl must be an MQTT URL such as mqtt://127.0.0.1:1883', 400));
     }
-    return serialized(() => openLink(brokerUrl, options));
+    // the flow that asks for the link (the lab switching the server on) owns its first republish
+    const caller = callerContext();
+    return serialized(() => openLink(brokerUrl, options, caller));
   }
 
-  async function openLink(brokerUrl, options) {
+  async function openLink(brokerUrl, options, caller) {
     const { clientId = PLATFORM_CLIENT_ID, reconnectMs = DEFAULT_RECONNECT_MS } = options ?? {};
     await dropLink();
     let c;
     try {
-      c = mqtt.connect(brokerUrl, {
-        username: PLATFORM_USERNAME,
-        password: ctx.settings?.platformBrokerPassword,
-        clientId,
-        // the broker keeps the platform's session, so records sent while its link is down wait for it
-        clean: false,
-        reconnectPeriod: reconnectMs,
-        connectTimeout: CONNECT_TIMEOUT_MS,
-        resubscribe: false, // whenConnected subscribes after every connect
-      });
+      // Untraced: the client outlives this call, and every later message and reconnect would
+      // otherwise carry the trace of whatever flow happened to connect it (DESIGN §11.1).
+      c = untraced(() =>
+        mqtt.connect(brokerUrl, {
+          username: PLATFORM_USERNAME,
+          password: ctx.settings?.platformBrokerPassword,
+          clientId,
+          // the broker keeps the platform's session, so records sent while its link is down wait for it
+          clean: false,
+          reconnectPeriod: reconnectMs,
+          connectTimeout: CONNECT_TIMEOUT_MS,
+          resubscribe: false, // whenConnected subscribes after every connect
+        }),
+      );
     } catch (err) {
       throw new LabError('BROKER_URL_INVALID', `cannot connect to ${brokerUrl}: ${err?.message}`, 400);
     }
     client = c;
     clientUrl = brokerUrl;
     let ready = Promise.resolve(false);
+    let firstConnect = true;
     c.on('error', (err) => note('debug', 'platform mqtt client error', { error: err?.message }));
     c.on('message', onMessage);
     c.on('connect', () => {
-      ready = whenConnected(c).catch((err) => {
+      // the first subscribe and republish belong to the caller's flow; automatic reconnects to none
+      const context = firstConnect ? caller : null;
+      firstConnect = false;
+      ready = inContext(context, () => whenConnected(c)).catch((err) => {
         note('error', 'the platform could not finish connecting', { error: err?.message });
         return false;
       });
@@ -867,6 +1007,22 @@ export function createPlatform(ctx, deps = {}) {
     setBroker(broker) {
       brokerRef = broker ?? null;
     },
+    /**
+     * Simulation mode's platform hold point (DESIGN §11.4 item 3). `fn({ topic, school, device,
+     * type, msgId })` is asked about each machine message as it arrives (the broker already has
+     * its acknowledgement: the platform has stored it). A promise holds the message until it
+     * settles; anything else lets it through. A held message also holds back the later messages
+     * of the same machine, and only those. A gate that throws lets the message through and is
+     * logged. null removes the gate; messages already held still wait for their promise.
+     * @param {((info: { topic: string, school: string|null, device: string|null, type: string|null,
+     *   msgId: string|null }) => unknown) | null} fn
+     */
+    setInboxGate(fn) {
+      if (fn !== null && fn !== undefined && typeof fn !== 'function') throw new TypeError('the inbox gate must be a function or null');
+      inboxGate = fn ?? null;
+    },
+    /** How many machine messages wait at the inbox: held, or behind a held one of the same machine. */
+    inboxWaiting: () => inboxSize,
     resolveBrokerDevice,
     publishConfig,
     publishBlockListDelta,

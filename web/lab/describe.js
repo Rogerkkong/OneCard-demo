@@ -46,9 +46,13 @@ export function kindOf(e) {
   return KIND_OF[e.type] ?? 'lab';
 }
 
+// Every hop of a heartbeat: its passage through the broker and the platform's check, and (Simulation
+// mode's events) the machine sending it, the broker's acknowledgement, no network, a hold.
+const HEARTBEAT_HOPS = new Set(['mqtt.publish', 'intake.accepted', 'device.send', 'device.acked', 'device.step', 'sim.held']);
+
 /** Heartbeats a machine sends every few seconds (hidden unless asked for). */
 export function isHeartbeat(e) {
-  return (e.type === 'mqtt.publish' || e.type === 'intake.accepted') && e.data?.type === 'device.heartbeat';
+  return HEARTBEAT_HOPS.has(e.type) && e.data?.type === 'device.heartbeat';
 }
 
 /** Events that read as trouble get a red mark in the inspector. */
@@ -129,6 +133,14 @@ function recordResults(results, t) {
     .map(([status, n]) => `${n} ${translatedOr(t, `purchase.${status}`, status)}`)
     .join(sep(t));
   return `${t('colon')}${t('ev.records', { n: results.length, list })}`;
+}
+
+// Why the lab stopped its broker (src/lab/lab.js, closeBroker): the known reasons in the page's language.
+const BROKER_REASONS = { 'server switched off': 'serverOff', restart: 'restart', reset: 'reset', 'lab stopped': 'labStopped' };
+
+/** The broker's stop reason in plain words (a reason this page does not know stays as the lab wrote it). */
+export function brokerReason(reason, t) {
+  return Object.hasOwn(BROKER_REASONS, reason ?? '') ? t(`st.broker.reason.${BROKER_REASONS[reason]}`) : String(reason ?? '');
 }
 
 /** How far the clock moved, in plain words. */
@@ -283,7 +295,7 @@ export function summarize(e, t, lang) {
     case 'server.status':
       return t(d.up ? 'ev.server.up' : 'ev.server.down');
     case 'broker.status':
-      return d.up ? t('ev.broker.up', { url: d.url ?? '' }) : t('ev.broker.down', { reason: d.reason ?? '' });
+      return d.up ? t('ev.broker.up', { url: d.url ?? '' }) : t('ev.broker.down', { reason: brokerReason(d.reason, t) });
     default:
       return '';
   }
@@ -355,6 +367,8 @@ export function reasonText(code, t) {
  * @returns {{ text: string, tone: 'good'|'warn'|'bad'|'info' }}
  */
 export function faultResult(type, r, t, lang) {
+  // Simulation mode with hold on: the fault's flow waits at a hop and goes on with Next hop
+  if (r?.held === true) return { tone: 'info', text: heldText(r.item, t) };
   switch (type) {
     case 'clone-card':
       return { tone: 'good', text: t('fr.clone', { from: r.copyOf, copy: r.uid, balance: money(r.card?.balanceSen), n: r.card?.cardSeq }) };
@@ -414,6 +428,53 @@ export function kioskResult(fault, r, t, lang) {
   }
   if (again.length) return { tone: 'good', text: t('fr.kiosk.shows', { screen }) + tail };
   return { tone: added.length ? 'good' : 'info', text: screen };
+}
+
+// ---- Simulation mode: what waits at a hop --------------------------------------------------------
+
+/** Sentences one after the other: a space after English ones, none after a Chinese full stop. */
+export function sentences(...parts) {
+  return parts
+    .filter((p) => p !== null && p !== undefined && p !== '')
+    .map(String)
+    .reduce((out, p) => (out === '' ? p : /[。！？：）]$/.test(out) ? `${out}${p}` : `${out} ${p}`), '');
+}
+
+/** Messages whose hold the person can test by pulling the cable (records the journal keeps). */
+export const RECORD_TYPES = new Set(['sale.recorded', 'water.recorded', 'journal.batch', 'card.readback']);
+
+/** A plain name for a message type ('sale.recorded' -> 'the sale'), or the type itself. */
+export function messageName(type, t) {
+  return hasKey(`msg.${type}`) ? t(`msg.${type}`) : (type ?? t('msg.unknown'));
+}
+
+/** A plain name for a kiosk call ('pending' -> 'the question what is waiting for the card'). */
+export function callName(call, t) {
+  return hasKey(`call.${call}`) ? t(`call.${call}`) : (call ?? '—');
+}
+
+/**
+ * What waits at a hop (a held item, DESIGN §11.4) in plain words, with what to try next: "The
+ * sale is waiting inside CANTEEN-01. Press Next hop, or pull the cable first and see what happens."
+ * @param {{ tip?: boolean, serverUp?: boolean }} [options]  tip: add the second sentence;
+ *   serverUp: the cloud server is on (with it off, the tip says what happens instead)
+ */
+export function heldText(item, t, { tip = true, serverUp = true } = {}) {
+  if (!item) return t('held.unknown');
+  const device = item.device ?? '—';
+  let text;
+  let tipKey = 'held.tip.next';
+  if (item.where === 'kiosk-http') {
+    text = t(hasKey(`held.kiosk.${item.call}`) ? `held.kiosk.${item.call}` : 'held.kiosk.other', { device, call: item.call ?? '—' });
+    tipKey = serverUp ? 'held.tip.server' : 'held.tip.kioskOff';
+  } else if (item.where === 'platform') {
+    text = t('held.platform', { what: messageName(item.type, t), device });
+    tipKey = serverUp ? 'held.tip.server' : 'held.tip.platformOff';
+  } else {
+    text = t('held.machine', { what: messageName(item.type, t), device });
+    if (RECORD_TYPES.has(item.type)) tipKey = 'held.tip.cable';
+  }
+  return tip ? sentences(text, t(tipKey)) : text;
 }
 
 // ---- errors -------------------------------------------------------------------------------------

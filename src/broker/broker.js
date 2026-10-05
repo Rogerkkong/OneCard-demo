@@ -18,6 +18,12 @@ import { DEVICE_CODE_RE, SCHOOL_CODE_RE, TOPIC_ROOT, parseTopic, topicFor } from
 // - publish: aedes closes the connection without a PUBACK (MQTT-3.3.5-2), so the message
 //   reaches nobody. Note that mqtt.js resends unacknowledged QoS 1/2 messages after it
 //   reconnects, so a client that keeps such a message is refused again on every reconnect.
+//
+// aedes acknowledges a QoS 1 message (PUBACK) before it passes it on to the subscribers, so
+// close() first lets every message it has acknowledged reach them: the sender counts it as
+// delivered (a machine marks the record sent), and a broker that closed in between would
+// lose it with the platform's queue. While it closes, a machine's new message is refused
+// without a PUBACK, so the machine keeps it and sends it again to the next broker.
 
 /** Username of the platform's own broker account. */
 export const PLATFORM_USERNAME = 'platform';
@@ -28,13 +34,16 @@ const UNAVAILABLE = 3;
 const BAD_LOGIN = 4;
 const NOT_AUTHORIZED = 5;
 
-// Payloads up to this size are parsed for the type/txn the lab console shows. A journal
+// Payloads up to this size are parsed for the type/txn/id the lab console shows. A journal
 // batch of 200 records stays well below it.
 const PEEK_MAX_BYTES = 1024 * 1024;
-// Longest type/txn copied into an event. Real ones are short (an envelope txn is at most
-// 64 characters); a longer one is shown as null, so one message cannot copy up to a
+// Longest type/txn/id copied into an event. Real ones are short (an envelope txn or id is at
+// most 64 characters); a longer one is shown as null, so one message cannot copy up to a
 // megabyte into the kept events and out to every lab console.
 const PEEK_MAX_CHARS = 64;
+// close() waits at most this long for the messages it acknowledged to be passed on (a pass
+// normally takes a millisecond; one whose PUBACK could not even be sent never completes).
+const DRAIN_MS = 1000;
 
 /**
  * '<school>.<DEVICE>' -> { schoolCode, deviceCode }, or null when it is not a device login.
@@ -127,9 +136,12 @@ function byteLength(payload) {
   return Buffer.isBuffer(payload) ? payload.length : 0;
 }
 
-/** `type` and `txn` of a protocol envelope, for the lab console; null for anything else. */
+/**
+ * `type`, `txn` and `id` of a protocol envelope, for the lab console; null for anything else.
+ * The id is what Simulation mode follows a message by (docs/DESIGN.md §11.2).
+ */
 function peekEnvelope(payload) {
-  const none = { type: null, txn: null };
+  const none = { type: null, txn: null, id: null };
   const size = byteLength(payload);
   if (size === 0 || size > PEEK_MAX_BYTES) return none;
   let value;
@@ -140,7 +152,7 @@ function peekEnvelope(payload) {
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return none;
   const short = (v) => (typeof v === 'string' && v.length <= PEEK_MAX_CHARS ? v : null);
-  return { type: short(value.type), txn: short(value.txn) };
+  return { type: short(value.type), txn: short(value.txn), id: short(value.id) };
 }
 
 /** Address clients should use: a wildcard listen address is reachable on loopback. */
@@ -187,6 +199,10 @@ export async function startBroker(ctx, {
   };
 
   const accounts = new WeakMap(); // aedes client -> the account it logged in with
+  // QoS 1 messages from clients that aedes has acknowledged but not yet passed on (see close()).
+  const passingOn = new Set();
+  let draining = false; // close() has begun: a machine's new message is refused
+  let drained = null; // ends close()'s wait once passingOn is empty
   // kick() voids logins already under way, whose device lookup may predate the switch-off.
   let loginSeq = 0;
   const kickedUpTo = new Map(); // username -> last login attempt started before kick()
@@ -199,10 +215,14 @@ export async function startBroker(ctx, {
   const sessionOwners = new Map();
   let aedes = null;
 
-  /** Emit mqtt.denied (its school from the topic, else from a device username) and log why. */
-  function refuse({ username, action, topic, reason, clientId }) {
+  /**
+   * Emit mqtt.denied (its school from the topic, else from a device username) and log why. A
+   * refused publish of an envelope names its id (msgId), so the refusal joins the sender's flow.
+   */
+  function refuse({ username, action, topic, reason, clientId, msgId }) {
     const data = { username, action };
     if (topic !== undefined) data.topic = topic;
+    if (typeof msgId === 'string') data.msgId = msgId;
     events.emit('mqtt.denied', data, schoolOfTopic(topic) ?? parseDeviceUsername(username)?.schoolCode ?? null);
     log('warn', `broker refused ${action}`, { username, clientId, topic, reason });
   }
@@ -268,15 +288,55 @@ export async function startBroker(ctx, {
       });
   }
 
+  // mqtt.publish is announced the moment the broker accepts a message. aedes's own 'publish'
+  // event comes only once the message is stored, acknowledged and passed on, often after the
+  // platform has handled it, which would put the broker's hop last in a Simulation-mode replay.
+  const announced = new WeakSet(); // packets announced on acceptance (the 'publish' event skips them)
+
+  function announcePublish(packet, client) {
+    const account = client ? accounts.get(client) : undefined;
+    const { type, txn, id } = peekEnvelope(packet.payload);
+    events.emit(
+      'mqtt.publish',
+      {
+        from: account?.username ?? client?.id ?? null,
+        topic: packet.topic,
+        type,
+        txn,
+        // the envelope id links this hop to the flow that sent the message (Simulation mode)
+        msgId: id,
+        qos: Number.isInteger(packet.qos) ? packet.qos : 0,
+        retained: Boolean(packet.retain),
+        bytes: byteLength(packet.payload),
+      },
+      schoolOfTopic(packet.topic) ?? account?.schoolCode ?? null,
+    );
+  }
+
   function authorizePublish(client, packet, callback) {
     // client is null only for a stored will of a broker that is gone; nobody vouches for it
     const account = client ? accounts.get(client) : undefined;
+    if (draining && account?.role !== 'platform') {
+      // closing: no PUBACK, so the sender keeps the message (the platform's link stays, to
+      // receive what is still being passed on)
+      log('debug', 'broker closing: publish refused', { username: account?.username ?? null, topic: packet.topic });
+      callback(new Error('the broker is closing'));
+      return;
+    }
     if (account && mayPublish(account, packet.topic)) {
+      // A QoS 2 resend is published again only if the first copy never arrived: then the
+      // 'publish' event announces it.
+      if (!(packet.qos === 2 && packet.dup)) {
+        announced.add(packet);
+        announcePublish(packet, client);
+      }
+      // acknowledged before it is passed on: close() waits for it (QoS 2 is passed on first)
+      if (packet.qos === 1) passingOn.add(packet);
       callback(null);
       return;
     }
     const username = account?.username ?? null;
-    refuse({ username, action: 'publish', topic: packet.topic, reason: 'topic not allowed', clientId: client?.id });
+    refuse({ username, action: 'publish', topic: packet.topic, reason: 'topic not allowed', clientId: client?.id, msgId: peekEnvelope(packet.payload).id });
     callback(new Error(`not allowed to publish to ${packet.topic}`));
   }
 
@@ -308,23 +368,14 @@ export async function startBroker(ctx, {
     if (client.clean && sessionOwners.get(client.id) === account) sessionOwners.delete(client.id);
     events.emit('mqtt.disconnect', { username: account?.username ?? null, clientId: client.id }, account?.schoolCode ?? null);
   });
-  // Fires once per accepted publish, after authorizePublish, with the retain flag as sent.
+  // Fires once per published message, with the retain flag as sent. Messages from clients were
+  // announced when authorizePublish accepted them; this covers the ones the server sends itself.
   aedes.on('publish', (packet, client) => {
+    // passed on to every subscriber: nothing of it is left for close() to wait for
+    if (passingOn.delete(packet) && passingOn.size === 0) drained?.();
     if (typeof packet.topic !== 'string' || packet.topic.startsWith('$')) return; // the broker's own $SYS chatter
-    const account = client ? accounts.get(client) : undefined;
-    const { type, txn } = peekEnvelope(packet.payload);
-    events.emit(
-      'mqtt.publish',
-      {
-        from: account?.username ?? client?.id ?? null,
-        topic: packet.topic,
-        type,
-        txn,
-        retained: Boolean(packet.retain),
-        bytes: byteLength(packet.payload),
-      },
-      schoolOfTopic(packet.topic) ?? account?.schoolCode ?? null,
-    );
+    if (announced.has(packet)) return;
+    announcePublish(packet, client);
   });
   aedes.on('clientError', (client, err) => log('debug', 'mqtt client error', { clientId: client?.id, error: err?.message }));
   aedes.on('connectionError', (client, err) => log('debug', 'mqtt connection error', { error: err?.message }));
@@ -362,6 +413,17 @@ export async function startBroker(ctx, {
     closing ??= (async () => {
       // Stop accepting first; each server reports closed once its last socket is gone.
       const stopped = servers.map((server) => new Promise((resolve) => (server.listening ? server.close(() => resolve()) : resolve())));
+      // Then pass on what was acknowledged already, before the connections go (file header).
+      draining = true;
+      if (passingOn.size > 0) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, DRAIN_MS);
+          drained = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      }
       await new Promise((resolve) => aedes.close(() => resolve()));
       for (const socket of sockets) socket.destroy(); // still waiting for CONNECT, or mid-handshake
       await Promise.all(stopped);

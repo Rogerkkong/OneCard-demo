@@ -1,7 +1,7 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createKioskApi, KioskApiError } from '../../src/devices/kioskApi.js';
+import { createKioskApi, KIOSK_CALLS, KioskApiError, kioskRoute } from '../../src/devices/kioskApi.js';
 import { LabError } from '../../src/shared/errors.js';
 import { hmacB64url, randomSecret, requestSigningString, safeEqual, signRequest } from '../../src/shared/crypto.js';
 import { createClock } from '../../src/shared/clock.js';
@@ -145,6 +145,27 @@ describe('createKioskApi options', () => {
 
   test('accepts any whole timeout from 1 ms to 2^31 - 1 ms', () => {
     for (const timeoutMs of [1, 5000, 2 ** 31 - 1]) assert.doesNotThrow(() => createKioskApi({ ...good, timeoutMs }));
+  });
+
+  test('online and headers must be functions, or left out', () => {
+    for (const online of [true, false, null, 'yes', {}]) assert.throws(() => createKioskApi({ ...good, online }), TypeError, `online ${online}`);
+    for (const headers of [{ 'x-lab-trace': 'tr_1' }, null, 'x-lab-trace', 1]) assert.throws(() => createKioskApi({ ...good, headers }), TypeError, `headers ${headers}`);
+    assert.doesNotThrow(() => createKioskApi({ ...good, online: () => true, headers: () => ({}) }));
+  });
+
+  test('kioskRoute names the method and path of each call, as they are sent', () => {
+    assert.deepEqual(KIOSK_CALLS, ['pending', 'confirm', 'lookup', 'packs', 'receipts']);
+    assert.deepEqual(KIOSK_CALLS.filter((c) => c !== 'lookup').map((c) => [c, kioskRoute(c)]), [
+      ['pending', { method: 'POST', path: '/api/kiosk/pending' }],
+      ['confirm', { method: 'POST', path: '/api/kiosk/confirm' }],
+      ['packs', { method: 'GET', path: '/api/kiosk/packs' }],
+      ['receipts', { method: 'POST', path: '/api/kiosk/admin-card/receipts' }],
+    ]);
+    assert.deepEqual(kioskRoute('lookup', 'KIOSK-01-000007'), { method: 'GET', path: '/api/kiosk/confirm/KIOSK-01-000007' });
+    assert.deepEqual(kioskRoute('lookup', 'K 1/2'), { method: 'GET', path: '/api/kiosk/confirm/K%201%2F2' });
+    for (const bad of [['refund'], ['toString'], [undefined], ['lookup', '..'], ['lookup', undefined]]) {
+      assert.throws(() => kioskRoute(...bad), TypeError, String(bad));
+    }
   });
 });
 
@@ -309,6 +330,65 @@ describe('signed kiosk requests', () => {
     await assert.rejects(api.request('POST', 'api/kiosk/pending', {}), TypeError);
     assert.equal(platform.requests.length, 0);
   });
+
+  test("headers(): the lab's extra headers go out with every request, asked afresh each time", async () => {
+    let trace = 'tr_first';
+    const traced = apiFor(platform.url, clock, { headers: () => ({ 'X-Lab-Trace': trace, 'x-lab-note': 'lab' }) });
+    await traced.pending({ card: CARD });
+    trace = 'tr_second';
+    await traced.lookup('KIOSK-01-000017');
+    assert.deepEqual(platform.requests.map((r) => [r.headers['x-lab-trace'], r.headers['x-lab-note']]), [['tr_first', 'lab'], ['tr_second', 'lab']]);
+    for (const r of platform.requests) assert.deepEqual(r.problems, []);
+  });
+
+  test('headers() can never replace the signing headers, accept or content-type, in any spelling; odd values are left out', async () => {
+    const forged = 'f'.repeat(43);
+    const pushy = apiFor(platform.url, clock, {
+      headers: () => ({
+        'x-lab-signature': forged,
+        'X-Lab-Nonce': 'a'.repeat(32),
+        'X-LAB-TIMESTAMP': '1',
+        'x-lab-school': 'smk-other',
+        'x-lab-device': 'KIOSK-99',
+        Accept: 'text/html',
+        'Content-Type': 'text/plain',
+        'content-length': '1',
+        host: 'evil.example',
+        'x-lab-trace': 'tr_kept',
+        'x-number': 42, // only strings
+        'x-split': 'a\r\nx-injected: yes', // no line breaks
+        'bad name': 'x', // not a header name
+      }),
+    });
+    await pushy.confirm(confirmation({ kioskTxn: 'KIOSK-01-000018' }));
+    const [req] = platform.requests;
+    assert.deepEqual(req.problems, []); // signed by the kiosk, checked by the platform
+    assert.notEqual(req.headers['x-lab-signature'], forged);
+    assert.equal(req.headers['x-lab-school'], SCHOOL);
+    assert.equal(req.headers['x-lab-device'], DEVICE);
+    assert.equal(req.headers.accept, 'application/json');
+    assert.equal(req.headers['content-type'], 'application/json');
+    assert.equal(req.headers['x-lab-trace'], 'tr_kept');
+    for (const name of ['x-number', 'x-split', 'x-injected', 'bad name']) assert.equal(req.headers[name], undefined, name);
+    assert.deepEqual(JSON.parse(req.body), confirmation({ kioskTxn: 'KIOSK-01-000018' }));
+  });
+
+  test('a headers() that throws or answers something else adds nothing, and the request still goes', async () => {
+    const answers = [
+      () => {
+        throw new Error('lab bug');
+      },
+      () => 'x-lab-trace: tr_1',
+      () => null,
+      () => [['x-lab-trace', 'tr_1']],
+    ];
+    for (const headers of answers) await apiFor(platform.url, clock, { headers }).packs();
+    assert.equal(platform.requests.length, answers.length);
+    for (const r of platform.requests) {
+      assert.deepEqual(r.problems, []);
+      assert.equal(r.headers['x-lab-trace'], undefined);
+    }
+  });
 });
 
 describe('kiosk API errors', () => {
@@ -456,6 +536,45 @@ describe('kiosk API errors', () => {
       return true;
     });
     await assert.rejects(offline.lookup('KIOSK-01-000012'), apiError('NETWORK'));
+  });
+
+  test('online() false: NETWORK at once, nothing sent; asked again for every request', async () => {
+    let up = false;
+    let asked = 0;
+    const cut = apiFor(platform.url, clock, {
+      online: () => {
+        asked += 1;
+        return up;
+      },
+    });
+    platform.respond = () => ({ status: 200, json: { token: 1, school: SCHOOL, packs: [] } });
+    for (const call of [() => cut.pending({ card: CARD }), () => cut.confirm(confirmation()), () => cut.lookup('KIOSK-01-000016'), () => cut.packs()]) {
+      await assert.rejects(call(), (err) => {
+        apiError('NETWORK', 503)(err);
+        assert.deepEqual(err.detail, { timedOut: false, offline: true });
+        return true;
+      });
+    }
+    assert.deepEqual([asked, platform.requests.length], [4, 0]);
+    up = true;
+    assert.deepEqual(await cut.packs(), { token: 1, school: SCHOOL, packs: [] });
+    assert.deepEqual(platform.requests[0].problems, []);
+    // a bad argument is still a bad argument, network or not
+    up = false;
+    await assert.rejects(cut.lookup('..'), TypeError);
+  });
+
+  test('an online() that throws says nothing: the request goes, as with no online() at all', async () => {
+    // like headers(), it is the lab's hint; a bug in it must not make a top-up fail in a way the kiosk does not expect
+    const unsure = apiFor(platform.url, clock, {
+      online: () => {
+        throw new Error('lab bug');
+      },
+    });
+    platform.respond = () => ({ status: 200, json: { token: 1, school: SCHOOL, packs: [] } });
+    const before = platform.requests.length;
+    assert.deepEqual(await unsure.packs(), { token: 1, school: SCHOOL, packs: [] });
+    assert.equal(platform.requests.length, before + 1);
   });
 
   test('KioskApiError(code, status, message) can be built directly', () => {

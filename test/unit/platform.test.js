@@ -894,7 +894,7 @@ describe('tenant isolation', () => {
     intruder.client.publish(topicFor('smk-beta', 'CANTEEN-01', 'records'), JSON.stringify(claim), { qos: 0 });
     await cutOff;
     await waitFor(() => eventsOf(ctx, 'mqtt.denied').length === 1, { message: 'the refusal at the broker' });
-    assert.deepEqual(eventsOf(ctx, 'mqtt.denied')[0].data, { username: 'smk-alpha.CANTEEN-01', action: 'publish', topic: 'lab/v1/smk-beta/CANTEEN-01/records' });
+    assert.deepEqual(eventsOf(ctx, 'mqtt.denied')[0].data, { username: 'smk-alpha.CANTEEN-01', action: 'publish', topic: 'lab/v1/smk-beta/CANTEEN-01/records', msgId: claim.id });
     // nor may it listen to B's commands
     const listener = await env.machine(world.a, 'KIOSK-01', { subscribe: false });
     await assert.rejects(listener.client.subscribeAsync('lab/v1/smk-beta/KIOSK-01/commands/#', { qos: 1 }));

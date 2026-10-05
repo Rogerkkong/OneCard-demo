@@ -31,6 +31,16 @@
   --kind-lab: var(--ink-2);
   --backdrop: rgba(12, 22, 18, 0.5);
   --menu-shadow: 0 14px 32px -12px rgba(21, 36, 31, 0.45);
+  /* Simulation mode: one colour per layer of a step (event list, packet details, envelope) */
+  --layer-card: var(--kind-cards);
+  --layer-machine: #4f6b7a;
+  --layer-mqtt: var(--teal);
+  --layer-http: #b0457a;
+  --layer-platform: var(--pandan);
+  --layer-books: var(--kind-money);
+  --layer-differences: var(--bad);
+  --layer-lab: var(--ink-2);
+  --sim-shadow: rgba(21, 36, 31, 0.35);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
@@ -44,6 +54,9 @@
     --kind-cards: #b6a8f5;
     --backdrop: rgba(0, 0, 0, 0.6);
     --menu-shadow: 0 14px 32px -12px rgba(0, 0, 0, 0.8);
+    --layer-machine: #9fb8c6;
+    --layer-http: #f08cba;
+    --sim-shadow: rgba(0, 0, 0, 0.7);
   }
 }
 :root[data-theme='dark'] {
@@ -57,6 +70,9 @@
   --kind-cards: #b6a8f5;
   --backdrop: rgba(0, 0, 0, 0.6);
   --menu-shadow: 0 14px 32px -12px rgba(0, 0, 0, 0.8);
+  --layer-machine: #9fb8c6;
+  --layer-http: #f08cba;
+  --sim-shadow: rgba(0, 0, 0, 0.7);
 }
 
 html { scroll-padding-top: calc(var(--header-h) + 12px); }
@@ -85,6 +101,31 @@ h4 { margin: 0; line-height: 1.25; }
 .apps { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 14px; }
 .apps a { color: var(--pandan); font-weight: 600; text-decoration: none; }
 .apps a:hover { text-decoration: underline; }
+
+/* Realtime | Simulation (Packet Tracer's two modes) */
+.mode-switch { display: inline-flex; align-items: center; gap: 6px; }
+.mode-switch__label { font-size: 12px; color: var(--ink-2); }
+.mode-switch__btn {
+  min-height: 30px; padding: 3px 9px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+/* one header line on a laptop: the mode switch takes the place of the header clock, which the
+   lab clock panel at the top of the page shows anyway */
+@media (max-width: 1439px) {
+  .mode-switch__label {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+}
+@media (min-width: 761px) and (max-width: 1439px) {
+  .hdr-clock { display: none; }
+}
+.mode-switch__btn:first-of-type { border-radius: 8px 0 0 8px; }
+.mode-switch__btn:last-of-type { margin-left: -1px; border-radius: 0 8px 8px 0; }
+.mode-switch__btn:hover { color: var(--ink); }
+.mode-switch__btn[aria-pressed='true'] { position: relative; background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.mode-switch__btn[data-mode='simulation'][aria-pressed='true'] { background: var(--teal); border-color: var(--teal); color: var(--surface); }
+.mode-switch__btn:disabled { opacity: 0.6; cursor: progress; }
 
 /* ---- banners ----------------------------------------------------------------------------- */
 .banners { max-width: 1720px; margin: 0 auto; padding: 0 16px; }
@@ -138,7 +179,7 @@ h4 { margin: 0; line-height: 1.25; }
 .jump a:hover { text-decoration: underline; }
 
 /* ---- topology: the cloud server, the internet line, the school sites --------------------- */
-.topology { display: grid; min-width: 0; }
+.topology { position: relative; display: grid; min-width: 0; }
 .topology:focus { outline: none; }
 .top-row { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 720px) {
@@ -417,7 +458,7 @@ h4 { margin: 0; line-height: 1.25; }
   color: var(--ink-2); font: inherit; font-weight: 600; cursor: pointer;
 }
 .tab[aria-selected='true'] { background: var(--surface); color: var(--ink); border-bottom-color: var(--pandan); }
-.insp, .con { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; padding: 12px; }
+.insp, .con, .sim { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; padding: 12px; }
 /* column widths shared by the header and the rows (they use different font sizes) */
 .insp { --col-time: 62px; --col-school: 92px; --col-machine: 88px; }
 
@@ -533,6 +574,240 @@ h4 { margin: 0; line-height: 1.25; }
 .con__quick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .con__quicklabel { font-size: 13px; color: var(--ink-2); }
 .con__quicklist { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---- the Simulation tab (DESIGN §11.6) ---------------------------------------------------- */
+/* its own width decides the layout of its rows (the column is narrow on a 1024 px screen too) */
+.sim { overflow-y: auto; overflow-anchor: none; container: sim / inline-size; }
+.sim:focus { outline: none; }
+.sim__bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; }
+.sim__title { font-size: 16px; }
+.sim__intro { font-size: 13px; }
+/* with the details open, or something waiting, the room goes to what needs it */
+.sim.has-details .sim__intro, .sim.has-waiting .sim__intro { display: none; }
+.sim__traces { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.sim__tracelabel { display: inline; font-size: 13px; }
+.sim__select { flex: 1 1 200px; width: auto; min-width: 0; min-height: 32px; padding: 3px 8px; font-size: 13px; }
+.sim__follow { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; cursor: pointer; }
+.sim__follow input, .sim__beats input { width: auto; min-height: 0; margin: 0; accent-color: var(--pandan); }
+.sim__tracetitle { margin-top: -4px; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.sim__tracetitle.is-gone { color: var(--warn); font-weight: 600; }
+
+/* live stepping: hold switch, Next hop, what waits */
+.sim__hold { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.sim__holdrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.sim__holdbuttons { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sim__next { min-height: 38px; padding: 0 16px; font-size: 15px; }
+.sim__holdhint { font-size: 12px; }
+/* nothing can go on (only the platform's inbox waits, the server is off): it says why Next hop is greyed */
+.sim__holdhint.is-stuck { padding: 6px 8px; border-radius: 6px; background: var(--warn-soft); color: var(--ink); font-size: 13px; }
+.switch {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 2px 4px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--ink); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer;
+}
+.switch:disabled { opacity: 0.6; cursor: progress; }
+.switch__track {
+  position: relative; flex: none; width: 40px; height: 24px; border-radius: 12px;
+  background: var(--surface); border: 1.5px solid var(--ink-2); transition: background 0.2s, border-color 0.2s;
+}
+.switch__thumb {
+  position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%;
+  background: var(--ink-2); transition: transform 0.2s, background 0.2s;
+}
+.switch[aria-checked='true'] .switch__track { background: var(--kunyit); border-color: var(--kunyit-ink); }
+.switch[aria-checked='true'] .switch__thumb { transform: translateX(16px); background: var(--kunyit-ink); }
+.sim__notice { padding: 6px 8px; border-radius: 6px; background: var(--teal-soft); color: var(--ink); font-size: 13px; }
+.sim__notice--warn { background: var(--warn-soft); }
+.sim__notice--good { background: var(--pandan-soft); }
+.sim__waitingbox { display: grid; gap: 4px; }
+.sim__waitingtitle { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.sim__waiting { display: grid; gap: 4px; max-height: 104px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.wait__btn {
+  /* one line each: where · machine · what · flow (two lines on a phone) */
+  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto; grid-template-areas: 'where machine what flow';
+  align-items: baseline; gap: 0 8px; width: 100%; padding: 3px 8px; border: 1px solid var(--line); border-left: 4px solid var(--kunyit); border-radius: 6px;
+  background: var(--surface); color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.wait__btn:hover { border-color: var(--ink-2); border-left-color: var(--kunyit); }
+.wait.is-platform .wait__btn { border-left-color: var(--layer-platform); }
+.wait.is-current .wait__btn { background: var(--teal-soft); }
+.wait__where { grid-area: where; font-weight: 600; }
+.wait__machine { grid-area: machine; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.wait__what { grid-area: what; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12px; }
+.wait__flow { grid-area: flow; color: var(--ink-2); font-size: 12px; }
+
+/* playback */
+.sim__play { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.sim__buttons { display: inline-flex; gap: 4px; }
+.sim__pbtn { min-width: 36px; padding: 0 8px; }
+.sim__pbtn svg { display: block; fill: currentColor; }
+.sim__playbtn .sim__icon-pause, .sim__playbtn[aria-pressed='true'] .sim__icon-play { display: none; }
+.sim__playbtn[aria-pressed='true'] .sim__icon-pause { display: block; }
+.sim__speed { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; }
+.sim__speed select { width: auto; min-height: 28px; padding: 2px 6px; font-size: 13px; }
+.sim__stepof { margin-left: auto; font-size: 12.5px; color: var(--ink-2); }
+
+/* filters by layer */
+.sim__filters { border: 1px solid var(--line); border-radius: 8px; }
+.sim__filtersummary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
+.sim__filterstitle { font-weight: 600; }
+.sim__filtersstate { font-size: 12px; }
+.sim__filterbody { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 2px 10px 8px; }
+.sim__layers { display: flex; flex-wrap: wrap; gap: 6px; }
+.sim__beats { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; cursor: pointer; }
+.chip--layer[data-layer='card'], .step--card, .pd[data-layer='card'], .sim-env[data-layer='card'], .sim-lit[data-sim-layer='card'] { --layer-color: var(--layer-card); }
+.chip--layer[data-layer='machine'], .step--machine, .pd[data-layer='machine'], .sim-env[data-layer='machine'], .sim-lit[data-sim-layer='machine'] { --layer-color: var(--layer-machine); }
+.chip--layer[data-layer='mqtt'], .step--mqtt, .pd[data-layer='mqtt'], .sim-env[data-layer='mqtt'], .sim-lit[data-sim-layer='mqtt'] { --layer-color: var(--layer-mqtt); }
+.chip--layer[data-layer='http'], .step--http, .pd[data-layer='http'], .sim-env[data-layer='http'], .sim-lit[data-sim-layer='http'] { --layer-color: var(--layer-http); }
+.chip--layer[data-layer='platform'], .step--platform, .pd[data-layer='platform'], .sim-env[data-layer='platform'], .sim-lit[data-sim-layer='platform'] { --layer-color: var(--layer-platform); }
+.chip--layer[data-layer='books'], .step--books, .pd[data-layer='books'], .sim-env[data-layer='books'], .sim-lit[data-sim-layer='books'] { --layer-color: var(--layer-books); }
+.chip--layer[data-layer='differences'], .step--differences, .pd[data-layer='differences'], .sim-env[data-layer='differences'], .sim-lit[data-sim-layer='differences'] { --layer-color: var(--layer-differences); }
+.chip--layer[data-layer='lab'], .step--lab, .pd[data-layer='lab'], .sim-env[data-layer='lab'], .sim-lit[data-sim-layer='lab'] { --layer-color: var(--layer-lab); }
+.chip--layer { --kind-color: var(--layer-color); }
+
+/* Packet Tracer's event list */
+.sim__body { display: flex; flex: 1 0 auto; flex-direction: column; gap: 6px; min-height: 0; }
+.step, .sim__head {
+  display: grid; grid-template-columns: 26px 90px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr);
+  grid-template-areas: 'n time last at type' '. what what what what'; column-gap: 8px; row-gap: 1px;
+}
+.sim__head {
+  flex: 0 0 auto; grid-template-areas: 'n time last at type'; padding: 0 11px 0 13px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-2);
+}
+.sim__head > :nth-child(1) { grid-area: n; }
+.sim__head > :nth-child(2) { grid-area: time; }
+.sim__head > :nth-child(3) { grid-area: last; }
+.sim__head > :nth-child(4) { grid-area: at; }
+.sim__head > :nth-child(5) { grid-area: type; }
+.sim__listbox { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-height: 0; }
+.sim__earlier, .sim__later { align-self: flex-start; }
+.sim__list {
+  position: relative; flex: 1 1 auto; min-height: 150px; max-height: 55vh; margin: 0; padding: 0; overflow-y: auto; list-style: none;
+  border: 1px solid var(--line); border-radius: 8px; overscroll-behavior: contain;
+}
+.sim__list:focus-visible { outline-offset: -2px; }
+.step {
+  position: relative; padding: 5px 10px 6px 13px; border-bottom: 1px solid var(--line);
+  color: var(--ink); font-size: 12.5px; cursor: pointer;
+}
+.step:hover { background: var(--surface-2); }
+.step::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: transparent; }
+.step.is-current { background: var(--teal-soft); }
+.step.is-current::before { background: var(--layer-color); }
+.step__n { grid-area: n; color: var(--ink-2); text-align: right; }
+.step__time { grid-area: time; color: var(--ink-2); font-size: 11.5px; }
+.step__last, .step__at { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+.step__last { grid-area: last; color: var(--ink-2); }
+.step__at { grid-area: at; font-weight: 600; }
+.step__type { grid-area: type; display: flex; align-items: center; gap: 5px; min-width: 0; font-family: var(--mono); font-size: 11.5px; overflow-wrap: break-word; }
+.step__dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--layer-color); }
+.step__what { grid-area: what; color: var(--ink); overflow-wrap: anywhere; }
+.step--warn .step__what::before { content: '! '; color: var(--warn); font-weight: 700; }
+.step--bad .step__what { color: var(--bad); }
+.step--bad .step__what::before { content: '✗ '; font-weight: 700; }
+.sim__empty { display: grid; gap: 6px; justify-items: start; padding: 4px 2px; font-size: 13px; }
+
+/* packet details: one section per layer, coloured like the layer */
+.sim__details {
+  flex: 0 1 auto; display: grid; gap: 8px; align-content: start; min-height: 160px; overflow: auto; padding: 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+}
+.sim__detailshead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.sim__detailshead h3 { font-size: 14px; }
+.sim__detailshead h3:focus { outline: none; }
+.sim__detailshead h3:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.sim__detailsbuttons { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.sim__sections { display: grid; gap: 8px; }
+.pd { --layer-color: var(--layer-lab); display: grid; gap: 6px; padding: 8px 10px 9px 12px; border-left: 4px solid var(--layer-color); border-radius: 6px; background: var(--surface); }
+.pd__title { font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-2); }
+.pd__text { font-size: 14px; font-weight: 600; }
+.pd__note { font-size: 12.5px; }
+.pd__rows { display: grid; gap: 3px; margin: 0; font-size: 12.5px; }
+.pd__row { display: grid; grid-template-columns: minmax(8em, 0.75fr) minmax(0, 1.6fr); gap: 2px 10px; }
+.pd__row dt { color: var(--ink-2); overflow-wrap: anywhere; }
+.pd__row dd { margin: 0; overflow-wrap: anywhere; }
+.pd__checks { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; }
+.pd__check { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 8px; align-items: start; }
+.pd__mark {
+  grid-row: span 2; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--surface-2); color: var(--ink-2); font-size: 12px; font-weight: 700;
+}
+.pd__check--ok .pd__mark { background: var(--pandan-soft); color: var(--good); }
+.pd__check--bad .pd__mark { background: var(--bad-soft); color: var(--bad); }
+.pd__check--warn .pd__mark { background: var(--warn-soft); color: var(--warn); }
+.pd__check--skip .pd__label { color: var(--ink-2); }
+.pd__check--bad .pd__label { color: var(--bad); font-weight: 600; }
+.pd__label { padding-top: 1px; }
+.pd__value { grid-column: 2; color: var(--ink-2); overflow-wrap: anywhere; }
+.pd__lineswrap { border: 1px solid var(--line); border-radius: 6px; }
+.pd__lines { font-size: 12.5px; }
+.pd__lines th, .pd__lines td { padding: 5px 8px; }
+.pd__lines tbody tr:last-child td { border-bottom: 0; }
+.pd__raw { display: grid; gap: 6px; }
+.pd__rawsummary { font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.pd__rawbody { display: grid; gap: 6px; justify-items: start; }
+.pd__json {
+  justify-self: stretch; max-height: 280px; margin: 0; padding: 8px; overflow: auto; border-radius: 6px;
+  background: var(--surface-2); color: var(--ink); font: 11.5px/1.45 var(--mono); white-space: pre;
+}
+@media (min-width: 1024px) {
+  /* the tab fills the column: the list takes what the controls leave; with the details open
+     the list keeps a few rows and the details take the rest, each scrolling on its own */
+  .sim__body { flex: 1 1 0; min-height: 220px; }
+  .sim__listbox { flex: 1 1 0; }
+  .sim__list { flex: 1 1 0; max-height: none; min-height: 120px; }
+  .sim.has-details .sim__listbox { flex: 0 0 auto; }
+  .sim.has-details .sim__list { flex: 0 0 124px; min-height: 0; }
+  .sim.has-details .sim__details { flex: 1 1 0; min-height: 170px; }
+  /* the details need the room more than these lines, which say what the controls show anyway */
+  .sim.has-details .sim__tracetitle, .sim.has-details .sim__holdhint:not(.is-stuck), .sim.has-details .sim__waitingtitle { display: none; }
+  .sim.has-details .sim__waiting { max-height: 58px; }
+  .sim.has-details.has-waiting .sim__list { flex-basis: 92px; }
+}
+
+/* a narrow tab (a phone, a 1024 px screen): rows of two or three lines; after the rules above */
+@container sim (max-width: 470px) {
+  /* waiting items: where and the flow, then the machine and what */
+  .wait__btn { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: 'where where flow' 'machine what what'; }
+  /* steps: number, time and type, then from → to, then what happened */
+  .step { grid-template-columns: 26px minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: 'n time type' '. last at' '. what what'; }
+  .sim__head { display: none; }
+  .sim__stepof { margin-left: 0; flex-basis: 100%; }
+}
+
+/* the envelope on the topology (decorative: the event list says the same) */
+.sim-layer { position: absolute; inset: 0; z-index: 12; pointer-events: none; }
+.sim-env {
+  --layer-color: var(--layer-lab);
+  position: absolute; left: 0; top: 0; width: 28px; height: 22px; color: var(--layer-color);
+  filter: drop-shadow(0 2px 3px var(--sim-shadow)); pointer-events: auto; cursor: pointer; will-change: transform;
+}
+.sim-env svg { display: block; overflow: visible; }
+.sim-env__paper { fill: var(--surface); stroke: currentColor; stroke-width: 2.2; }
+.sim-env__flap { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sim-env[data-verdict='bad'] .sim-env__paper { fill: var(--bad-soft); }
+.sim-env__badge {
+  position: absolute; right: -8px; top: -9px; display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%;
+  background: var(--kunyit); color: var(--kunyit-ink); box-shadow: 0 0 0 2px var(--surface);
+}
+.sim-env__badge svg { fill: currentColor; }
+.sim-env.is-parked { animation: sim-wait 1.8s ease-in-out infinite; }
+@keyframes sim-wait { 50% { filter: drop-shadow(0 0 6px var(--kunyit)); } }
+.sim-drop {
+  position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--bad); color: var(--surface); box-shadow: 0 0 0 2px var(--surface);
+}
+.sim-drop svg { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; }
+.sim-parks { position: absolute; inset: 0; }
+.sim-park {
+  position: absolute; left: 0; top: 0; display: inline-flex; align-items: center; gap: 1px; height: 18px; min-width: 18px; padding: 0 3px;
+  border-radius: 9px; background: var(--kunyit); color: var(--kunyit-ink); box-shadow: 0 0 0 2px var(--surface);
+  font-size: 10.5px; font-weight: 700; line-height: 1;
+}
+.sim-park svg { fill: currentColor; }
+.sim-park__n:empty { display: none; }
+.sim-lit.sim-at { outline: 3px solid var(--layer-color); outline-offset: 3px; }
+.sim-lit.sim-from { outline: 3px dashed var(--layer-color); outline-offset: 3px; }
 
 /* toasts sit over the machines, not over the messages a toast is about */
 @media (min-width: 1024px) {

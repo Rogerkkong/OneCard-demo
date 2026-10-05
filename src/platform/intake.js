@@ -14,9 +14,24 @@ import { parseIso } from '../shared/time.js';
 // machine can send it again once the problem is fixed (a school reactivated, a machine
 // switched back on). Recording the message, claiming its seq and everything the message
 // changes happen in one transaction: a message is either wholly in the books or not at all.
+//
+// Simulation mode (docs/DESIGN.md §11.2): once the envelope is read, the rest of the pipeline
+// runs inside the event context { msgId: <envelope id> }, so every event it causes (purchase,
+// ledger, differences, its own intake event) names the message, and the lab console can follow
+// it hop by hop. Each intake event lists the pipeline steps the message went through (`checks`).
 
 /** Largest message the platform reads; a full journal batch of 200 records stays well below it. */
 export const MAX_MESSAGE_BYTES = 1024 * 1024;
+
+/**
+ * The pipeline steps of DESIGN §3, in order, as the intake events list them (`checks`).
+ * `recorded` is step 10: the message recorded and dispatched.
+ */
+export const INTAKE_STEPS = Object.freeze([
+  'topic', 'device', 'envelope', 'topicMatch', 'signature', 'duplicate', 'sequence', 'gates', 'typeRules', 'recorded',
+]);
+// What an accepted card read-back's event tells about the snapshot check (never its message text).
+const SNAPSHOT_EVENT_FIELDS = Object.freeze(['checked', 'match', 'cardSen', 'mirrorSen', 'unconfirmedSen', 'laterSen', 'code']);
 
 const ACK_RESULTS = Object.freeze(['APPLIED', 'ALREADY_APPLIED', 'REJECTED']);
 // Message types only one kind of machine may send (pipeline step 9).
@@ -86,9 +101,20 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
 
   // ---- the pipeline ----------------------------------------------------------------
 
+  /** Run `fn` in the event context of one message (an older bus without contexts: just run it). */
+  function inMessage(msgId, fn) {
+    return typeof events?.withContext === 'function' ? events.withContext({ msgId }, fn) : fn();
+  }
+
+  /** The message passed this step of the pipeline (for the event's `checks`). */
+  function pass(sender, step) {
+    sender.passed = INTAKE_STEPS.indexOf(step) + 1;
+  }
+
   /**
    * Steps 1-10 of DESIGN §3. `sender` collects what is known about the sender as the steps
-   * go, so a refusal can be filed under the right machine and school.
+   * go, so a refusal can be filed under the right machine and school, and how far the message
+   * got (`passed`).
    */
   function run(topic, payload, sender) {
     // 1. A device topic, on the records or status channel.
@@ -99,19 +125,33 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
     // The codes the topic claims: the lab console files the event under that school, as the broker does.
     sender.schoolCode = where.school;
     sender.deviceCode = where.device;
+    pass(sender, 'topic');
 
     // 2. A machine the platform knows. From here on a refusal goes to that machine's own log.
     const found = devices.resolveByCodes(where.school, where.device);
     if (!found) {
       throw new Refusal('UNKNOWN_DEVICE', `no machine ${where.device} in school ${where.school}`, { school: where.school, device: where.device });
     }
-    const { school, device, secret } = found;
-    sender.schoolId = school.id;
-    sender.deviceId = device.id;
+    sender.schoolId = found.school.id;
+    sender.deviceId = found.device.id;
+    pass(sender, 'device');
 
     // 3. JSON with the shape of an envelope.
     const env = readEnvelope(payload, sender);
+    pass(sender, 'envelope');
 
+    // The rest, and how it ends (accepted, duplicate or refused), carries the message id.
+    return inMessage(env.id, () => {
+      try {
+        return checkAndRecord(where, found, env, sender);
+      } catch (err) {
+        return settle(sender, err);
+      }
+    });
+  }
+
+  /** Steps 4-10, for an envelope read from the topic `where` of the machine `found`. */
+  function checkAndRecord(where, { school, device, secret }, env, sender) {
     // 4. The envelope names the topic's school and machine, and its type belongs on this channel.
     if (env.school !== where.school || env.device !== where.device) {
       throw new Refusal('TOPIC_MISMATCH', `the envelope names ${env.school}/${env.device} but came on the topic of ${where.school}/${where.device}`, {
@@ -126,13 +166,16 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
         { channel: where.channel },
       );
     }
+    pass(sender, 'topicMatch');
 
     // 5. Signed with this machine's secret (the topic alone is only the broker's word).
     if (!verifyEnvelopeSignature(secret, env)) throw new Refusal('SIGNATURE_INVALID');
+    pass(sender, 'signature');
 
     // 6. Already accepted: nothing else happens.
     const seen = recordedMessage(school.id, device.id, env.id);
     if (seen) return duplicate(sender, env, seen);
+    pass(sender, 'duplicate');
 
     // 7. Sequence numbers only go up. Only read here: the seq is claimed when the message is recorded.
     if (env.seq <= device.lastSeq) {
@@ -141,13 +184,16 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
         lastSeq: device.lastSeq,
       });
     }
+    pass(sender, 'sequence');
 
     // 8. Gates. A suspended school's whole message is refused; the machine keeps its records.
     if (school.status !== 'ACTIVE') throw new Refusal('SCHOOL_SUSPENDED');
     if (device.status !== 'ACTIVE') throw new Refusal('DEVICE_DISABLED', `the machine is ${device.status}`, { status: device.status });
+    pass(sender, 'gates');
 
     // 9. Who may send what, and what the body must hold.
     checkTypeRules(env, device);
+    pass(sender, 'typeRules');
 
     // 10. Record the message id and seq, then dispatch, in one transaction.
     let outcome;
@@ -171,6 +217,8 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
       if (err instanceof AlreadyRecorded) return duplicate(sender, env, recordedMessage(school.id, device.id, env.id));
       throw err;
     }
+    // a message whose one record settlement refused was recorded, but ends refused at this step
+    if (outcome.result === 'ACCEPTED') pass(sender, 'recorded');
     return finish(sender, env, outcome);
   }
 
@@ -428,10 +476,33 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
       return e;
     });
 
+  /**
+   * The pipeline steps for an intake event: each step the message passed, then the step where
+   * it stopped with `ok: false` and the code (a duplicate stops at `duplicate`, code DUPLICATE).
+   * An accepted message passed all ten.
+   * @returns {Array<{ step: string, ok: boolean, code?: string }>}
+   */
+  function checksOf(sender, code) {
+    const passed = Math.min(sender.passed, INTAKE_STEPS.length);
+    const checks = INTAKE_STEPS.slice(0, passed).map((step) => ({ step, ok: true }));
+    if (code !== undefined && passed < INTAKE_STEPS.length) checks.push({ step: INTAKE_STEPS[passed], ok: false, code });
+    return checks;
+  }
+
+  /** What the lab console shows of a read-back's snapshot check (DESIGN §11.2). */
+  function eventSnapshot(snapshot) {
+    const out = {};
+    for (const key of SNAPSHOT_EVENT_FIELDS) if (snapshot[key] !== undefined) out[key] = snapshot[key];
+    return out;
+  }
+
   function finish(sender, env, outcome) {
     const data = { device: sender.deviceCode, type: env.type };
     if (outcome.code) data.code = outcome.code;
+    data.msgId = env.id;
+    data.checks = checksOf(sender, outcome.code);
     if (outcome.detail?.results) data.results = eventResults(outcome.detail.results);
+    if (outcome.result === 'ACCEPTED' && isPlainObject(outcome.detail?.snapshot)) data.snapshot = eventSnapshot(outcome.detail.snapshot);
     quietly('announce a message', () => events.emit(outcome.result === 'ACCEPTED' ? 'intake.accepted' : 'intake.refused', data, sender.schoolCode));
     const answer = { result: outcome.result };
     if (outcome.code) answer.code = outcome.code;
@@ -441,7 +512,9 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
   }
 
   function duplicate(sender, env, seen) {
-    quietly('announce a duplicate', () => events.emit('intake.duplicate', { device: sender.deviceCode, type: env.type }, sender.schoolCode));
+    quietly('announce a duplicate', () =>
+      events.emit('intake.duplicate', { device: sender.deviceCode, type: env.type, msgId: env.id, checks: checksOf(sender, 'DUPLICATE') }, sender.schoolCode),
+    );
     return {
       result: 'DUPLICATE',
       type: env.type,
@@ -465,6 +538,15 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
     return answer;
   }
 
+  /** intake.refused data for a message that left the pipeline at a check (or failed in the platform). */
+  function refusalEvent(sender, code) {
+    const data = { device: sender.deviceCode ?? null, type: sender.type ?? null, code };
+    // the id as far as it could be read: a message refused at the envelope step may still name one
+    if (sender.messageId) data.msgId = sender.messageId;
+    data.checks = checksOf(sender, code);
+    return data;
+  }
+
   /**
    * File a refusal: the machine's log (an unidentified sender's goes under no school, the lab
    * console's view of unknown senders), the lab console, and the answer.
@@ -480,9 +562,7 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
         detail: logDetail(sender, refusal.detail),
       }),
     );
-    quietly('announce a refusal', () =>
-      events.emit('intake.refused', { device: sender.deviceCode ?? null, type: sender.type ?? null, code: refusal.code }, sender.schoolCode ?? null),
-    );
+    quietly('announce a refusal', () => events.emit('intake.refused', refusalEvent(sender, refusal.code), sender.schoolCode ?? null));
     note('warn', `intake refused a message: ${refusal.code}`, { school: sender.schoolCode, device: sender.deviceCode, type: sender.type });
     return refusedAnswer(sender, refusal.code, { message: refusal.message, ...refusal.detail });
   }
@@ -506,10 +586,17 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
         detail: logDetail(sender, { error: String(err?.message ?? err).slice(0, 200) }),
       }),
     );
-    quietly('announce an internal error', () =>
-      events.emit('intake.refused', { device: sender.deviceCode ?? null, type: sender.type ?? null, code: 'INTERNAL' }, sender.schoolCode ?? null),
-    );
+    quietly('announce an internal error', () => events.emit('intake.refused', refusalEvent(sender, 'INTERNAL'), sender.schoolCode ?? null));
     return refusedAnswer(sender, 'INTERNAL', { message: INTERNAL_MESSAGE });
+  }
+
+  /** How a message that left the pipeline with an error ends: refused, or failed in the platform. Never throws. */
+  function settle(sender, err) {
+    try {
+      return err instanceof Refusal ? refused(sender, err) : internal(sender, err);
+    } catch {
+      return { result: 'REFUSED', code: 'INTERNAL', detail: { message: INTERNAL_MESSAGE } };
+    }
   }
 
   return {
@@ -518,7 +605,10 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
      * Never throws: a failure of the platform itself is REFUSED with code INTERNAL and logged.
      * Every refusal goes to the device log (level WARN) and is announced as intake.refused;
      * accepted messages as intake.accepted, repeats as intake.duplicate
-     * (`{ device, type, code?, results? }`, filed under the school code).
+     * (`{ device, type, code?, msgId?, checks, results?, snapshot? }`, filed under the school code;
+     * `msgId` once the envelope id could be read, `checks` the pipeline steps up to where the
+     * message ended, `snapshot` on an accepted card.readback). Everything after the envelope is
+     * read runs in the event context { msgId } (DESIGN §11.2).
      *
      * `detail`: for a refusal `{ message, ... }`; for a record-carrying message `{ results }`
      * (one entry per record: `{ index?, txn, origin, status, purchaseId?, code?, message?,
@@ -533,15 +623,11 @@ export function createIntake(ctx, { devices, configs, settlement, reconcile } = 
      * @returns {{ result: 'ACCEPTED'|'DUPLICATE'|'REFUSED', code?: string, type?: string, detail?: object }}
      */
     handle(topic, payload) {
-      const sender = { schoolId: null, schoolCode: null, deviceId: null, deviceCode: null, type: null };
+      const sender = { schoolId: null, schoolCode: null, deviceId: null, deviceCode: null, type: null, passed: 0 };
       try {
         return run(topic, payload, sender);
       } catch (err) {
-        try {
-          return err instanceof Refusal ? refused(sender, err) : internal(sender, err);
-        } catch {
-          return { result: 'REFUSED', code: 'INTERNAL', detail: { message: INTERNAL_MESSAGE } };
-        }
+        return settle(sender, err);
       }
     },
   };

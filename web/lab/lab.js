@@ -2,12 +2,14 @@
 // cloud server serves many schools; each school's site has its machines, cards and admin card.
 // Data: GET /api/lab/state (polled, and refreshed when events arrive), the live event stream
 // GET /api/lab/events, and the lab actions under /api/lab/* (they keep working while the
-// virtual cloud server is switched off: they are the lab, not the product).
+// virtual cloud server is switched off: they are the lab, not the product). The header's
+// Realtime | Simulation switch and the Simulation tab (sim.js) are Packet Tracer's Simulation
+// mode: replay any flow hop by hop, or hold live flows at each hop.
 
 import { get, post, toast } from '/shared/api.js';
 import { createI18n } from '/shared/i18n.js';
 import { STRINGS } from './strings.js';
-import { errorText } from './describe.js';
+import { errorText, heldText, sentences } from './describe.js';
 import { busy, downloadJson, prefs, rich, setHidden, setText, setTone } from './util.js';
 import { createTopology } from './topology.js';
 import { createTrays } from './tray.js';
@@ -15,6 +17,7 @@ import { createFaults } from './faults.js';
 import { createClock } from './clock.js';
 import { createInspector } from './inspector.js';
 import { createShell } from './shell.js';
+import { createSim } from './sim.js';
 
 const i18n = createI18n(STRINGS);
 const { t } = i18n;
@@ -23,6 +26,10 @@ const $ = (sel) => document.querySelector(sel);
 let refreshTimer = null;
 let refreshDue = 0;
 let netDown = false;
+
+// Answers that wait at a hop (Simulation mode, hold on) which the panel that asked cannot read:
+// the clock panel gets them as a plain message instead.
+const HELD_AS_MESSAGE = new Map([['/api/lab/clock/advance', 'sim.clockHeld']]);
 
 // Events after which the picture on screen is out of date (the state is fetched again).
 const REFRESH_ON = new Set([
@@ -63,11 +70,21 @@ const app = {
 
   /**
    * POST to a lab route. The button (if any) shows `label` while it runs. Never throws.
-   * @returns {Promise<{ ok: true, data: any } | { ok: false, error: Error }>}
+   * In Simulation mode with hold on, an action whose flow waits at a hop answers early
+   * ({ held: true, trace, item, ... }): the Simulation tab says so, and the answer comes back
+   * with `held: true` (or, for a panel that cannot read it, as a HELD message).
+   * @returns {Promise<{ ok: true, data: any, held?: true } | { ok: false, error: Error }>}
    */
   async call(path, body, button, label) {
     try {
       const data = await busy(button, button ? label ?? t('working') : null, () => post(path, body ?? {}));
+      if (data && data.held === true) {
+        sim.noteHeld(data, { open: path !== '/api/lab/console' });
+        if (HELD_AS_MESSAGE.has(path)) {
+          return { ok: false, error: { code: 'HELD', message: sentences(t(HELD_AS_MESSAGE.get(path)), heldText(data.item, t, { serverUp: app.state?.server?.up !== false })) } };
+        }
+        return { ok: true, data, held: true };
+      }
       return { ok: true, data };
     } catch (error) {
       return { ok: false, error };
@@ -77,7 +94,7 @@ const app = {
   },
 
   fail(error) {
-    toast(errorText(error, t), 'bad');
+    toast(errorText(error, t), error?.code === 'HELD' ? 'info' : 'bad');
     if (error?.code === 'NETWORK') app.refresh(0);
   },
 
@@ -86,6 +103,7 @@ const app = {
   async setServer(up, button) {
     const res = await app.call('/api/lab/server', { up }, button, t(up ? 'cloud.busyOn' : 'cloud.busyOff'));
     if (!res.ok) return app.fail(res.error);
+    if (res.held) return toast(t(up ? 'sim.serverHeld' : 'sim.serverOffHeld'), 'info');
     if (!res.data.changed) toast(t(up ? 'toast.serverSameOn' : 'toast.serverSameOff'), 'info');
     else toast(t(up ? 'toast.serverOn' : 'toast.serverOff'), up ? 'good' : 'warn');
   },
@@ -93,7 +111,7 @@ const app = {
   async restartBroker(button) {
     const res = await app.call('/api/lab/broker/restart', {}, button, t('cloud.busyRestart'));
     if (!res.ok) return app.fail(res.error);
-    toast(t('toast.brokerRestarted'), 'good');
+    toast(t(res.held ? 'sim.brokerHeld' : 'toast.brokerRestarted'), res.held ? 'info' : 'good');
   },
 
   openConsole(key) {
@@ -108,7 +126,18 @@ const app = {
 
   beforeReset() {
     inspector.clear();
+    sim.reset();
     app.selected = null;
+  },
+
+  /** 'realtime' or 'simulation' (Simulation mode, DESIGN §11). */
+  simMode() {
+    return sim.mode;
+  },
+
+  /** Show the Simulation tab (something waits at a hop). */
+  openSim() {
+    tabs.show('sim');
   },
 
   /** Fetch the state again soon; a burst of events leads to one fetch, never to an endless wait. */
@@ -132,6 +161,14 @@ const faults = createFaults(app, $('#faults'));
 const clock = createClock(app, $('#clock'));
 const inspector = createInspector(app, $('#panel-messages'));
 const shell = createShell(app, $('#panel-console'));
+const sim = createSim(app, {
+  root: $('#panel-sim'),
+  modeSwitch: $('#mode-switch'),
+  topologyEl: $('#topology'),
+  topology,
+  showTab: (name) => tabs.show(name),
+});
+app.sim = sim;
 
 // ---- header, language, help, banners ---------------------------------------------------------------
 
@@ -140,6 +177,7 @@ $('#lang').append(switcher);
 
 const tabs = (() => {
   const buttons = [...document.querySelectorAll('[role="tab"]')];
+  const names = buttons.map((b) => b.dataset.tab);
   function show(name, focus = false) {
     for (const b of buttons) {
       const on = b.dataset.tab === name;
@@ -149,6 +187,7 @@ const tabs = (() => {
       if (on && focus) b.focus();
     }
     prefs.set('tab', name);
+    sim.shown(name === 'sim');
   }
   for (const b of buttons) {
     b.addEventListener('click', () => show(b.dataset.tab));
@@ -164,7 +203,8 @@ const tabs = (() => {
       show(next.dataset.tab, true);
     });
   }
-  show(prefs.get('tab', 'messages') === 'console' ? 'console' : 'messages');
+  const saved = prefs.get('tab', 'messages');
+  show(names.includes(saved) ? saved : 'messages');
   return { show };
 })();
 
@@ -207,7 +247,7 @@ function renderHelp() {
   };
   const steps = document.createElement('ol');
   steps.className = 'help__steps';
-  steps.append(li('help.s1'), li('help.s2'), li('help.s3'), li('help.s4'), li('help.s5'));
+  steps.append(li('help.s1'), li('help.s2'), li('help.s3'), li('help.s4'), li('help.s5'), li('help.s6'));
   const outside = document.createElement('h3');
   outside.textContent = t('help.outside');
   const tool = (titleKey, ...paras) => {
@@ -271,7 +311,7 @@ function renderBanners() {
 }
 $('#banner-down button').addEventListener('click', (ev) => app.setServer(true, ev.currentTarget));
 
-function render() {
+function render(requestedAt = 0) {
   const s = app.state;
   renderBanners();
   renderHeader();
@@ -286,6 +326,7 @@ function render() {
   clock.update(s);
   inspector.update(s);
   shell.relabel();
+  sim.update(s, requestedAt);
   renderHelp();
   renderJump();
 }
@@ -295,6 +336,7 @@ i18n.onChange(() => {
   switcher.setAttribute('aria-label', t('lang.label'));
   render();
   inspector.relang();
+  sim.relang();
 });
 document.title = t('doc.title');
 switcher.setAttribute('aria-label', t('lang.label'));
@@ -317,11 +359,12 @@ async function load() {
   }
   loading = true;
   try {
+    const requestedAt = performance.now();
     const s = await get('/api/lab/state');
     const wasDown = netDown;
     netDown = false;
     app.state = s;
-    render();
+    render(requestedAt);
     if (wasDown) toast(t('toast.back'), 'good');
   } catch {
     // the lab process itself is unreachable (its own routes never answer 503 SERVER_DOWN)
@@ -360,12 +403,19 @@ document.addEventListener('visibilitychange', () => {
 // ---- the live event stream -----------------------------------------------------------------------
 
 let stream = null;
+let streamLost = false;
 function connectEvents() {
   stream?.close();
   stream = new EventSource('/api/lab/events');
-  stream.addEventListener('open', () => inspector.setLive('live'));
+  stream.addEventListener('open', () => {
+    inspector.setLive('live');
+    // whatever happened while the stream was away: the Simulation tab asks for it again
+    if (streamLost) sim.resync();
+    streamLost = false;
+  });
   stream.addEventListener('error', () => {
     inspector.setLive('reconnecting');
+    streamLost = true;
     // the browser retries by itself unless the stream was refused; then try again later
     if (stream.readyState === EventSource.CLOSED) setTimeout(connectEvents, 3000);
   });
@@ -379,6 +429,7 @@ function connectEvents() {
     if (!e || typeof e.type !== 'string') return;
     inspector.add(e);
     topology.onEvent(e);
+    sim.onEvent(e);
     if (REFRESH_ON.has(e.type)) app.refresh(150);
   });
 }

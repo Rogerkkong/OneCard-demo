@@ -702,7 +702,9 @@ and prints the URLs and broker accounts.
 `mqtt.connect`, `mqtt.disconnect`, `mqtt.denied`, `mqtt.publish`, `intake.accepted`, `intake.duplicate`, `intake.refused`,
 `purchase.received`, `ledger.posting`, `topup.status`, `topup.refunded`, `config.published`, `card.issued`, `card.lost`, `card.found`,
 `card.write`, `device.screen`, `device.cable`, `admin-card.loaded`, `admin-card.applied`, `difference.opened`, `difference.resolved`,
-`audit`, `lab.action`, `lab.clock`, `tenant.created`, `school.status`, `device.registered`, `server.status`, `broker.status`.
+`audit`, `lab.action`, `lab.clock`, `tenant.created`, `school.status`, `device.registered`, `server.status`, `broker.status`,
+and for Simulation mode (§11): `device.step`, `device.send`, `device.acked`, `device.received`, `device.http`, `platform.send`,
+`http.kiosk`, `sim.trace`, `sim.held`, `sim.released`, `sim.mode`. Events may carry top-level `trace` and `msgId` (§11.1).
 
 ---
 
@@ -712,10 +714,216 @@ Plain HTML, CSS and JavaScript modules, no build step, served by the lab server.
 (中文) available. `web/shared/` holds the API helper, i18n helper and base styles; each app keeps its own strings.
 - `web/lab/` — the lab console: the whole virtual topology — the cloud server node (switch it off, restart the
   broker) and every school's site with its machines — plus the card tray, tap with item/volume choice, cable
-  switches, admin-card loading and tapping, faults, lab clock and the live message inspector (filter by school).
+  switches, admin-card loading and tapping, faults, lab clock and the live message inspector (filter by school),
+  and the Simulation tab (§11.6): step-by-step replay of every flow with packet details, and live hold at each hop.
 - `web/operator/` — the SaaS operator console: every tenant with its status and health, onboard a new school
   (staff, machines, demo members), suspend or reactivate a school, broker connections per school.
 - `web/admin/` — school office: overview, members and cards, parents, devices, prices and settings, top-ups,
   books, reconciliation, audit.
 - `web/parent/` — parent app, phone first: sign in or register with an invitation code, balance and waiting amount
   side by side (never added together), top up with the mock bank, history.
+
+---
+
+## 11. Simulation mode (Packet Tracer-like)
+
+Packet Tracer's "simulation mode" for OneCard: follow one flow hop by hop — card → machine → broker → platform →
+books — and break things between hops. Two parts:
+
+- **Traces** (always on). Every lab action and every product request starts a *trace*. Every event it causes,
+  across the MQTT and HTTP hops, carries the trace id, so the lab console can replay the flow step by step.
+- **Live stepping** (opt-in). In simulation mode with *hold at each hop* on, a traced flow really waits at fixed
+  hold points until the person presses Next. Meanwhile they can pull a cable or switch the server off and see what
+  the system does about it.
+
+With hold off (the default, and always in realtime mode) nothing behaves differently: traces only add fields to
+events. Every existing test keeps passing unchanged.
+
+### 11.1 Event context (`src/shared/events.js`)
+
+The bus gets an `AsyncLocalStorage` context, one per bus:
+- `bus.withContext(patch, fn)` → runs `fn` (sync or async) with context `{ ...current, ...patch }` and returns what
+  `fn` returns. Fields: `trace` (string), `msgId` (string).
+- `bus.context()` → the current context object, or `null`.
+- `bus.untraced(fn)` → runs `fn` with an empty context. **Long-lived resources must be created untraced**: MQTT
+  clients (machines, platform), the broker, servers, intervals. Otherwise every later callback of that resource
+  would inherit the trace that happened to create it.
+- `emit(type, data, school)` captures the context **at emit time** (before the after-commit deferral). The event
+  object gains `trace` and/or `msgId` top-level fields only when the context has them:
+  `{ seq, at, type, school, data, trace?, msgId? }`. Untraced events are exactly as before.
+- `bus.setEnricher(fn | null)` → `fn(event)` runs in `deliver()` before the event is kept and fanned out; it may
+  set `event.trace`. A throwing enricher is ignored.
+
+### 11.2 Who emits what (new events and fields)
+
+Machines (`src/devices/terminal.js` and subclasses), filed under the machine's school, `device` = machine code:
+- `device.step` `{ device, step, ok, … }`:
+  - `step: 'card.read'` `{ last4, balanceSen, cardSeq, records, listVersionOnCard }` (records: how many) when a
+    card is read for a tap (reader, water, kiosk). A card that cannot be used: `ok: false, reason` (CARD_UNREADABLE,
+    WRONG_SCHOOL, BLOCKED) — the screen still says only "Card unavailable".
+  - `step: 'rules'` `{ amountSen, checks: [{ rule, ok, … }] }`: the tap rules in DESIGN order, stopping at the
+    first one that fails, like the machine: `window` `{ open }`, `group` `{ group }`, `perPurchase`
+    `{ limitSen }`, `dailyTotal` `{ usedSen, limitSen }`, `dailyCount` `{ count, limit }`, `tapGap`
+    `{ waitMs }`, `balance` `{ balanceSen }`. (The block list is part of `card.read`.)
+  - `step: 'journal'` `{ txn, unsent }`: the completed record is saved in the machine's journal.
+  - `step: 'offline'` `{ type, txn? }`: a message was not sent because the machine has no broker link (a record
+    waits in the journal).
+- `device.send` `{ device, msgId, type, seq, txn?, topic, bytes, inReplyTo? }` just before the signed QoS 1
+  publish. `inReplyTo` is the command's envelope id when the message is a `command.ack`.
+- `device.acked` `{ device, msgId, type, ok, ms, reason? }` when the PUBACK comes (`ok: true`) or does not
+  (`ok: false`, reason `'timeout'` or `'connection lost'`).
+- `device.received` `{ device, msgId, type, kind?, version?, result }` for each command the machine takes from its
+  commands topic: `result` APPLIED, ALREADY_APPLIED, REJECTED, or IGNORED (bad signature, another machine's).
+- `device.http` `{ device, call, method, path, status, ok, code?, ms }` after each kiosk API call (`call`:
+  pending, confirm, lookup, packs, receipts; `status` 0 when the network failed).
+
+Broker (`src/broker/broker.js`): `mqtt.publish` gains `msgId` (the envelope id, or null) and `qos`.
+
+Platform:
+- `intake.js` runs everything after step 3 (envelope read) inside `withContext({ msgId: env.id })`, so every
+  event of the services it calls (purchase, ledger, differences, top-ups, configs) carries the message id.
+  `intake.accepted`, `intake.refused` and `intake.duplicate` gain `msgId` (when known) and
+  `checks: [{ step, ok, code? }]` — the pipeline steps in order up to where the message ended: `topic`, `device`,
+  `envelope`, `topicMatch`, `signature`, `duplicate`, `sequence`, `gates`, `typeRules`, `recorded`. An accepted
+  `card.readback` also carries `snapshot` `{ checked, match?, cardSen?, mirrorSen?, unconfirmedSen?, laterSen?,
+  code? }`.
+- `platform.js` emits `platform.send` `{ msgId, topic, type, device, retained }` before publishing a command,
+  inside the caller's context.
+- `server.js` emits `http.kiosk` `{ device, method, path, status, code? }` for every kiosk API request.
+
+### 11.3 Traces (`src/lab/trace.js`)
+
+`createTracer(events, { clock, keepTraces = 200, keepEvents = 500 })` → tracer:
+- `begin({ kind, title, school?, device? })` → trace id `'tr_…'`; emits `sim.trace`
+  `{ id, n, kind, title, device? }` inside the new trace, so it is the trace's first event. `n` counts from 1.
+- `run(meta, fn)` → `begin(meta)`, then `events.withContext({ trace: id }, fn)`; returns `{ trace: id, result }`
+  where `result` is what `fn` returns (a promise if `fn` is async).
+- `has(id)`, `list({ limit = 50 })` → newest first `[{ id, n, kind, title, school, device, at, events,
+  lastAt }]` (events: how many), `get(id)` → `{ trace, events }`.
+- It installs the bus enricher. An event without a trace whose `msgId` (top level or `data.msgId`) is known gets that
+  message's trace. A `device.send` with `inReplyTo` gets the command's trace. Every traced event that carries
+  `data.msgId` registers that id with its trace. The id map is bounded to the last 5000 ids.
+- The tracer keeps the events of each trace (after enrichment), for replay.
+
+The lab (`src/lab/lab.js`) runs every action inside `tracer.run(...)`, with a plain title such as
+"Tap 04A13B5C7D2E80 on CANTEEN-01":
+- tap, cable plug and pull
+- admin card load, tap and upload
+- USB export, heartbeat, upload, reboot
+- clock advance, run jobs
+- server up and down, broker restart
+- every fault
+- console commands that act
+
+After a cable plug, the first post-connect routine (heartbeat and journal upload) belongs to the plug's trace: the
+Terminal keeps the context it was plugged in for **at most 30 s**. After server up or broker restart, likewise for
+every plugged machine, via `machine.traceNextConnect()`, which keeps `events.context()` for 30 s.
+`server.js` runs:
+- every non-GET request under `/api/admin`, `/api/operator`, `/api/parent` and `/api/pay`, and the mock bank's
+  form posts, inside a new trace (kind `request`, title such as "School office: POST /api/admin/configs/prices").
+  This applies only when the lab has a tracer.
+- a kiosk request carrying `x-lab-trace` inside that trace, if `lab.tracer.has(id)`. The lab's kiosk API client
+  sends this header from `events.context()`. The mock bank's server-to-server callback forwards it too.
+
+### 11.4 Live stepping
+
+Lab state: `sim = { mode: 'realtime'|'simulation', hold: boolean, held: [item…] }`. Defaults: realtime, hold off.
+
+A held item is `{ id, trace, where, device, school, type?, msgId?, call?, at }`, with `where` one of `machine`,
+`kiosk-http` or `platform`.
+
+Hold points apply only to events inside a trace started by a person, and only when `mode === 'simulation' &&
+hold`:
+1. **Machine outbox.** The `Terminal` option `gate(info)` is called after the signed envelope is built and before
+   it is published: `info = { kind: 'publish', device, school, type, msgId, seq, txn?, topic }`. If it returns a
+   promise, the machine waits for it, then checks its link again. With no link it emits `device.step` offline and
+   returns false; a record stays unsent in the journal. The seq is used up, which is harmless.
+2. **Kiosk HTTP.** `TopupKiosk` calls the same gate before each API call: `info = { kind: 'http', call, method,
+   path }`. After release the call runs. It fails as NETWORK when the server is off, or when the kiosk's cable is
+   out: `createKioskApi({ …, online: () => boolean, headers: () => object })`.
+3. **Platform inbox.** `platform.setInboxGate(fn | null)`: `fn({ topic, school, device, type, msgId })` may
+   return a promise to hold the message, which is already acknowledged to the broker ("stored by the platform").
+   Messages from one machine are processed in arrival order: a held message also holds back later messages from
+   the same machine, and only those.
+
+Rules:
+- A gate that returns `undefined` changes nothing; realtime code paths stay synchronous.
+- `sim.held` `{ id, where, device, type?, msgId?, call? }` is emitted inside the item's trace when it starts to
+  wait, and `sim.released` `{ id }` when it is released. `sim.mode` `{ mode, hold }` is emitted when the mode
+  changes.
+- `simNext()` releases the oldest releasable item. A `platform` item is releasable only while the server is up.
+  It returns `{ released: item|null, waiting: n }`.
+- `simRelease()` releases all items in order. Turning hold off, switching to realtime, reset and stop release
+  everything.
+- An action that gets held answers early, as soon as its trace holds something: `{ held: true, trace, …partial }`
+  (a tap includes the machine's screen). The rest arrives as events; the action's `lab.action` event is emitted
+  when it completes.
+
+As built (additions to the above):
+- A held item also carries, when known, `txn`, `topic`, `method`, `path`. `sim.held` carries the whole item.
+- Every action answer carries `trace`. An early answer also carries the held `item`.
+- An action that fails after it answered early reports a `lab.action` with `ok: false, code, message` inside its trace.
+- A machine message is held only while the lab is running. Command acks are never held at the machine, only at the
+  platform.
+- `setSim` refuses contradictory or empty requests (`hold: true` with realtime) with `INPUT_INVALID`.
+- The lab's kiosk API client treats the kiosk as offline while its cable is out **or** the virtual cloud server is
+  off. A switched-off server answers nothing, so the call fails as NETWORK, status 0, with no `http.kiosk`.
+- A `publishUp` message that was held and then overtaken (for example by a heartbeat) goes out with the next seq,
+  re-signed, with the same message id.
+- `device.acked` is emitted untraced and joins its flow by `data.msgId`. Commands are handled inside
+  `withContext({ msgId: <command id> })`.
+- `createLab` gains option `reconnectMs` (the machines' first broker retry; tests use 200).
+- `mqtt.denied` for a refused publish carries `msgId` (the envelope id, when the payload is one), so the
+  refusal joins the sender's flow. The cross-device-publish fault announces its copied login's publish as
+  `device.send` in the fault's trace.
+- `POST /api/lab/console`: a line whose action was held at a hop also answers `held: true`, `trace` and
+  `item` (the action's early answer), next to `output`, `target` and `prompt`.
+- Hold off or realtime while the server is off: what waits at the platform goes on by itself once the
+  server is back (with whatever reached the platform while it came up). Switching the server off or
+  restarting the broker passes on every message the broker already acknowledged before it closes.
+
+### 11.5 Lab API
+
+Routes, all with auth `none`:
+- `GET /api/lab/sim` → `{ mode, hold, held, traces }` (traces: `tracer.list()`).
+- `GET /api/lab/sim/traces/:id` → `{ trace, events }`, or 404 `TRACE_NOT_FOUND`.
+- `POST /api/lab/sim {mode?, hold?}` → the new sim state (400 `INPUT_INVALID`).
+- `POST /api/lab/sim/next` → `{ released, waiting }`.
+- `POST /api/lab/sim/release` → `{ released: n }`.
+
+`state()` gains `sim: { mode, hold, held }`. The lab object exposes `tracer`, `simState()`, `setSim()`,
+`simNext()` and `simRelease()`.
+
+Console, at `onecard>` and `server#`:
+- `simulation on|off`
+- `hold on|off`
+- `next`
+- `show held`
+- `show traces`
+- `show trace <n>`: one line per step
+
+### 11.6 The lab console (web/lab/)
+
+- **Mode switch.** A *Realtime | Simulation* switch in the header, with a new **Simulation** tab next to
+  Messages and Console.
+- **Simulation tab:**
+  - a trace picker (newest first: "#3 · Tap · CANTEEN-01 · 10:02"); the newest trace is followed automatically
+  - playback: ⏮ first, ◀ back, ▶ play/⏸ pause (speed 0.5× / 1× / 2×), next ▶, ⏭ last
+  - the *Hold at each hop (live)* switch, with the waiting items and a **Next hop** button
+  - Packet Tracer's event list: # · time · last device · at device · type · what happened
+- **Packet details.** Clicking a step opens the details, organised in layers:
+  - *What happened* (one plain sentence)
+  - *Card* (chip data)
+  - *Machine checks* (rules ✓/✗)
+  - *Message* (envelope fields)
+  - *Security* (signature: HMAC-SHA256 with the machine's own secret, checked by the platform)
+  - *MQTT* (topic, QoS 1, acknowledgement, the broker's access rule)
+  - *Platform checks* (the pipeline steps ✓/✗)
+  - *Books* (posting lines)
+  - *Raw JSON*
+- **Topology.** The current step's envelope travels on the topology from its *from* node to its *to* node (card,
+  machine, school network, broker, platform, database, kiosk ↔ platform for HTTP). A refusal shows a red ✗ where
+  the message was dropped. A held item parks its envelope at the hold point with a pause badge. With reduced
+  motion: no travel, only highlights.
+- **Text.** Event → step mapping (layer, from, to, verdict, text) lives in `web/lab/sim-steps.js`. Every string is
+  in EN and 中文.
