@@ -594,8 +594,12 @@ describe('accepted messages', () => {
     assert.deepEqual(res.detail.results.map((r) => [r.status, r.code]), [['REFUSED', 'RECORD_INVALID']]);
     const [entry] = logOf(canteen);
     assert.deepEqual([entry.level, entry.code, entry.detail.txn, entry.detail.type], ['WARN', 'RECORD_INVALID', 'CANTEEN-01-000001', 'sale.recorded']);
+    // it got through every check and was recorded, and ends refused at the last step
     assert.deepEqual(refusedEvents().map((e) => e.data), [
-      { device: 'CANTEEN-01', type: 'sale.recorded', code: 'RECORD_INVALID', results: [{ txn: 'CANTEEN-01-000001', status: 'REFUSED', code: 'RECORD_INVALID', differences: [] }] },
+      {
+        device: 'CANTEEN-01', type: 'sale.recorded', code: 'RECORD_INVALID', msgId: env.id, checks: stoppedAt('recorded', 'RECORD_INVALID'),
+        results: [{ txn: 'CANTEEN-01-000001', status: 'REFUSED', code: 'RECORD_INVALID', differences: [] }],
+      },
     ]);
     // the message got through the pipeline: its seq is used and a repeat is a duplicate
     assert.equal(lastSeq(canteen), env.seq);
@@ -896,6 +900,132 @@ describe('tenant isolation', () => {
   });
 });
 
+describe('Simulation mode: the message id and the pipeline checks (DESIGN §11.2)', () => {
+  test('the checks are the ten steps of the pipeline, in order', () => {
+    assert.deepEqual(INTAKE_STEPS, STEPS);
+  });
+
+  test('every event a message causes, in every service, carries its msgId; events before it carry none', () => {
+    const canteen = t.a.m['CANTEEN-01'];
+    const card = fund(t.a, 'aina', 2000);
+    const mark = t.ctx.events.lastSeq();
+    assert.ok(t.ctx.events.since(0).every((e) => !('msgId' in e)), 'the kiosk top-up that funded the card is no message');
+    // a batch: one sale posted (purchase, ledger), one card the school does not know (a difference)
+    const stranger = { digest: t.schools.cardDigestFor(t.a.id, '04DEADBEEF0001'), last4: '0001', cardSeq: 0, balanceSen: 1000 };
+    const records = [sale(card, { n: 1 }), sale(stranger, { n: 2 })];
+    const env = envelope(canteen, 'journal.batch', { batchId: 'CANTEEN-01-B1', count: 2, records }, { txn: 'CANTEEN-01-B1' });
+    assert.equal(deliver(canteen, env).result, 'ACCEPTED');
+    const caused = t.ctx.events.since(mark);
+    const types = new Set(caused.map((e) => e.type));
+    for (const type of ['purchase.received', 'ledger.posting', 'difference.opened', 'intake.accepted']) assert.ok(types.has(type), type);
+    assert.ok(caused.every((e) => e.msgId === env.id), JSON.stringify(caused.map((e) => [e.type, e.msgId])));
+    assert.ok(caused.every((e) => !('trace' in e)), 'no trace outside a traced flow');
+    const [accepted] = caused.filter((e) => e.type === 'intake.accepted');
+    assert.deepEqual([accepted.data.msgId, accepted.data.checks], [env.id, ALL_PASSED]);
+    // the next message has its own id, and nothing of this one's context is left behind
+    const next = envelope(canteen, 'device.heartbeat', heartbeatBody());
+    deliver(canteen, next);
+    assert.equal(eventsOf(t.ctx, 'intake.accepted').at(-1).msgId, next.id);
+    t.ctx.events.emit('lab.action', {}, null);
+    assert.equal('msgId' in t.ctx.events.since(0).at(-1), false);
+  });
+
+  test('handled inside a traced flow, the events carry the trace and the msgId', () => {
+    const canteen = t.a.m['CANTEEN-01'];
+    const env = envelope(canteen, 'device.heartbeat', heartbeatBody());
+    t.ctx.events.withContext({ trace: 'tr_intake01' }, () => deliver(canteen, env));
+    const e = eventsOf(t.ctx, 'intake.accepted').at(-1);
+    assert.deepEqual([e.trace, e.msgId], ['tr_intake01', env.id]);
+  });
+
+  test('a refused message: the steps it passed, then the one that stopped it, with its code', () => {
+    const canteen = t.a.m['CANTEEN-01'];
+    const water1 = t.a.m['WATER-01'];
+    const card = fund(t.a, 'aina', 5000);
+    assert.equal(send(canteen, 'device.heartbeat', heartbeatBody(), { seq: 10 }).result, 'ACCEPTED');
+    t.devices.setDeviceStatus({ schoolId: t.a.id, code: 'WATER-01', status: 'DISABLED', actor: 'office' });
+    /** The refusal's code, checks and msgId: in the data once the id could be read, in the context after the envelope step. */
+    const refusal = (res, step, code, msgId) => {
+      assert.equal(res.code, code, JSON.stringify(res));
+      const e = refusedEvents().at(-1);
+      assert.deepEqual(e.data.checks, stoppedAt(step, code), `${step}: ${code}`);
+      assert.equal(e.data.msgId, msgId, `data.msgId when stopped at ${step}`);
+      assert.equal(e.msgId, ['topic', 'device', 'envelope'].includes(step) ? undefined : msgId, `msgId when stopped at ${step}`);
+    };
+    const hb = () => envelope(canteen, 'device.heartbeat', heartbeatBody(), { seq: 11 });
+
+    refusal(t.intake.handle(topicOf(canteen, 'commands/prices'), JSON.stringify(hb())), 'topic', 'TOPIC_INVALID', undefined);
+    refusal(t.intake.handle('lab/v1/smk-alpha/CANTEEN-09/status', JSON.stringify(hb())), 'device', 'UNKNOWN_DEVICE', undefined);
+    refusal(t.intake.handle(topicOf(canteen, 'status'), 'not json'), 'envelope', 'ENVELOPE_INVALID', undefined);
+    // an envelope that is not one may still name its id: the refusal says which message it was
+    const unknownType = { ...hb(), type: 'sale.voided' };
+    refusal(t.intake.handle(topicOf(canteen, 'status'), JSON.stringify(unknownType)), 'envelope', 'UNKNOWN_TYPE', unknownType.id);
+    const otherSchool = envelope(canteen, 'device.heartbeat', heartbeatBody(), { school: 'smk-beta', seq: 11 });
+    refusal(deliver(canteen, otherSchool, 'status'), 'topicMatch', 'TOPIC_MISMATCH', otherSchool.id);
+    const forged = { ...hb(), sig: 'x'.repeat(43) };
+    refusal(deliver(canteen, forged), 'signature', 'SIGNATURE_INVALID', forged.id);
+    const old = envelope(canteen, 'device.heartbeat', heartbeatBody(), { seq: 3 });
+    refusal(deliver(canteen, old), 'sequence', 'SEQUENCE_ROLLBACK', old.id);
+    const switchedOff = envelope(water1, 'water.recorded', { record: water(card, { n: 1, ml: 300 }) });
+    refusal(deliver(water1, switchedOff), 'gates', 'DEVICE_DISABLED', switchedOff.id);
+    const wrongType = envelope(canteen, 'water.recorded', { record: water(card, { origin: 'CANTEEN-01', n: 2, ml: 300 }) }, { seq: 12 });
+    refusal(deliver(canteen, wrongType), 'typeRules', 'WRONG_DEVICE_TYPE', wrongType.id);
+    // the results are as before: nothing of the refused messages was kept
+    assert.equal(lastSeq(canteen), 10);
+    assert.deepEqual(purchases(t.a), []);
+  });
+
+  test('a duplicate stops at the duplicate step, inside its message\'s context', () => {
+    const canteen = t.a.m['CANTEEN-01'];
+    const env = envelope(canteen, 'device.heartbeat', heartbeatBody());
+    deliver(canteen, env);
+    assert.equal(deliver(canteen, env).result, 'DUPLICATE');
+    const [e] = eventsOf(t.ctx, 'intake.duplicate');
+    assert.deepEqual([e.msgId, e.data.msgId, e.data.checks], [env.id, env.id, stoppedAt('duplicate', 'DUPLICATE')]);
+  });
+
+  test('an accepted card.readback tells how its snapshot check went: the numbers or the code, never the message', () => {
+    const kiosk = t.a.m['KIOSK-01'];
+    const card = fund(t.a, 'aina', 2000);
+    const r1 = sale(card, { n: 1 });
+    const res = send(kiosk, 'card.readback', readbackBody(card, [r1]));
+    const snapshotEvent = () => eventsOf(t.ctx, 'intake.accepted').at(-1).data.snapshot;
+    assert.deepEqual(snapshotEvent(), { checked: true, match: true, mirrorSen: card.balanceSen, cardSen: card.balanceSen, unconfirmedSen: 0, laterSen: 0 });
+    assert.deepEqual(res.detail.snapshot, { checked: true, ...snapshotEvent() }, 'the answer is as before');
+    assert.deepEqual(eventsOf(t.ctx, 'intake.accepted').at(-1).data.results.map((r) => r.status), ['POSTED']);
+    // the card holds more than the books: a mismatch
+    card.balanceSen += 500;
+    send(kiosk, 'card.readback', readbackBody(card));
+    assert.deepEqual(snapshotEvent(), {
+      checked: true, match: false, mirrorSen: card.balanceSen - 500, cardSen: card.balanceSen, unconfirmedSen: 0, laterSen: 0,
+    });
+    // one that cannot be checked: the code, not the text
+    const unchecked = send(kiosk, 'card.readback', { ...readbackBody(card), cardSeq: 1.5 });
+    assert.equal(unchecked.detail.snapshot.checked, false);
+    assert.equal(typeof unchecked.detail.snapshot.message, 'string');
+    assert.deepEqual(snapshotEvent(), { checked: false, code: 'SNAPSHOT_INVALID' });
+    // other messages carry none
+    send(kiosk, 'device.heartbeat', heartbeatBody());
+    assert.equal('snapshot' in eventsOf(t.ctx, 'intake.accepted').at(-1).data, false);
+  });
+
+  test('with an older event bus (no contexts) intake works as before', () => {
+    const bus = t.ctx.events;
+    const plain = { emit: bus.emit, subscribe: bus.subscribe, since: bus.since, lastSeq: bus.lastSeq };
+    const intake = createIntake({ ...t.ctx, events: plain }, { devices: t.devices, configs: t.configs, settlement: t.settlement, reconcile: t.reconcile });
+    const canteen = t.a.m['CANTEEN-01'];
+    const card = fund(t.a, 'aina', 1000);
+    const env = envelope(canteen, 'sale.recorded', { record: sale(card, { n: 1 }) });
+    const mark = bus.lastSeq();
+    assert.equal(intake.handle(topicOf(canteen, 'records'), JSON.stringify(env)).result, 'ACCEPTED');
+    const caused = bus.since(mark);
+    assert.ok(caused.some((e) => e.type === 'ledger.posting'));
+    assert.ok(caused.every((e) => !('msgId' in e)), 'no context, so no msgId at the top');
+    const [accepted] = caused.filter((e) => e.type === 'intake.accepted');
+    assert.deepEqual([accepted.data.msgId, accepted.data.checks], [env.id, ALL_PASSED], 'the event itself still names the message');
+  });
+});
+
 describe('handle never throws', () => {
   test('whatever arrives, it answers', () => {
     const canteen = t.a.m['CANTEEN-01'];
@@ -928,6 +1058,9 @@ describe('handle never throws', () => {
     assert.deepEqual([entry.level, entry.code, entry.detail.error], ['ERROR', 'INTERNAL', 'settlement is down']);
     assert.ok(logs.some((l) => l.level === 'error' && l.meta.error === 'settlement is down'));
     assert.equal(refusedEvents().at(-1).data.code, 'INTERNAL');
+    // the step that was running when the platform failed is the one that stopped the message
+    assert.deepEqual(refusedEvents().at(-1).data.checks, stoppedAt('recorded', 'INTERNAL'));
+    assert.deepEqual([refusedEvents().at(-1).data.msgId, refusedEvents().at(-1).msgId], [env.id, env.id]);
     // once the platform works again the machine's same message goes in
     assert.equal(t.intake.handle(topicOf(canteen, 'records'), JSON.stringify(env)).result, 'ACCEPTED');
     assert.equal(purchases(t.a).length, 1);

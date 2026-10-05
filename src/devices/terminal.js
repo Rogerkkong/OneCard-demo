@@ -36,6 +36,13 @@ import { exportJournal as journalFile } from './usb.js';
 //
 // The card rules of a tap (DESIGN §3 "Terminal rules for a tap") live here too, as helpers the
 // canteen reader and the water machine share.
+//
+// Simulation mode (DESIGN §11): every step a machine takes is a lab event (device.step,
+// device.send, device.acked, device.received), emitted in the flow (trace) that caused it.
+// The MQTT client and the heartbeat timer are made outside any flow, so their later callbacks
+// never inherit one; a PUBACK or a command reaches its flow through the message id instead.
+// The optional `gate` is the machine's outbox hold point: in simulation mode the lab can make
+// a message wait there until the person presses Next.
 
 /** Firmware version the virtual machines report in their heartbeats. */
 export const FIRMWARE_VERSION = '1.0.0-lab';
@@ -56,10 +63,27 @@ const DEFAULT_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 10_000;
 // A message with no PUBACK after this long (a half-open link) counts as not sent.
 const DEFAULT_ACK_TIMEOUT_MS = 10_000;
+// A plug, server-up or broker restart owns the next post-connect routine only if the link is
+// up within this long; a connection that comes much later is not that action's doing.
+const DEFAULT_CONNECT_TRACE_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const COMMAND_IDS_KEPT = 1000; // envelope ids remembered to drop repeated commands
 const JOURNAL_WARN_SHARE = 0.9; // heartbeat health turns WARN when this much of the journal is unsent
+// Longest id, type or txn copied from a message into an event. Real ones are short; a forged
+// or broken message could hold anything, and every event goes out to every lab console.
+const MAX_EVENT_TEXT = 64;
+
+/** The refusal of each tap rule (DESIGN §3), keyed by its name in the rules step (§11.2). */
+const RULE_REFUSALS = Object.freeze({
+  window: 'CLOSED',
+  group: 'GROUP_NOT_ALLOWED',
+  perPurchase: 'PER_PURCHASE_LIMIT',
+  dailyTotal: 'DAILY_LIMIT',
+  dailyCount: 'DAILY_COUNT',
+  tapGap: 'TAP_GAP',
+  balance: 'INSUFFICIENT_BALANCE',
+});
 
 // Sanity bounds for what a machine accepts as a price list or settings: generous next to the
 // platform's own rules (configs.js), there only to keep the sums of a tap exact.
@@ -75,6 +99,8 @@ const HEX_KEY_RE = /^[0-9a-f]{32,}$/i; // same rule as shared/crypto.js
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isWhole = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
 const isTimerMs = (v) => isWhole(v, 1, MAX_TIMER_MS);
+const shortText = (v) => (typeof v === 'string' && v.length <= MAX_EVENT_TEXT ? v : null);
+const elapsedMs = (since) => Math.round(performance.now() - since);
 const BROKER_PROTOCOLS = Object.freeze(['mqtt:', 'mqtts:', 'tcp:', 'tls:', 'ssl:', 'ws:', 'wss:']);
 
 function isBrokerUrl(value) {
@@ -182,7 +208,9 @@ export class Terminal {
   #heartbeatMs;
   #reconnectMs;
   #ackTimeoutMs;
+  #connectTraceMs;
   #journalMax;
+  #gate;
 
   #started = false;
   #cablePlugged;
@@ -190,6 +218,7 @@ export class Terminal {
   #connecting = null; // first connection attempt of the current client, while it runs
   #online = Promise.resolve(); // what the machine does after each (re)connect
   #heartbeatTimer = null;
+  #connectContext = null; // { context, at }: the flow that owns the next post-connect routine
 
   // Counters never go backwards for the life of the object (a reboot keeps them).
   #seq = 0;
@@ -216,9 +245,16 @@ export class Terminal {
    * @param {boolean} [options.cablePlugged]  network cable plugged in at start (default true)
    * @param {number} [options.reconnectMs]  first retry delay after losing the broker (default 1000, doubling up to 10 s)
    * @param {number} [options.ackTimeoutMs]  how long to wait for a PUBACK (default 10000)
+   * @param {number} [options.connectTraceMs]  how long a plug (or traceNextConnect()) keeps its
+   *   flow for the next post-connect routine (default 30000, real time)
    * @param {number} [options.journalMax]  journal size (default JOURNAL_MAX_RECORDS)
    * @param {string} [options.fw]  firmware version for heartbeats
    * @param {(level: string, message: string, meta?: object) => void} [options.log]  optional logger
+   * @param {(info: object) => unknown} [options.gate]  the outbox hold point of Simulation mode
+   *   (DESIGN §11.4): called before each publish with { kind: 'publish', device, school, type,
+   *   msgId, seq, txn?, topic } (and by the kiosk before each API call with { kind: 'http',
+   *   device, school, call, method, path }). A promise holds the message until it settles;
+   *   anything else lets it go at once.
    * Malformed options are a TypeError.
    */
   constructor(options) {
@@ -232,9 +268,11 @@ export class Terminal {
       cablePlugged = true,
       reconnectMs = DEFAULT_RECONNECT_MS,
       ackTimeoutMs = DEFAULT_ACK_TIMEOUT_MS,
+      connectTraceMs = DEFAULT_CONNECT_TRACE_MS,
       journalMax = JOURNAL_MAX_RECORDS,
       fw = FIRMWARE_VERSION,
       log,
+      gate,
     } = options ?? {};
     if (!isPlainObject(school) || typeof school.code !== 'string' || !SCHOOL_CODE_RE.test(school.code)) {
       throw new TypeError('school.code must be a school code such as smk-contoh');
@@ -257,7 +295,8 @@ export class Terminal {
     if (!clock || typeof clock.now !== 'function' || typeof clock.iso !== 'function') throw new TypeError('clock must be the lab clock');
     if (events != null && typeof events.emit !== 'function') throw new TypeError('events must be the lab event bus');
     if (log != null && typeof log !== 'function') throw new TypeError('log must be a function');
-    for (const [name, value] of Object.entries({ heartbeatMs, reconnectMs, ackTimeoutMs })) {
+    if (gate !== undefined && typeof gate !== 'function') throw new TypeError('gate must be a function (or left out)');
+    for (const [name, value] of Object.entries({ heartbeatMs, reconnectMs, ackTimeoutMs, connectTraceMs })) {
       if (!isTimerMs(value)) throw new TypeError(`${name} must be a whole number of milliseconds, 1 to ${MAX_TIMER_MS}`);
     }
     if (!isWhole(journalMax, 1, Number.MAX_SAFE_INTEGER)) throw new TypeError('journalMax must be a whole number, 1 or more');
@@ -273,9 +312,11 @@ export class Terminal {
     this.#heartbeatMs = heartbeatMs;
     this.#reconnectMs = reconnectMs;
     this.#ackTimeoutMs = ackTimeoutMs;
+    this.#connectTraceMs = connectTraceMs;
     this.#journalMax = journalMax;
     this.#fw = fw;
     this.#cablePlugged = cablePlugged;
+    this.#gate = gate ?? null;
   }
 
   get schoolCode() {
@@ -330,8 +371,36 @@ export class Terminal {
       this.#cablePlugged = plugged;
       this._emit('device.cable', { device: this.#device.code, plugged });
     }
-    if (plugged) await this.#connect();
-    else await this.#disconnect();
+    if (plugged) {
+      // The connection this plug brings up belongs to the flow that plugged it (DESIGN §11.3);
+      // plugging a machine that is already online starts nothing.
+      if (!this.connected) this.#keepConnectContext();
+      await this.#connect();
+    } else {
+      await this.#disconnect();
+    }
+  }
+
+  /**
+   * Let the next post-connect routine (heartbeat and journal upload) belong to the current
+   * flow (events.context()), as after the server comes back or the broker restarts
+   * (DESIGN §11.3). It counts only if that routine starts within connectTraceMs, and only the
+   * first routine after this call uses it; later reconnects run in no flow.
+   */
+  traceNextConnect() {
+    this.#keepConnectContext();
+  }
+
+  #keepConnectContext() {
+    const context = this.#context();
+    this.#connectContext = context ? { context, at: performance.now() } : null;
+  }
+
+  /** The kept flow for this post-connect routine, if still fresh. Used once either way. */
+  #takeConnectContext() {
+    const kept = this.#connectContext;
+    this.#connectContext = null;
+    return kept && performance.now() - kept.at <= this.#connectTraceMs ? kept.context : null;
   }
 
   #commandFilter() {
@@ -342,25 +411,29 @@ export class Terminal {
     if (!this.#started || !this.#cablePlugged || !this.#brokerUrl) return Promise.resolve();
     if (this.#client) return this.#connecting ?? Promise.resolve();
     const username = `${this.#school.code}.${this.#device.code}`;
-    const client = mqtt.connect(this.#brokerUrl, {
-      clientId: username,
-      username,
-      password: brokerPassword(this.#device.secret),
-      clean: true,
-      reconnectPeriod: this.#reconnectMs,
-      // A machine switched off by the school (CONNACK 5) keeps knocking, so it is back as
-      // soon as it is switched on again.
-      reconnectOnConnackError: true,
-      connectTimeout: CONNECT_TIMEOUT_MS,
-      // Subscribed again by #onConnect after every connect (clean session).
-      resubscribe: false,
-    });
+    // Made outside any flow: every later callback of the client (PUBACKs, commands,
+    // reconnects) would otherwise run in the flow that happened to plug the cable in.
+    const client = this.#untraced(() =>
+      mqtt.connect(this.#brokerUrl, {
+        clientId: username,
+        username,
+        password: brokerPassword(this.#device.secret),
+        clean: true,
+        reconnectPeriod: this.#reconnectMs,
+        // A machine switched off by the school (CONNACK 5) keeps knocking, so it is back as
+        // soon as it is switched on again.
+        reconnectOnConnackError: true,
+        connectTimeout: CONNECT_TIMEOUT_MS,
+        // Subscribed again by #onConnect after every connect (clean session).
+        resubscribe: false,
+      }),
+    );
     this.#client = client;
     client.on('error', (err) => this.#note('debug', 'mqtt client error', { error: err?.message }));
     client.on('message', (topic, payload) => this.#onMessage(client, topic, payload));
     client.on('connect', () => {
       client.options.reconnectPeriod = this.#reconnectMs;
-      this.#online = this.#onConnect(client);
+      this.#online = this.#afterConnect(client);
     });
     client.on('reconnect', () => {
       const period = client.options.reconnectPeriod;
@@ -395,6 +468,12 @@ export class Terminal {
     await new Promise((resolve) => client.end(true, () => resolve()));
   }
 
+  /** The post-connect routine, in the flow kept for it (a fresh plug) or in none. */
+  #afterConnect(client) {
+    const kept = this.#takeConnectContext();
+    return this.#untraced(() => (kept ? this.#withContext(kept, () => this.#onConnect(client)) : this.#onConnect(client)));
+  }
+
   /** After every (re)connect: subscribe to the commands, then heartbeat and upload what is unsent. */
   async #onConnect(client) {
     try {
@@ -424,9 +503,12 @@ export class Terminal {
 
   #startHeartbeat(client) {
     this.#stopHeartbeat();
-    this.#heartbeatTimer = setInterval(() => {
-      if (client === this.#client && client.connected) this.heartbeat().catch(() => {});
-    }, this.#heartbeatMs);
+    // Outside any flow, though a plug's routine starts it: periodic heartbeats belong to none.
+    this.#heartbeatTimer = this.#untraced(() =>
+      setInterval(() => {
+        if (client === this.#client && client.connected) this.heartbeat().catch(() => {});
+      }, this.#heartbeatMs),
+    );
     this.#heartbeatTimer.unref?.();
   }
 
@@ -445,6 +527,8 @@ export class Terminal {
 
   /**
    * Sign and publish one message on this machine's own records or status topic (QoS 1).
+   * In simulation mode the gate may hold it first (DESIGN §11.4); if the link is gone by the
+   * time it is let go, it is not sent.
    * @param {string} type  a device message type (sale.recorded, journal.batch, card.readback, command.ack, device.heartbeat, ...)
    * @param {object} body
    * @param {{ txn?: string }} [options]  envelope txn: the record's txn or the batch id
@@ -454,8 +538,7 @@ export class Terminal {
   async publishUp(type, body, { txn } = {}) {
     if (typeof type !== 'string' || !Object.hasOwn(UP_TYPES, type)) throw new TypeError(`${type} is not a message a machine sends`);
     if (!isPlainObject(body)) throw new TypeError('body must be an object');
-    const client = this.#client;
-    if (!client?.connected) return false;
+    if (!this.#client?.connected) return this.#notSent(type, txn);
     const envelope = signEnvelope(
       this.#device.secret,
       buildEnvelope({
@@ -468,36 +551,73 @@ export class Terminal {
         body,
       }),
     );
-    return this.#send(client, topicFor(this.#school.code, this.#device.code, UP_TYPES[type]), envelope);
+    return this.#publish(topicFor(this.#school.code, this.#device.code, UP_TYPES[type]), envelope, { renumber: true });
   }
 
   /**
    * Publish an envelope exactly as given (lab faults: a forged signature, an old seq, a
    * repeated message id) on this machine's own records or status topic. Never on another
    * topic: the broker would cut the machine off, and mqtt.js would retry it after every
-   * reconnect.
+   * reconnect. The gate applies as for publishUp, but a held envelope keeps its seq.
    * @param {object} envelope
    * @returns {Promise<boolean>} as publishUp
    */
   async publishEnvelope(envelope) {
     if (!isPlainObject(envelope)) throw new TypeError('envelope must be an object');
     const channel = typeof envelope.type === 'string' && Object.hasOwn(UP_TYPES, envelope.type) ? UP_TYPES[envelope.type] : 'records';
-    const client = this.#client;
-    if (!client?.connected) return false;
-    return this.#send(client, topicFor(this.#school.code, this.#device.code, channel), envelope);
+    if (!this.#client?.connected) return this.#notSent(envelope.type, envelope.txn);
+    return this.#publish(topicFor(this.#school.code, this.#device.code, channel), envelope, { renumber: false });
+  }
+
+  /**
+   * The outbox: ask the gate, then publish on the link as it is by then. With no hold this
+   * all happens at once, as it always did. A held message finds out afterwards whether the
+   * link is still there; if something else went out meanwhile (a periodic heartbeat), a
+   * message of publishUp takes the next seq, or the platform would refuse it as a rollback.
+   */
+  #publish(topic, envelope, { renumber }) {
+    const info = { kind: 'publish', type: shortText(envelope.type), msgId: shortText(envelope.id), seq: envelope.seq };
+    if (envelope.txn !== undefined) info.txn = envelope.txn;
+    info.topic = topic;
+    const held = this._hold(info);
+    const go = () => {
+      const client = this.#client;
+      if (!client?.connected) return this.#notSent(envelope.type, envelope.txn);
+      const out = held && renumber && this.#seq > envelope.seq ? this.#renumber(envelope) : envelope;
+      return this.#send(client, topic, out);
+    };
+    return held ? held.then(go) : go();
+  }
+
+  /** The same message (same id) under the next seq, signed again. */
+  #renumber(envelope) {
+    const { sig: _sig, ...unsigned } = envelope;
+    return signEnvelope(this.#device.secret, { ...unsigned, seq: ++this.#seq });
   }
 
   #send(client, topic, envelope) {
+    const payload = JSON.stringify(envelope);
+    const message = { msgId: shortText(envelope.id), type: shortText(envelope.type) };
+    const sending = { device: this.#device.code, ...message, seq: Number.isSafeInteger(envelope.seq) ? envelope.seq : null };
+    if (envelope.txn !== undefined) sending.txn = shortText(envelope.txn);
+    sending.topic = topic;
+    sending.bytes = Buffer.byteLength(payload);
+    if (envelope.type === 'command.ack' && shortText(envelope.body?.command)) sending.inReplyTo = envelope.body.command;
+    this._emit('device.send', sending);
+    const started = performance.now();
     return new Promise((resolve) => {
       let timer = null;
       let settled = false;
+      let timedOut = false;
       const callback = (err) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.#acked(message, err ? (timedOut ? 'timeout' : 'connection lost') : null, started);
         resolve(!err);
       };
       timer = setTimeout(() => {
+        timedOut = true;
         // No PUBACK in time: take the message back, so it is neither resent nor counted.
         for (const [id, pending] of Object.entries(client.outgoing ?? {})) {
           if (pending?.cb === callback) {
@@ -512,11 +632,29 @@ export class Terminal {
       }, this.#ackTimeoutMs);
       timer.unref?.();
       try {
-        client.publish(topic, JSON.stringify(envelope), { qos: 1 }, callback);
+        client.publish(topic, payload, { qos: 1 }, callback);
       } catch (err) {
         callback(err);
       }
     });
+  }
+
+  /**
+   * device.acked: the PUBACK came, or did not (timeout, connection lost). Whatever flow
+   * happens to run the callback (the socket, a timer, a cable pulled in another flow), the
+   * event is emitted in none: the lab joins it to its message's flow by msgId (DESIGN §11.3).
+   */
+  #acked(message, reason, started) {
+    const data = { device: this.#device.code, ...message, ok: !reason, ms: elapsedMs(started) };
+    if (reason) data.reason = reason;
+    this.#untraced(() => this._emit('device.acked', data));
+  }
+
+  /** device.step offline: a message not sent for lack of a broker link. @returns {false} */
+  #notSent(type, txn) {
+    const fields = { type: shortText(type) };
+    if (txn !== undefined && txn !== null) fields.txn = shortText(txn);
+    return this._offlineStep(fields);
   }
 
   /**
@@ -598,44 +736,58 @@ export class Terminal {
   #onMessage(client, topic, payload) {
     if (client !== this.#client) return;
     try {
-      const envelope = this.#acceptCommand(topic, payload);
-      if (envelope) {
-        this.#handleCommand(envelope).catch((err) => this.#note('warn', 'command failed', { type: envelope.type, error: err?.message }));
+      const { envelope, ignored } = this.#acceptCommand(topic, payload);
+      if (ignored) {
+        this.#received(envelope, 'IGNORED', { reason: ignored });
+        return;
       }
+      // Everything the command makes the machine do (its ack, a heartbeat, an upload) carries
+      // the command's id, so the lab can show it in the flow that sent the command.
+      this.#withContext({ msgId: envelope.id }, () => this.#handleCommand(envelope)).catch((err) =>
+        this.#note('warn', 'command failed', { type: envelope.type, error: err?.message }),
+      );
     } catch (err) {
       this.#note('warn', 'command failed', { topic, error: err?.message });
     }
   }
 
-  /** The verified command envelope, or null for anything to ignore. */
+  /**
+   * The verified command, or why it is ignored: TOPIC_INVALID (not a command sub-topic of this
+   * machine), UNREADABLE (not JSON, or not an envelope), TOPIC_MISMATCH (a command type on
+   * another kind's sub-topic), WRONG_TARGET (names another school or machine),
+   * SIGNATURE_INVALID, DUPLICATE (an id already handled).
+   * @returns {{ envelope: object|null, ignored?: string }}  envelope: as read, if it was JSON
+   */
   #acceptCommand(topic, payload) {
-    const ignore = (reason) => {
-      this.#note('info', 'command ignored', { topic, reason });
-      return null;
+    let envelope = null;
+    let readable = true;
+    try {
+      envelope = JSON.parse(Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload));
+    } catch {
+      readable = false;
+    }
+    const ignore = (reason, note) => {
+      if (note) this.#note('info', 'command ignored', { topic, reason: note });
+      return { envelope: isPlainObject(envelope) ? envelope : null, ignored: reason };
     };
     const school = this.#school.code;
     const device = this.#device.code;
     const where = parseTopic(topic);
     if (!where || where.channel !== 'commands' || where.school !== school || where.device !== device) {
-      return ignore('not a command topic of this machine');
+      return ignore('TOPIC_INVALID', 'not a command topic of this machine');
     }
-    let envelope;
-    try {
-      envelope = JSON.parse(Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload));
-    } catch {
-      return ignore('not JSON');
-    }
-    if (!validateEnvelopeShape(envelope).ok) return ignore('malformed envelope');
+    if (!readable) return ignore('UNREADABLE', 'not JSON');
+    if (!validateEnvelopeShape(envelope).ok) return ignore('UNREADABLE', 'malformed envelope');
     if (!Object.hasOwn(DOWN_TYPES, envelope.type) || DOWN_TYPES[envelope.type] !== where.kind) {
-      return ignore('not a command for this topic');
+      return ignore('TOPIC_MISMATCH', 'not a command for this topic');
     }
-    if (envelope.school !== school || envelope.device !== device) return ignore('names another school or machine');
-    if (!verifyEnvelopeSignature(this.#device.secret, envelope)) return ignore('signature does not verify');
+    if (envelope.school !== school || envelope.device !== device) return ignore('WRONG_TARGET', 'names another school or machine');
+    if (!verifyEnvelopeSignature(this.#device.secret, envelope)) return ignore('SIGNATURE_INVALID', 'signature does not verify');
     // Remembered only once verified, so a forgery can never block the real command's id.
-    if (this.#seenCommands.has(envelope.id)) return null;
+    if (this.#seenCommands.has(envelope.id)) return ignore('DUPLICATE');
     this.#seenCommands.add(envelope.id);
     if (this.#seenCommands.size > COMMAND_IDS_KEPT) this.#seenCommands.delete(this.#seenCommands.values().next().value);
-    return envelope;
+    return { envelope };
   }
 
   async #handleCommand(envelope) {
@@ -649,17 +801,36 @@ export class Terminal {
       case 'blocklist.delta':
         return this.#applyDelta(envelope);
       case 'control.upload-journal':
+        this.#received(envelope, 'APPLIED');
         return this.flushJournal();
       case 'control.heartbeat-now':
+        this.#received(envelope, 'APPLIED');
         return this.heartbeat();
       default:
+        // DOWN_TYPES has nothing else; kept so a new type cannot pass unseen
+        this.#received(envelope, 'IGNORED', { reason: 'TOPIC_MISMATCH' });
         return null;
     }
+  }
+
+  /**
+   * device.received: what the machine made of one message on its commands topic (DESIGN
+   * §11.2). kind and version for config commands; reason for IGNORED (see #acceptCommand,
+   * plus VERSION_MISMATCH / CONFIG_INVALID for a block-list delta) and REJECTED (the ack's error).
+   */
+  #received(envelope, result, { kind, version, reason } = {}) {
+    const data = { device: this.#device.code, msgId: shortText(envelope?.id), type: shortText(envelope?.type) };
+    if (kind) data.kind = kind;
+    if (Number.isSafeInteger(version)) data.version = version;
+    data.result = result;
+    if (reason) data.reason = reason;
+    this._emit('device.received', data);
   }
 
   #applyConfigCommand(kind, envelope) {
     const { body } = envelope;
     const { result, error } = this.#offer(kind, body.version, commandContent(kind, body), body.effectiveFrom);
+    this.#received(envelope, result, { kind, version: body.version, reason: error });
     return this.#ack(envelope, kind, result, error);
   }
 
