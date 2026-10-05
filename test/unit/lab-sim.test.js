@@ -245,6 +245,9 @@ test('hold switched off while the server comes up: nothing stays held, and the s
   const mark = lab.ctx.events.lastSeq();
   lab.setSim({ mode: 'simulation', hold: true });
   await lab.setServer({ up: false });
+  // The broker is gone, but a reader notices only when its socket closes, a moment later on a
+  // busy computer; until then a tap would go to its outbox (held), not be an offline sale.
+  await waitFor(() => !machine('CANTEEN-01').connected, { message: 'CANTEEN-01 knows the server is off' });
   const offline = await tap('CANTEEN-01', LEE, { items: items('TEH-TARIK') });
   assert.deepEqual([offline.ok, offline.sent], [true, false]);
 
