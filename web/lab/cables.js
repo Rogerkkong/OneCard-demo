@@ -132,7 +132,8 @@ export function createCables(app, { sitesEl, topology, live }) {
         return { key, el, net, site, code: m.code, plugged: Boolean(m.cablePlugged), near: p.type === 'touch' ? NEAR_TOUCH : NEAR_MOUSE, snap: null };
       },
       move(s, p) {
-        if (!s.el.isConnected) return;
+        // the machine went away under the drag (a lab reset): no rubber band to nowhere
+        if (!s.el.isConnected) return clear(s);
         const hit = nearest(p, lineOf(s.net, s.site));
         s.snap = hit && hit.d <= s.near ? hit : null;
         s.net.classList.toggle('is-cable-over', Boolean(s.snap));

@@ -1088,8 +1088,10 @@ The page (`web/lab/`):
   add-device flow, even when its cable is plugged in later in a flow of its own.
 - **Cable at install.** A pending cable choice per machine makes the install leave the cable out. An operator's
   or school office's registration keeps today's cable (plugged in for readers and kiosks).
-- **A new school's staff.** Three invented staff, one per office role (OFFICE, FINANCE, ADMIN). The audit trail
-  shows the actor as `lab`.
+- **A new school's staff.** Three invented staff, one per office role (OFFICE, FINANCE, ADMIN).
+- **Audit trail.** The add's rows (`tenant.create`, `device.register`, `config.publish`, the block list, `card.issue`)
+  show the actor `lab`. The school's own `school.create` row says `system`, as it does for an operator's onboarding:
+  `createSchool` takes no actor.
 - **`lab.action` events:**
   - `{ action: 'add-device', device, type, cablePlugged }`
   - `{ action: 'add-school', school, machines, students }`
