@@ -21,6 +21,8 @@ const MAX_NAME = 100;
 const MAX_STUDENTS = 50;
 const DEFAULT_STUDENTS = 5;
 const REVEAL_WAIT_MS = 10_000; // how long a new machine or site may take to show before the page stops looking
+// a phone or tablet: a text field focused for the person brings the on-screen keyboard up over the dialog
+const fingers = window.matchMedia('(pointer: coarse)');
 
 /** 'SMK Bukit Indah' -> 'smk-bukit-indah' (a suggestion until the person types a code). */
 export function schoolCodeFrom(name) {
@@ -407,9 +409,9 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
     clearError(am);
     amChanged();
     am.dialog.showModal();
-    // dropped on a school: the code is ready, Enter adds it (on a phone the Add button: focusing
-    // the code would bring up the keyboard over a dialog that is ready); else choose the school first
-    if (school && touch) am.submit.focus();
+    // dropped on a school: the code is ready, Enter adds it (by a finger, the Add button: focusing
+    // the code would bring the keyboard up over a dialog that is ready); else choose the school first
+    if (school && (touch || fingers.matches)) am.submit.focus();
     else if (school) {
       amCode.control.focus();
       amCode.control.select();
