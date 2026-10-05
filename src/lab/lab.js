@@ -1206,8 +1206,17 @@ export function createLab(options = {}) {
     return { ...result, machine: keyOf(machine), card: cardSummary(found) };
   }
 
-  /** A tap held at a hop: the machine's screen and the card, as they are at that moment. */
-  const tapPartial = ({ machine, found }) => () => ({ machine: keyOf(machine), screen: machine.state.lastScreen?.text ?? null, card: cardSummary(found) });
+  /**
+   * What the machine has shown in this flow so far (null: nothing yet). Its last screen may be
+   * an earlier visitor's: a kiosk shows nothing until the end of a visit.
+   */
+  function screenOf(trace) {
+    const shown = (tracer.get(trace)?.events ?? []).filter((e) => e.type === 'device.screen');
+    return shown.at(-1)?.data?.text ?? null;
+  }
+
+  /** A tap held at a hop: what the machine has shown in this flow, and the card as it is now. */
+  const tapPartial = ({ machine, found }) => (item) => ({ machine: keyOf(machine), screen: screenOf(item.trace), card: cardSummary(found) });
 
   function tapTitle({ machine, found, order, fault }) {
     if (fault) return `Fault: ${KIOSK_FAULT_TITLES[fault]}, tap ${found.uid} on ${keyOf(machine)}`;
@@ -1249,10 +1258,10 @@ export function createLab(options = {}) {
     );
   }
 
-  /** An admin-card action held at a hop: the kiosk's screen and the admin card, as they are now. */
-  const adminCardPartial = (card, machine) => () => ({
+  /** An admin-card action held at a hop: what the machine has shown in this flow, and the admin card as it is now. */
+  const adminCardPartial = (card, machine) => (item) => ({
     machine: keyOf(machine),
-    screen: machine.state.lastScreen?.text ?? null,
+    screen: screenOf(item.trace),
     adminCard: adminCardSummary(card.schoolCode),
   });
 
