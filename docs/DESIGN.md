@@ -968,6 +968,49 @@ Console, at `onecard>` and `server#`:
   `tracer.begin({ …, subject })` validates it (a TypeError for anything else).
 - The cross-device-publish fault's `device.send` carries `copiedLogin: true`.
 
+**As built:**
+- **The broker hook.** An answer that is not a plain `{ trace }` is ignored, and a hook that throws is logged as a
+  warning; neither changes the login. A `contextFor` that is not a function is a TypeError at start.
+- **The lab's `contextFor` order:**
+  1. the copied login of a running cross-device-publish fault (its throwaway client uses a real machine's
+     username) → the fault's flow;
+  2. the machine's own `linkContext(event)`;
+  3. the server-off, server-on or broker-restart action that is opening or closing the broker right now;
+  4. anyone else (the viewer) → `null`.
+
+  Only a trace the tracer still knows is returned.
+- **`linkContext('disconnect')`** also ends as soon as the machine is connected again. So pull, plug and then
+  server off within 5 s puts the server-off logout in the server-off flow, not in the pull's.
+- **`linkContext('connect')`** is no longer used up by the post-connect routine; it stays until `connectTraceMs`
+  runs out.
+- **The copied login's flow** replays as: the real machine is knocked off → the copied login comes in → it sends
+  (`copiedLogin: true`) → the platform refuses → the copied login leaves → the real machine is back.
+- **`broker.status` codes** (`BROKER_STATUS_CODES` in lab.js; every event has one, `up: true` too):
+
+  | code | reason |
+  |---|---|
+  | `LAB_START` | lab started |
+  | `LAB_STOP` | lab stopped |
+  | `LAB_RESET` | reset (both the down and the up of a reset) |
+  | `SERVER_OFF` | server switched off |
+  | `SERVER_ON` | server switched on |
+  | `RESTARTING` | restart |
+  | `RESTARTED` | restarted |
+
+  The English reasons did not change.
+- **Subject rules.**
+  - Keys match `/^[A-Za-z][A-Za-z0-9_]{0,31}$/`.
+  - `tracer.begin` stores a frozen copy; readers get copies.
+  - `sim.trace`, `list()`, `get().trace`, `GET /api/lab/sim` and `/api/lab/sim/traces/:id` always carry it.
+- **Tap subjects.** `items` is a short text such as `'ROTI-CANAI TEH-TARIK*2'`; a water tap carries `ml`.
+- **Fault subjects:**
+  - cross-school card and kiosk tap faults: the tap shape plus `fault`, where school and device are the machine's;
+  - cross-device publish: `{ fault, school, device, toSchool, toDevice }`;
+  - clone and tamper: `{ fault, school, uid }`;
+  - server and broker faults: `{ fault }`.
+- **Request subjects.** `area` is `admin`, `operator`, `parent` or `pay`. `path` has no query string and is cut to
+  120 characters with "…". `school` is set when the office session names one.
+
 ---
 
 ## 12. Building by drag and drop (lab console)
@@ -1008,6 +1051,48 @@ The page (`web/lab/`):
 - **In Simulation.** The new machine's registration, cable plug, broker login and first heartbeat are a flow the
   Simulation tab can replay.
 
+**As built (API):**
+- **Answers.** Both adds answer 200, like the other `/api/lab` actions.
+- **Server off.** While the cloud server is switched off, both adds answer `SERVER_DOWN` (409), because
+  registering needs the platform. `next-code` still answers.
+- **Error codes.**
+  - Add machine: `INPUT_INVALID` (400), `SCHOOL_NOT_FOUND` (404), `SERVER_DOWN` (409), `SCHOOL_SUSPENDED` (409),
+    `DEVICE_CODE_TAKEN` (409).
+  - Add school: `INPUT_INVALID` (400), `SCHOOL_CODE_INVALID` (400), `NAME_INVALID` (400), `SERVER_DOWN` (409),
+    `SCHOOL_CODE_TAKEN` (409).
+  - The platform's other refusals pass through as they are.
+- **Input.**
+  - `type` and `code` are accepted in any case; add-school lower-cases its code.
+  - The school code and name are checked before any trace starts, so a bad request leaves no flow behind.
+  - `students` or `machines` sent as `null` means the default.
+  - A machine code given twice in one add-school is `INPUT_INVALID`.
+  - A location is at most 60 characters.
+- **Next code.** `next-code` picks the lowest free number of that type, counting the platform's devices and the
+  lab's machines: `CANTEEN-3` and `CANTEEN-003` both count as 3. Two digits, three past 99.
+- **Plugged in.** With `cablePlugged: true`, the machine is installed with its cable out and then plugged in inside
+  the same add-device flow. That one flow holds:
+  - the registration;
+  - the config publish;
+  - `device.cable` and `mqtt.connect`;
+  - the first heartbeat.
+
+  With *Hold at each hop* on, the add answers early: `{ held: true, trace, item, machine }`.
+- **Settings acks.** A new machine acknowledges the settings it got at registration. Those acks join its
+  add-device flow, even when its cable is plugged in later in a flow of its own.
+- **Cable at install.** A pending cable choice per machine makes the install leave the cable out. An operator's
+  or school office's registration keeps today's cable (plugged in for readers and kiosks).
+- **A new school's staff.** Three invented staff, one per office role (OFFICE, FINANCE, ADMIN). The audit trail
+  shows the actor as `lab`.
+- **`lab.action` events:**
+  - `{ action: 'add-device', device, type, cablePlugged }`
+  - `{ action: 'add-school', school, machines, students }`
+- **Console.** The `onecard>` prompt has the same two actions:
+  - `add machine <school> canteen|water|kiosk [CODE]` (cable out);
+  - `add school <code> <name…>` (three machines, cables out, five students).
+
+  `show trace` also prints broker logins and logouts, registrations, onboarding, card issue, the broker's reason
+  and the copied login in plain lines.
+
 ---
 
 ## 13. Desktop app (double-click to start)
@@ -1034,7 +1119,7 @@ The page (`web/lab/`):
 - **GitHub Actions** (`.github/workflows/desktop.yml`):
   - Triggers: pull requests (paths `src/**`, `web/**`, `scripts/**`, `package*.json`, the workflow itself), manual
     dispatch, and tags `v*`.
-  - Matrix: ubuntu-latest, windows-latest, macos-14 (arm64), macos-13 (x64).
+  - Matrix: ubuntu-latest, windows-latest, macos-latest (arm64), macos-15-intel (x64; GitHub retired macos-13).
   - Steps: `npm ci`, `npm test` (ubuntu only), `npm run build:app`, `--self-test`, upload the file.
   - A tag, or a dispatch with `release: true`, publishes a GitHub Release with the zipped apps.
 - **Unsigned.** The downloads are not code-signed:
