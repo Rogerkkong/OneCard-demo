@@ -1,10 +1,11 @@
 // The topology: the virtual cloud server at the top and, below it on the "internet" line, one
 // site per school (tenant) with its machines, card tray and admin card. Each machine hangs on its
 // school's network by its own cable; the cable's line shows the link (up, trying, pulled out)
-// and lights up briefly when a message passes. Elements are patched in place on every refresh.
+// and, in realtime mode, lights up briefly when a message passes (in Simulation mode the
+// Simulation tab's envelope shows the hops instead). Elements are patched in place on every refresh.
 
 import { formatRM, formatTimeKL, h, toast } from '/shared/api.js';
-import { directionOf, parseTopic, reasonText, screenCaption } from './describe.js';
+import { directionOf, heldText, parseTopic, reasonText, screenCaption } from './describe.js';
 import { hhmm, icon, reconcile, reducedMotion, setAttr, setHidden, setText, setTone } from './util.js';
 
 const FLASH_MS = 900;
@@ -320,6 +321,8 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     const plugged = !m.cablePlugged;
     const res = await app.call('/api/lab/cable', { schoolCode: school, deviceCode: code, plugged }, button);
     if (!res.ok) return app.fail(res.error);
+    // Simulation mode, hold on: the plug's first heartbeat (then its upload) waits at a hop
+    if (res.held) return toast(`${t(plugged ? 'toast.cablePlugHeld' : 'toast.cableOut', { code })} ${heldText(res.data.item, t)}`, 'info');
     const after = res.data.machine;
     if (!plugged) toast(t('toast.cableOut', { code }), 'info');
     else toast(t(after?.connected ? 'toast.cableIn' : 'toast.cableInWait', { code }), after?.connected ? 'good' : 'warn');
@@ -348,6 +351,13 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     const output = String(res.data.output ?? '').trim();
     if (output.startsWith('%')) {
       toast(t('toast.consoleSaid', { code, output: output.replace(/^%\s*/, '') }), 'warn');
+      return;
+    }
+    if (/^Held at a hop:/m.test(output)) {
+      // Simulation mode, hold on: the console says what waits; the Simulation tab shows it
+      const item = await app.sim?.syncHeld(key);
+      app.openSim?.();
+      toast(item ? `${code}${t('colon')}${heldText(item, t)}` : t('toast.heldSomewhere', { code }), 'info');
       return;
     }
     if (command === 'heartbeat') toast(t('toast.heartbeat', { code }), 'good');
@@ -380,23 +390,26 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
 
   function onEvent(e) {
     const d = e.data ?? {};
+    // in Simulation mode the envelope of the Simulation tab shows the hops, one at a time
+    const live = app.simMode?.() !== 'simulation';
     if (e.type === 'mqtt.publish') {
       const p = parseTopic(d.topic);
-      pulsePart('broker', 'ok');
+      if (live) pulsePart('broker', 'ok');
       if (!p) return;
       const key = `${p.school}/${p.device}`;
       const dir = directionOf(d.topic);
       lastMessage.set(key, { dir, type: d.type ?? '?', at: e.at });
-      flash(key, dir);
+      if (live) flash(key, dir);
       const el = machineEls.get(key);
       if (el) setText(el._r.msgDd, t(dir === 'down' ? 'm.lastMsg.down' : 'm.lastMsg.up', { type: d.type ?? '?', time: formatTimeKL(e.at) }));
     } else if (e.type === 'mqtt.denied') {
-      pulsePart('broker', 'bad');
+      if (live) pulsePart('broker', 'bad');
     } else if (e.type.startsWith('intake.')) {
+      if (!live) return;
       pulsePart('platform', e.type === 'intake.refused' ? 'bad' : e.type === 'intake.duplicate' ? 'warn' : 'ok');
       if (e.school && d.device) flash(`${e.school}/${d.device}`, null);
     } else if (e.type === 'ledger.posting' || e.type === 'purchase.received') {
-      pulsePart('db', 'ok');
+      if (live) pulsePart('db', 'ok');
     } else if (e.type === 'device.screen' && e.school && d.device) {
       // show the new screen at once; the next state refresh confirms it
       const el = machineEls.get(`${e.school}/${d.device}`);
@@ -448,5 +461,13 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setTimeout(() => el.classList.remove('is-acted'), 1600);
   }
 
-  return { render, onEvent, highlight };
+  return {
+    render,
+    onEvent,
+    highlight,
+    /** A machine's element ('<school>/<DEVICE>'), for the Simulation envelope. */
+    machineEl: (key) => machineEls.get(key),
+    /** A part of the cloud server ('broker', 'platform', 'db'), for the Simulation envelope. */
+    partEl: (name) => cloud[name]?.el,
+  };
 }

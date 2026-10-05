@@ -515,6 +515,45 @@ test('Simulation mode: hold a sale at each hop, let it go with next, and read th
   assert.deepEqual(lab.simState(), { mode: 'realtime', hold: false, held: [] });
 });
 
+test('Simulation mode with the server off: a message held at the platform waits until the server is back', NET, async () => {
+  const top = session();
+  const server = session('server');
+  const canteen = session('smk-contoh/CANTEEN-01');
+  await quiet();
+  lab.ctx.clock.advance(5000); // past the card's tap gap
+  await top.out('simulation on');
+  await top.out('hold on');
+  assert.match(lines(await canteen.out(`tap ${AHMAD} TEH-TARIK`))[1], /^Held at a hop: sale\.recorded in the outbox of smk-contoh\/CANTEEN-01/);
+  assert.match(await canteen.out('next'), /^Let go: sale\.recorded in the outbox of smk-contoh\/CANTEEN-01/);
+  await waitFor(() => lab.simState().held.some((h) => h.where === 'platform'), { message: 'the sale at the platform' });
+
+  assert.match(await server.out('server down'), /^Cloud server switched off/);
+  assert.equal(await top.out('next'), '% Nothing can go on now: 1 message waits at the platform while the cloud server is off (server up).');
+  const held = lines(await top.out('show held'));
+  assert.equal(held[0], '1 hop waiting, oldest first: next lets the oldest go on. Mode simulation, hold on.');
+  assert.deepEqual(cells(held[2]).slice(0, 4), ['1', 'platform', 'smk-contoh/CANTEEN-01', 'sale.recorded']);
+  assert.equal(held.at(-1), "The platform's hops wait until the cloud server is on again.");
+  // hold off and realtime let go of everything else; what the platform holds waits for the server
+  assert.deepEqual(lines(await top.out('hold off')), [
+    'Hold off: flows run through again.',
+    '1 message still waits at the platform until the cloud server is on again.',
+  ]);
+  assert.deepEqual(lines(await top.out('simulation off')), [
+    'Realtime mode: nothing waits at the hops any more.',
+    '1 message still waits at the platform until the cloud server is on again.',
+  ]);
+  assert.equal(cardMatches(AHMAD), false, 'the books do not have it yet');
+
+  // the server back: the message goes on by itself, exactly once
+  assert.equal(lines(await server.out('server up'))[1], 'The platform sent every machine its prices, settings and block list again.');
+  await waitFor(() => cardMatches(AHMAD) && lab.simState().held.length === 0, { message: 'the held sale in the books' });
+  assert.equal(await top.out('show held'), 'Nothing waits at a hop. Mode realtime, hold off.');
+  await waitFor(() => [...lab.terminals.values()].filter((m) => m.cablePlugged).every((m) => m.connected), {
+    timeout: 15_000,
+    message: 'every plugged machine back on the broker',
+  });
+});
+
 test('every line the console printed fits in 100 characters, with money as RM 0.00 and times as DD/MM/YYYY HH:MM', NET, () => {
   assert.ok(outputs.length > 80);
   for (const text of outputs) {

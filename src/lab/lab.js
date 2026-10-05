@@ -409,7 +409,15 @@ export function createLab(options = {}) {
     if (!trace) return undefined;
     return hold({ trace, where: 'platform', device: info.device, school: info.school, type: info.type, msgId: info.msgId, topic: info.topic });
   }
-  platform.setInboxGate(inboxGate);
+
+  /**
+   * The inbox gate is installed only while hold is on: the platform reads every message's type
+   * and id for its gate, and with no gate a message goes to intake exactly as in realtime.
+   * Messages already held keep waiting for their release either way.
+   */
+  function syncInboxGate() {
+    platform.setInboxGate(sim.hold ? inboxGate : null);
+  }
 
   /** Call `notify(item)` when this trace holds something. @returns {() => void} stop watching */
   function watchHolds(trace, notify) {
@@ -530,6 +538,7 @@ export function createLab(options = {}) {
     const changed = nextMode !== sim.mode || nextHold !== sim.hold;
     sim.mode = nextMode;
     sim.hold = nextHold;
+    syncInboxGate();
     if (changed) announceMode();
     if (!sim.hold) releaseReleasable();
     return simState();
@@ -555,6 +564,7 @@ export function createLab(options = {}) {
     const changed = sim.mode !== 'realtime' || sim.hold;
     sim.mode = 'realtime';
     sim.hold = false;
+    syncInboxGate();
     if (changed) announceMode();
     for (const entry of [...held]) letGo(entry);
   }
@@ -685,7 +695,9 @@ export function createLab(options = {}) {
         // No network without the kiosk's cable, and none while the cloud server is off: a
         // switched-off server answers nothing (NETWORK), as DESIGN §11.4 says. The lab's web
         // server keeps running for the lab console, but its 503 is not the platform talking.
-        online: () => serverUp && kiosk?.cablePlugged === true,
+        // Nor for a kiosk a reset has taken away: a visit it still finishes (one let go by the
+        // reset) must not reach the new demo's platform.
+        online: () => serverUp && kiosk?.cablePlugged === true && terminals.get(key) === kiosk,
         // the flow a call belongs to, so the platform's side of it joins the trace (DESIGN §11.3)
         headers: () => {
           const trace = events.context()?.trace;
@@ -1022,6 +1034,8 @@ export function createLab(options = {}) {
     // released before waiting for the lock: nothing may wait for a Next that never comes
     backToRealtime();
     return exclusive(async () => {
+      // and again: hold may have been switched on, and something held, while stop() waited
+      backToRealtime();
       if (phase === 'stopped') return;
       if (phase === 'new') {
         phase = 'stopped';
@@ -1048,6 +1062,8 @@ export function createLab(options = {}) {
 
   async function resetNow() {
     requireRunning();
+    // again: hold may have been switched on, and something held, while reset() waited for the lab
+    backToRealtime();
     phase = 'resetting';
     tracer.clear();
     try {
@@ -1147,6 +1163,8 @@ export function createLab(options = {}) {
 
   /** What a machine's last action came to; the screen never says why, the lab may. */
   function remember(machine, action, result) {
+    // a flow of a machine a reset has taken away (let go by the reset) ends in the old demo
+    if (terminals.get(machineKey(machine.schoolCode, machine.deviceCode)) !== machine) return;
     const entry = { action, ok: Boolean(result?.ok), at: clock.iso() };
     if (result?.reason) entry.reason = result.reason;
     if (result?.error) entry.error = result.error;
@@ -1448,6 +1466,21 @@ export function createLab(options = {}) {
     for (const m of terminals.values()) if (m.cablePlugged) m.traceNextConnect();
   }
 
+  /**
+   * Take the broker down, then the platform's link. In this order the broker never takes a
+   * message it cannot deliver: with the platform gone first, it would still acknowledge a
+   * machine's record (which then counts it as sent) and queue it for the platform's session,
+   * a queue that dies with the broker. The platform stays on until the broker closes and
+   * handles what was already passed to it.
+   */
+  async function closeBrokerAndLink(reason) {
+    try {
+      await closeBroker(reason);
+    } finally {
+      await platform.disconnectMqtt();
+    }
+  }
+
   /** The server switch itself, in the caller's trace. */
   function switchServer(up) {
     return exclusive(async () => {
@@ -1456,8 +1489,7 @@ export function createLab(options = {}) {
       if (changed && !up) {
         serverUp = false;
         emit('server.status', { up: false });
-        await platform.disconnectMqtt();
-        await closeBroker('server switched off');
+        await closeBrokerAndLink('server switched off');
       } else if (changed) {
         // messages that waited at the platform's door while it was off: they go on once it is back
         const parked = held.filter((e) => e.item.where === 'platform');
@@ -1475,8 +1507,8 @@ export function createLab(options = {}) {
   }
 
   /**
-   * Switch the whole virtual cloud server off or on (DESIGN §2). Off: the platform leaves the
-   * broker, the broker stops and the product APIs answer 503; machines keep working offline.
+   * Switch the whole virtual cloud server off or on (DESIGN §2). Off: the broker stops, the
+   * platform leaves it and the product APIs answer 503; machines keep working offline.
    * On: a broker on the same port, the platform back on it (republishing every retained
    * setting); plugged machines reconnect by themselves and upload what they kept. Messages
    * held at the platform's inbox while it was off go on as soon as it is back.
@@ -1494,8 +1526,7 @@ export function createLab(options = {}) {
     return exclusive(async () => {
       requireRunning();
       requireServerUp();
-      await platform.disconnectMqtt();
-      await closeBroker('restart');
+      await closeBrokerAndLink('restart');
       traceNextConnects();
       await openBroker();
       await platform.connectMqtt(broker.url);
@@ -1506,8 +1537,9 @@ export function createLab(options = {}) {
 
   /**
    * Restart only the broker: its retained messages are lost, and the platform, back on the new
-   * broker, publishes them again. The platform leaves first and reconnects at once (not on its
-   * own retry a second later), so no machine uploads to a broker nobody listens on.
+   * broker, publishes them again. The old broker goes first (it must not acknowledge what it
+   * can no longer deliver); the platform leaves it and reconnects at once (not on its own retry
+   * a second later), so no machine uploads to a broker nobody listens on.
    */
   function restartBroker() {
     return act({ kind: 'broker', title: 'Restart the MQTT broker' }, () => restartBrokerNow(), {
@@ -1522,7 +1554,8 @@ export function createLab(options = {}) {
   function faultAct(type, what, where, fn, partial) {
     const { school = null, device = null } = where ?? {};
     return act({ kind: 'fault', title: `Fault: ${what}`, school, device }, fn, {
-      partial: () => ({ fault: type, ...(partial ? partial() : {}) }),
+      // the held item goes through: a tap's partial reads the flow's screen from it
+      partial: (item) => ({ fault: type, ...(partial ? partial(item) : {}) }),
       action: device ? { action: 'fault', type, device } : { action: 'fault', type },
     });
   }

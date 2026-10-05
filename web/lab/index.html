@@ -17,6 +17,11 @@
     <h1 class="lab-header__title" data-i18n="app.title">Lab console</h1>
     <span class="lab-ribbon" data-i18n="ribbon">LAB · not real money</span>
     <span class="pill" id="hdr-server" role="status" hidden></span>
+    <div class="mode-switch" id="mode-switch" role="group" aria-labelledby="mode-label">
+      <span class="mode-switch__label" id="mode-label" data-i18n="sim.mode.label">Mode</span>
+      <button type="button" class="mode-switch__btn" data-mode="realtime" aria-pressed="true" data-i18n="sim.mode.realtime">Realtime</button>
+      <button type="button" class="mode-switch__btn" data-mode="simulation" aria-pressed="false" data-i18n="sim.mode.simulation">Simulation</button>
+    </div>
     <span class="hdr-clock num" id="hdr-clock"></span>
     <span class="spacer"></span>
     <nav class="apps" aria-labelledby="apps-label">
@@ -67,6 +72,7 @@
         <li><a href="#faults" data-i18n="jump.faults">Faults</a></li>
         <li><a href="#side" data-jump-tab="messages" data-i18n="jump.messages">Messages</a></li>
         <li><a href="#side" data-jump-tab="console" data-i18n="jump.console">Console</a></li>
+        <li><a href="#side" data-jump-tab="sim" data-i18n="jump.sim">Simulation</a></li>
       </ul>
     </nav>
 
@@ -112,10 +118,11 @@
     </section>
   </div>
 
-  <aside class="side" id="side" tabindex="-1" data-i18n-attr="aria-label:tabs.label" aria-label="Messages and console">
-    <div class="tabs" role="tablist" data-i18n-attr="aria-label:tabs.label" aria-label="Messages and console">
+  <aside class="side" id="side" tabindex="-1" data-i18n-attr="aria-label:tabs.label" aria-label="Messages, console and simulation">
+    <div class="tabs" role="tablist" data-i18n-attr="aria-label:tabs.label" aria-label="Messages, console and simulation">
       <button type="button" role="tab" class="tab" id="tab-messages" data-tab="messages" aria-controls="panel-messages" aria-selected="true"><span data-i18n="insp.tab">Messages</span></button>
       <button type="button" role="tab" class="tab" id="tab-console" data-tab="console" aria-controls="panel-console" aria-selected="false" tabindex="-1"><span data-i18n="con.tab">Console</span></button>
+      <button type="button" role="tab" class="tab" id="tab-sim" data-tab="sim" aria-controls="panel-sim" aria-selected="false" tabindex="-1"><span data-i18n="sim.tab">Simulation</span></button>
     </div>
 
     <section class="insp" id="panel-messages" role="tabpanel" aria-labelledby="tab-messages">
@@ -175,6 +182,95 @@
         </form>
       </div>
       <div class="con__quick"><span class="con__quicklabel">Try</span><span class="con__quicklist"></span></div>
+    </section>
+
+    <section class="sim" id="panel-sim" role="tabpanel" aria-labelledby="tab-sim" tabindex="-1" hidden>
+      <div class="sim__bar">
+        <h2 class="sim__title" id="sim-title">Simulation</h2>
+        <span class="pill sim__modepill"></span>
+      </div>
+      <p class="sim__intro muted"></p>
+
+      <div class="sim__traces">
+        <label class="sim__tracelabel" for="sim-trace">Flow</label>
+        <select id="sim-trace" class="sim__select"></select>
+        <label class="sim__follow"><input type="checkbox" id="sim-follow"> <span class="sim__followtext">Follow the newest</span></label>
+      </div>
+      <p class="sim__tracetitle"></p>
+
+      <section class="sim__hold" aria-labelledby="sim-hold-title">
+        <h3 class="sr-only" id="sim-hold-title">Live stepping</h3>
+        <div class="sim__holdrow">
+          <button type="button" class="switch" id="sim-hold" role="switch" aria-checked="false" aria-describedby="sim-hold-hint">
+            <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+            <span class="switch__label">Hold at each hop (live)</span>
+          </button>
+          <span class="sim__holdbuttons">
+            <button type="button" class="btn btn--accent sim__next" data-role="sim-next">Next hop</button>
+            <button type="button" class="btn btn--small sim__release" data-role="sim-release">Release all</button>
+          </span>
+        </div>
+        <p class="sim__holdhint muted" id="sim-hold-hint"></p>
+        <p class="sim__notice" role="status" aria-live="polite" hidden></p>
+        <div class="sim__waitingbox">
+          <h4 class="sim__waitingtitle" id="sim-waiting-title">Waiting at a hop</h4>
+          <ol class="sim__waiting" aria-labelledby="sim-waiting-title"></ol>
+        </div>
+      </section>
+
+      <div class="sim__play" role="group" aria-labelledby="sim-play-label">
+        <span class="sr-only" id="sim-play-label">Playback</span>
+        <span class="sim__buttons">
+          <button type="button" class="btn btn--small sim__pbtn" data-play="first"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><rect x="2" y="3" width="2" height="10" rx="0.5"/><path d="M14 3v10L5 8z"/></svg><span class="sr-only">First step</span></button>
+          <button type="button" class="btn btn--small sim__pbtn" data-play="back"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 3v10L3 8z"/></svg><span class="sr-only">Step back</span></button>
+          <button type="button" class="btn btn--small btn--primary sim__pbtn sim__playbtn" data-play="play"><svg class="sim__icon-play" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M4 2.5v11L13.5 8z"/></svg><svg class="sim__icon-pause" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><rect x="3.5" y="3" width="3" height="10" rx="0.6"/><rect x="9.5" y="3" width="3" height="10" rx="0.6"/></svg><span class="sr-only">Play</span></button>
+          <button type="button" class="btn btn--small sim__pbtn" data-play="fwd"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M4 3v10l9-5z"/></svg><span class="sr-only">Step forward</span></button>
+          <button type="button" class="btn btn--small sim__pbtn" data-play="last"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2 3v10l9-5z"/><rect x="12" y="3" width="2" height="10" rx="0.5"/></svg><span class="sr-only">Last step</span></button>
+        </span>
+        <label class="sim__speed"><span class="sim__speedlabel">Speed</span>
+          <select id="sim-speed">
+            <option value="0.5">0.5×</option>
+            <option value="1">1×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <span class="sim__stepof num" aria-live="off"></span>
+      </div>
+
+      <details class="sim__filters">
+        <summary class="sim__filtersummary"><span class="sim__filterstitle">Show</span> <span class="sim__filtersstate muted"></span></summary>
+        <div class="sim__filterbody">
+          <span class="sim__layers" role="group" aria-labelledby="sim-layers-label"><span class="sr-only" id="sim-layers-label">Layers</span></span>
+          <label class="sim__beats"><input type="checkbox" id="sim-beats"> <span class="sim__beatstext">Heartbeats</span></label>
+        </div>
+      </details>
+
+      <div class="sim__body">
+        <div class="sim__head" aria-hidden="true">
+          <span data-key="sim.col.n">#</span>
+          <span data-key="sim.col.time">Time</span>
+          <span data-key="sim.col.last">Last device</span>
+          <span data-key="sim.col.at">At device</span>
+          <span data-key="sim.col.type">Type</span>
+        </div>
+        <div class="sim__listbox">
+          <button type="button" class="btn btn--small btn--ghost sim__earlier" hidden></button>
+          <ol class="sim__list" id="sim-list" role="listbox" tabindex="0" aria-labelledby="sim-list-label"></ol>
+          <span class="sr-only" id="sim-list-label">Steps</span>
+        </div>
+        <div class="sim__empty muted" hidden><p class="sim__emptytext"></p><button type="button" class="btn btn--small sim__showall" hidden></button></div>
+        <p class="sr-only" id="sim-live" aria-live="polite"></p>
+        <section class="sim__details" id="sim-details" aria-labelledby="sim-details-title" hidden>
+          <header class="sim__detailshead">
+            <h3 id="sim-details-title" tabindex="-1"></h3>
+            <span class="sim__detailsbuttons">
+              <button type="button" class="btn btn--small" data-role="sim-map">Show it on the map</button>
+              <button type="button" class="btn btn--small" data-role="sim-close">Close</button>
+            </span>
+          </header>
+          <div class="sim__sections"></div>
+        </section>
+      </div>
     </section>
   </aside>
 </main>

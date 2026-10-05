@@ -355,6 +355,8 @@ export function reasonText(code, t) {
  * @returns {{ text: string, tone: 'good'|'warn'|'bad'|'info' }}
  */
 export function faultResult(type, r, t, lang) {
+  // Simulation mode with hold on: the fault's flow waits at a hop and goes on with Next hop
+  if (r?.held === true) return { tone: 'info', text: heldText(r.item, t) };
   switch (type) {
     case 'clone-card':
       return { tone: 'good', text: t('fr.clone', { from: r.copyOf, copy: r.uid, balance: money(r.card?.balanceSen), n: r.card?.cardSeq }) };
@@ -414,6 +416,44 @@ export function kioskResult(fault, r, t, lang) {
   }
   if (again.length) return { tone: 'good', text: t('fr.kiosk.shows', { screen }) + tail };
   return { tone: added.length ? 'good' : 'info', text: screen };
+}
+
+// ---- Simulation mode: what waits at a hop --------------------------------------------------------
+
+/** Messages whose hold the person can test by pulling the cable (records the journal keeps). */
+export const RECORD_TYPES = new Set(['sale.recorded', 'water.recorded', 'journal.batch', 'card.readback']);
+
+/** A plain name for a message type ('sale.recorded' -> 'the sale'), or the type itself. */
+export function messageName(type, t) {
+  return hasKey(`msg.${type}`) ? t(`msg.${type}`) : (type ?? t('msg.unknown'));
+}
+
+/** A plain name for a kiosk call ('pending' -> 'the question what is waiting for the card'). */
+export function callName(call, t) {
+  return hasKey(`call.${call}`) ? t(`call.${call}`) : (call ?? '—');
+}
+
+/**
+ * What waits at a hop (a held item, DESIGN §11.4) in plain words, with what to try next: "The
+ * sale is waiting inside CANTEEN-01. Press Next hop, or pull the cable first and see what happens."
+ * @param {{ tip?: boolean }} [options]  tip: add the second sentence
+ */
+export function heldText(item, t, { tip = true } = {}) {
+  if (!item) return t('held.unknown');
+  const device = item.device ?? '—';
+  let text;
+  let tipKey = 'held.tip.next';
+  if (item.where === 'kiosk-http') {
+    text = t(hasKey(`held.kiosk.${item.call}`) ? `held.kiosk.${item.call}` : 'held.kiosk.other', { device, call: item.call ?? '—' });
+    tipKey = 'held.tip.server';
+  } else if (item.where === 'platform') {
+    text = t('held.platform', { what: messageName(item.type, t), device });
+    tipKey = 'held.tip.server';
+  } else {
+    text = t('held.machine', { what: messageName(item.type, t), device });
+    if (RECORD_TYPES.has(item.type)) tipKey = 'held.tip.cable';
+  }
+  return tip ? `${text} ${t(tipKey)}` : text;
 }
 
 // ---- errors -------------------------------------------------------------------------------------
