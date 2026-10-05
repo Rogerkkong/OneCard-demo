@@ -7,6 +7,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LabError, isLabError } from '../shared/errors.js';
 import { safeEqual, signRequest } from '../shared/crypto.js';
+import { DEVICE_CODE_RE, SCHOOL_CODE_RE } from '../shared/protocol.js';
 import { MINUTE } from '../shared/time.js';
 import { LAB_OPERATOR, routes as operatorRoutes } from './routes/operator.js';
 import { routes as adminRoutes } from './routes/admin.js';
@@ -26,6 +27,11 @@ import { routes as kioskRoutes } from './routes/kiosk.js';
 // The virtual cloud server can be switched off in the lab (lab.server.up = false). Then every
 // product route answers 503 SERVER_DOWN, while the lab's own routes (/api/lab/*), the event
 // stream and the web apps keep working: the lab is the room the server stands in, not the product.
+//
+// Simulation mode (docs/DESIGN.md §11.3): when the lab has a tracer, each action a person takes
+// in the office, operator console, parent app or mock bank (a non-GET request) is a trace of its
+// own, and a request naming a trace the tracer knows (x-lab-trace: the lab's kiosk, the bank's
+// callback) joins it. Every kiosk API request is reported as http.kiosk once it is answered.
 
 /** Largest request body accepted (DESIGN §7). */
 export const MAX_BODY_BYTES = 1024 * 1024;
@@ -49,6 +55,19 @@ const MAX_SESSIONS = 10_000;
 // Bytes of an over-long body read and thrown away so the client can still read the 413;
 // beyond this the connection is simply cut.
 const MAX_DISCARD_BYTES = 16 * MAX_BODY_BYTES;
+// The header a request names its trace in, and what a trace id looks like (as src/lab/trace.js
+// makes them); anything else in the header is ignored.
+const TRACE_HEADER = 'x-lab-trace';
+const TRACE_ID_RE = /^tr_[A-Za-z0-9_-]{4,64}$/;
+// The product areas whose non-GET requests each start a trace, by path, as the lab console names them.
+const TRACED_AREAS = Object.freeze([
+  ['/api/admin/', 'School office'],
+  ['/api/operator/', 'Operator console'],
+  ['/api/parent/', 'Parent app'],
+  ['/api/pay/', 'Mock bank'],
+  ['/pay/', 'Mock bank'], // the bank page's Pay and Decline forms
+]);
+const MAX_SHOWN_PATH = 120; // longest request path copied into a trace title or an http.kiosk event
 
 const SECURITY_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
@@ -751,7 +770,10 @@ export function createHttpServer({
     return send(res, result.status, JSON.stringify(body), { ...headers, 'content-type': headers['content-type'] ?? 'application/json; charset=utf-8' });
   }
 
-  /** Map an error to an answer: a LabError keeps its code and status; anything else is a bug, logged, never shown. */
+  /**
+   * Map an error to an answer: a LabError keeps its code and status; anything else is a bug, logged, never shown.
+   * @returns {{ status: number, code: string }} what was answered
+   */
   function fail(req, res, asPage, err, extraHeaders = {}) {
     let status;
     let error;
@@ -767,8 +789,9 @@ export function createHttpServer({
     }
     const headers = { ...extraHeaders };
     if (status === 413) headers.connection = 'close'; // the rest of the body is not wanted
-    if (asPage) return send(res, status, errorPage(status, error.code, error.message), { ...headers, 'content-type': 'text/html; charset=utf-8' });
-    return sendJson(res, status, { error }, headers);
+    if (asPage) send(res, status, errorPage(status, error.code, error.message), { ...headers, 'content-type': 'text/html; charset=utf-8' });
+    else sendJson(res, status, { error }, headers);
+    return { status, code: error.code };
   }
 
   // ---- static files ----------------------------------------------------------------------
@@ -955,6 +978,23 @@ export function createHttpServer({
       const { route, params } = found;
       if (!isLab && !serverUp()) throw serverDown();
       checkOrigin(req, route);
+      const respond = () => answer(req, res, { url, rawPath, route, params, asPage });
+      // the lab's own routes need no trace from here: each lab action starts its own
+      return await (isLab ? respond() : traced(req, url, respond));
+    } catch (err) {
+      return fail(req, res, asPage, err);
+    }
+  }
+
+  /**
+   * Read, check and answer a request for its route: the body, who is asking, the handler. Its
+   * errors are answered here, so a kiosk request is reported (http.kiosk) with the status it
+   * really got, inside the request's trace.
+   */
+  async function answer(req, res, { url, rawPath, route, params, asPage }) {
+    let outcome;
+    let kiosk = null;
+    try {
       if (route.body !== 'none' && req.method !== 'GET') {
         // the media type is known before a single byte is read
         const { type } = contentTypeOf(req.headers['content-type']);
@@ -979,9 +1019,91 @@ export function createHttpServer({
       };
       // the kiosk's signature covers the body's bytes as they arrived, not their decoded text
       identify(route, req, rawPath, raw, request);
-      return sendResult(res, await route.handler(request));
+      kiosk = request.kiosk;
+      sendResult(res, await route.handler(request));
+      outcome = { status: res.statusCode };
     } catch (err) {
-      return fail(req, res, asPage, err);
+      outcome = fail(req, res, asPage, err);
+    }
+    if (route.auth === 'kiosk') reportKiosk(req, url, kiosk, outcome);
+  }
+
+  // ---- Simulation mode: request traces and kiosk reports (DESIGN §11.2, §11.3) ------------
+
+  const shownPath = (path) => (path.length > MAX_SHOWN_PATH ? `${path.slice(0, MAX_SHOWN_PATH)}…` : path);
+
+  /** The trace an x-lab-trace header names, if it looks like a trace id and the tracer knows it; else null. */
+  function knownTrace(tracer, value) {
+    if (typeof value !== 'string' || !TRACE_ID_RE.test(value)) return null;
+    try {
+      return tracer.has(value) === true ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The school of the staff session on a request (null when signed out, or when it cannot be told). */
+  function sessionSchool(headers) {
+    try {
+      return staffOf(headers)?.school.code ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Run a request's handling in its trace, when the lab has a tracer (`lab.tracer`: has(id),
+   * run(meta, fn)). A request naming a trace the tracer knows (x-lab-trace) joins it; a non-GET
+   * request of a product area starts its own ("School office: POST /api/admin/configs/prices");
+   * anything else runs as it is. Without a tracer nothing changes.
+   */
+  function traced(req, url, fn) {
+    const tracer = lab.tracer;
+    if (!tracer || typeof tracer.has !== 'function' || typeof tracer.run !== 'function') return fn();
+    const joined = knownTrace(tracer, req.headers[TRACE_HEADER]);
+    if (joined) {
+      const bus = ctx()?.events;
+      return typeof bus?.withContext === 'function' ? bus.withContext({ trace: joined }, fn) : fn();
+    }
+    if (SAFE_METHODS.has(req.method)) return fn();
+    const area = TRACED_AREAS.find(([prefix]) => url.pathname.startsWith(prefix))?.[1];
+    if (!area) return fn();
+    const meta = { kind: 'request', title: `${area}: ${req.method} ${shownPath(url.pathname)}` };
+    if (area === 'School office') {
+      const school = sessionSchool(req.headers);
+      if (school) meta.school = school;
+    }
+    let pending = null;
+    try {
+      tracer.run(meta, () => (pending = fn()));
+    } catch (err) {
+      // a tracer that fails must not cost the person their request
+      note('warn', 'the lab tracer could not trace a request', { method: req.method, path: url.pathname, error: err?.message });
+    }
+    return pending ?? fn();
+  }
+
+  /**
+   * http.kiosk `{ device, method, path, status, code? }`: a kiosk API request and its answer,
+   * filed under the kiosk's school. A request that never proved who sent it is filed under the
+   * codes it claims, when they are codes at all (as the broker files a refused publish).
+   */
+  function reportKiosk(req, url, kiosk, outcome) {
+    const claimed = (name, re) => {
+      const value = req.headers[name];
+      return typeof value === 'string' && re.test(value) ? value : null;
+    };
+    const data = {
+      device: kiosk?.device?.code ?? claimed('x-lab-device', DEVICE_CODE_RE),
+      method: req.method,
+      path: shownPath(url.pathname),
+      status: outcome.status,
+    };
+    if (outcome.code) data.code = outcome.code;
+    try {
+      ctx()?.events?.emit('http.kiosk', data, kiosk?.school?.code ?? claimed('x-lab-school', SCHOOL_CODE_RE));
+    } catch (err) {
+      note('warn', 'could not report a kiosk request', { error: err?.message });
     }
   }
 
@@ -1034,10 +1156,16 @@ export function createHttpServer({
       router = await ready;
       await new Promise((resolveListen, reject) => {
         server.once('error', reject);
-        server.listen(port, host, () => {
-          server.off('error', reject);
-          resolveListen();
-        });
+        const start = () =>
+          server.listen(port, host, () => {
+            server.off('error', reject);
+            resolveListen();
+          });
+        // Requests run in the event context the server started listening in: start it untraced,
+        // or every request would carry the trace of whatever flow started it (DESIGN §11.1).
+        const bus = ctx()?.events;
+        if (typeof bus?.untraced === 'function') bus.untraced(start);
+        else start();
       });
       const actualPort = server.address().port;
       selfUrl = `http://${urlHost(host)}:${actualPort}`;

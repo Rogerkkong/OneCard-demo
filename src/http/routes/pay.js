@@ -10,6 +10,9 @@ import { formatRM } from '../../shared/money.js';
 //
 // Only the parent who made an order can open or pay it. The bank finds the order through the
 // parent's own orders, so no session, another parent or an unknown id is a plain 404.
+//
+// Simulation mode (docs/DESIGN.md §11.3): the callback names the trace the payment runs in
+// (x-lab-trace), so the platform's side of it shows up in the same flow as the parent's click.
 
 const PROVIDER = 'MOCKBANK';
 const CALLBACK_PATH = '/api/payments/callback';
@@ -151,12 +154,15 @@ export function routes(deps) {
       paidAt: ctx.clock.iso(),
     };
     const body = JSON.stringify({ ...payload, signature: signPayload(ctx.settings.providerSecret, payload) });
+    const headers = { 'content-type': 'application/json', accept: 'application/json' };
+    const trace = typeof ctx.events?.context === 'function' ? ctx.events.context()?.trace : undefined;
+    if (trace) headers['x-lab-trace'] = trace;
     let res;
     let answer = null;
     try {
       res = await fetch(`${base}${CALLBACK_PATH}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        headers,
         body,
         redirect: 'manual',
         signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),

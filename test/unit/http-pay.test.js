@@ -76,7 +76,7 @@ async function watchingFetch(fn) {
   const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = (input, init) => {
-    calls.push({ url: String(input), method: init?.method ?? 'GET', body: init?.body });
+    calls.push({ url: String(input), method: init?.method ?? 'GET', body: init?.body, headers: { ...(init?.headers ?? {}) } });
     return original(input, init);
   };
   try {
@@ -129,6 +129,7 @@ describe('mock bank: paying', () => {
     assert.equal(sent.paidAmountSen, 1500);
     const { signature, ...signed } = sent;
     assert.equal(signature, signPayload(lab.ctx.settings.providerSecret, signed));
+    assert.equal(callback.headers['x-lab-trace'], undefined, 'outside any trace the callback names none');
 
     const { topups, ledger } = lab.platform.services;
     const smk = school('smk-contoh').id;
@@ -296,5 +297,51 @@ describe('payment callback (provider to platform)', () => {
     const other = await callback(signed({ ...base, providerTxnId: 'BANK-2' }));
     assert.equal(other.status, 409);
     assert.equal(lab.platform.services.topups.getOrder(school('smk-contoh').id, order.id).status, 'PAID');
+  });
+});
+
+describe('payment callback in Simulation mode', () => {
+  /** The lab's tracer as the server sees it (has, run): each run is a new trace. */
+  function fakeTracer(events) {
+    let n = 0;
+    const known = new Set();
+    const runs = [];
+    return {
+      runs,
+      has: (id) => known.has(id),
+      run(meta, fn) {
+        const id = `tr_bank${String(++n).padStart(4, '0')}`;
+        known.add(id);
+        runs.push({ id, meta });
+        return { trace: id, result: events.withContext({ trace: id }, fn) };
+      },
+    };
+  }
+
+  test('the bank\'s callback names the trace of the parent\'s Pay, and the payment lands in that trace', async (t) => {
+    const { signIn, topUp, lab, url, school } = await startLab(t);
+    lab.tracer = fakeTracer(lab.ctx.events);
+    const b = await signIn('Rahman bin Yusof');
+    const { order, payUrl } = await topUp(b, { amountSen: 1500, key: 'traced-1' });
+    const mark = lab.ctx.events.lastSeq();
+    const { result: paid, calls } = await watchingFetch(() => b.post(payUrl, { form: { result: 'SUCCESS' } }));
+    assert.equal(paid.status, 303);
+    const payRun = lab.tracer.runs.at(-1);
+    assert.deepEqual(payRun.meta, { kind: 'request', title: `Mock bank: POST /pay/${order.id}` });
+    const callback = calls.find((c) => c.url === `${url}/api/payments/callback`);
+    assert.equal(callback.headers['x-lab-trace'], payRun.id);
+    // the callback joined the parent's flow: the order paid and its posting are part of it
+    const caused = lab.ctx.events.since(mark);
+    assert.ok(caused.some((e) => e.type === 'topup.status' && e.data.status === 'PAID'), JSON.stringify(caused.map((e) => e.type)));
+    assert.ok(caused.some((e) => e.type === 'ledger.posting'));
+    assert.ok(caused.every((e) => e.trace === payRun.id), JSON.stringify(caused.map((e) => [e.type, e.trace])));
+    assert.equal(lab.platform.services.topups.getOrder(school('smk-contoh').id, order.id).status, 'PAID');
+
+    // the same through the script route
+    const second = await topUp(b, { amountSen: 700, key: 'traced-2' });
+    const { calls: scriptCalls } = await watchingFetch(() => b.post(`/api/pay/${second.order.id}/complete`, { json: { result: 'SUCCESS' } }));
+    const scriptRun = lab.tracer.runs.at(-1);
+    assert.equal(scriptRun.meta.title, `Mock bank: POST /api/pay/${second.order.id}/complete`);
+    assert.equal(scriptCalls.find((c) => c.url === `${url}/api/payments/callback`).headers['x-lab-trace'], scriptRun.id);
   });
 });

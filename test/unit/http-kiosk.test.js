@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
-import { createTestCtx } from '../helpers.js';
+import { createTestCtx, eventsOf } from '../helpers.js';
 import { createPlatform } from '../../src/platform/platform.js';
 import { seedDemo } from '../../src/lab/seed.js';
 import { createHttpServer } from '../../src/http/server.js';
@@ -323,5 +323,65 @@ describe('kiosk API: admin card', () => {
     assert.equal(sjkc.recorded, 0, 'CANTEEN-02 is not a machine of SJK(C) Contoh');
     refusedWith(400, 'RECEIPTS_INVALID')(await signed({ path: '/api/kiosk/admin-card/receipts', body: { token: 0, receipts: [] } }));
     refusedWith(400, 'RECEIPTS_INVALID')(await signed({ path: '/api/kiosk/admin-card/receipts', body: { token: 1, receipts: 'all of them' } }));
+  });
+});
+
+describe('kiosk API: every request is reported as http.kiosk (Simulation mode)', () => {
+  const reports = (ctx) => eventsOf(ctx, 'http.kiosk').map((e) => [e.school, e.data]);
+  const pending = { method: 'POST', path: '/api/kiosk/pending' };
+
+  test('an answered request: the kiosk, method, path (no query) and status, plus the code of an error', async (t) => {
+    const { signed, ctx, digestOf, member } = await startLab(t);
+    const card = digestOf('smk-contoh', member('smk-contoh', 'S1001').cardUid);
+    assert.equal((await signed({ body: { card } })).status, 200);
+    assert.equal((await signed({ body: { card: 'ab'.repeat(32) } })).status, 404);
+    assert.equal((await signed({ method: 'GET', path: '/api/kiosk/packs' })).status, 200);
+    assert.equal((await signed({ body: { card }, path: '/api/kiosk/pending?max=1' })).status, 200);
+    assert.equal((await signed({ code: 'sjkc-contoh', method: 'GET', path: '/api/kiosk/confirm/KIOSK-01-000009' })).status, 404);
+    assert.deepEqual(reports(ctx), [
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 200 }],
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 404, code: 'CARD_NOT_FOUND' }],
+      ['smk-contoh', { device: 'KIOSK-01', method: 'GET', path: '/api/kiosk/packs', status: 200 }],
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 200 }],
+      ['sjkc-contoh', { device: 'KIOSK-01', method: 'GET', path: '/api/kiosk/confirm/KIOSK-01-000009', status: 404, code: 'KIOSK_TXN_NOT_FOUND' }],
+    ]);
+    assert.ok(eventsOf(ctx, 'http.kiosk').every((e) => !('trace' in e)), 'no trace unless the request names one the lab knows');
+  });
+
+  test('a refused request is reported too, under the codes it claims when they are codes at all', async (t) => {
+    const { signed, ctx, url } = await startLab(t);
+    const body = { card: 'ab'.repeat(32) };
+    const first = await signed({ body });
+    refusedWith(409, 'REPLAY')(await signed({ body, nonce: first.nonce }));
+    refusedWith(401, 'SIGNATURE_INVALID')(await signed({ body, secret: 'ab'.repeat(32) }));
+    refusedWith(403, 'WRONG_DEVICE_TYPE')(await signed({ body, deviceCode: 'CANTEEN-01' }));
+    refusedWith(401, 'SIGNATURE_INVALID')(await signed({ body, code: 'no-such-school', secret: 'ab'.repeat(32) }));
+    const junk = await fetch(`${url}/api/kiosk/pending`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-lab-school': 'Not A School', 'x-lab-device': 'kiosk 01' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(junk.status, 401);
+    const wrongType = await fetch(`${url}/api/kiosk/pending`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'card' });
+    assert.equal(wrongType.status, 415);
+    assert.deepEqual(reports(ctx), [
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 404, code: 'CARD_NOT_FOUND' }],
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 409, code: 'REPLAY' }],
+      ['smk-contoh', { device: 'KIOSK-01', ...pending, status: 401, code: 'SIGNATURE_INVALID' }],
+      ['smk-contoh', { device: 'CANTEEN-01', ...pending, status: 403, code: 'WRONG_DEVICE_TYPE' }],
+      ['no-such-school', { device: 'KIOSK-01', ...pending, status: 401, code: 'SIGNATURE_INVALID' }],
+      [null, { device: null, ...pending, status: 401, code: 'SIGNATURE_INVALID' }],
+      [null, { device: null, ...pending, status: 415, code: 'UNSUPPORTED_MEDIA_TYPE' }],
+    ]);
+  });
+
+  test('a switched-off server reports nothing (the request never reached it); other APIs are no kiosk requests', async (t) => {
+    const { signed, ctx, lab, url } = await startLab(t);
+    lab.server.up = false;
+    refusedWith(503, 'SERVER_DOWN')(await signed({ body: { card: 'ab'.repeat(32) } }));
+    lab.server.up = true;
+    assert.equal((await fetch(`${url}/api/admin/staff-options`)).status, 200);
+    assert.equal((await fetch(`${url}/api/kiosk/nowhere`, { method: 'POST' })).status, 404);
+    assert.deepEqual(eventsOf(ctx, 'http.kiosk'), []);
   });
 });
