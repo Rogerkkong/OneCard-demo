@@ -165,9 +165,6 @@ export function createTracer(events, { clock, keepTraces = 200, keepEvents = 500
   }
 
   return {
-    /** begin() and run() take meta.subject (DESIGN §11.7); src/http/server.js gives one only to a tracer that says so. */
-    takesSubject: true,
-
     begin,
 
     /**

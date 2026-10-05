@@ -1066,8 +1066,8 @@ export function createHttpServer({
    * Run a request's handling in its trace, when the lab has a tracer (`lab.tracer`: has(id),
    * run(meta, fn)). A request naming a trace the tracer knows (x-lab-trace) joins it; a non-GET
    * request of a product area starts its own ("School office: POST /api/admin/configs/prices"),
-   * with the subject `{ area, method, path, school? }` (DESIGN §11.7) for a tracer that takes one
-   * (`takesSubject`, as the lab's does); anything else runs as it is. Without a tracer nothing changes.
+   * with the subject `{ area, method, path, school? }` (DESIGN §11.7); anything else runs as it
+   * is. Without a tracer nothing changes.
    */
   function traced(req, url, fn) {
     const tracer = lab.tracer;
@@ -1081,10 +1081,10 @@ export function createHttpServer({
     const found = TRACED_AREAS.find(([prefix]) => url.pathname.startsWith(prefix));
     if (!found) return fn();
     const [, area, areaName] = found;
-    const meta = { kind: 'request', title: `${area}: ${req.method} ${shownPath(url.pathname)}` };
     // the path without its query (url.pathname), cut to a subject's length
     const path = url.pathname.length > MAX_SUBJECT_PATH ? `${url.pathname.slice(0, MAX_SUBJECT_PATH - 1)}…` : url.pathname;
     const subject = { area: areaName, method: req.method, path };
+    const meta = { kind: 'request', title: `${area}: ${req.method} ${shownPath(url.pathname)}`, subject };
     if (area === 'School office') {
       const school = sessionSchool(req.headers);
       if (school) {
@@ -1092,7 +1092,6 @@ export function createHttpServer({
         subject.school = school;
       }
     }
-    if (tracer.takesSubject === true) meta.subject = subject;
     let pending = null;
     try {
       tracer.run(meta, () => (pending = fn()));

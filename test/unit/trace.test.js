@@ -166,7 +166,6 @@ test('a subject names what the flow is about: in sim.trace, list() and get(), {}
   tracer.list()[0].subject.ms = 1;
   tracer.get(clock).trace.subject.ms = 2;
   assert.equal(tracer.get(clock).trace.subject.ms, 60_000);
-  assert.equal(tracer.takesSubject, true, 'server.js gives request subjects to a tracer that says so');
   ctx.db.close();
 });
 

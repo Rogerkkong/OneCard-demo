@@ -327,7 +327,11 @@ describe('payment callback in Simulation mode', () => {
     const { result: paid, calls } = await watchingFetch(() => b.post(payUrl, { form: { result: 'SUCCESS' } }));
     assert.equal(paid.status, 303);
     const payRun = lab.tracer.runs.at(-1);
-    assert.deepEqual(payRun.meta, { kind: 'request', title: `Mock bank: POST /pay/${order.id}` });
+    assert.deepEqual(payRun.meta, {
+      kind: 'request',
+      title: `Mock bank: POST /pay/${order.id}`,
+      subject: { area: 'pay', method: 'POST', path: `/pay/${order.id}` },
+    });
     const callback = calls.find((c) => c.url === `${url}/api/payments/callback`);
     assert.equal(callback.headers['x-lab-trace'], payRun.id);
     // the callback joined the parent's flow: the order paid and its posting are part of it

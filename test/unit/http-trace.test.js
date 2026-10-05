@@ -15,15 +15,14 @@ import { signRequest } from '../../src/shared/crypto.js';
 
 /**
  * A tracer as the server sees it: runs `fn` in a new trace, and knows the traces it started (or
- * was told of). Like the lab's, it takes a subject (takesSubject), unless told otherwise.
+ * was told of).
  */
-function fakeTracer(events, { takesSubject = true } = {}) {
+function fakeTracer(events) {
   let n = 0;
   const known = new Set();
   const runs = [];
   const asked = [];
   return {
-    takesSubject,
     known,
     runs,
     asked,
@@ -40,12 +39,12 @@ function fakeTracer(events, { takesSubject = true } = {}) {
   };
 }
 
-async function startLab(t, { tracer = true, takesSubject = true } = {}) {
+async function startLab(t, { tracer = true } = {}) {
   const ctx = createTestCtx();
   const platform = createPlatform(ctx);
   const seed = seedDemo(platform);
   const lab = { ctx, platform, server: { up: true }, runJobs: () => ({ ran: true, context: ctx.events.context() }) };
-  if (tracer) lab.tracer = fakeTracer(ctx.events, { takesSubject });
+  if (tracer) lab.tracer = fakeTracer(ctx.events);
   const server = createHttpServer({ lab });
   const { url } = await server.listen(0, '127.0.0.1');
   t.after(() => server.close());
@@ -162,7 +161,7 @@ describe('request traces', () => {
     assert.equal(tracer.runs.length, 5);
   });
 
-  test('the subject\'s path has no query string and fits a subject; a tracer that takes no subject gets the meta it always got', async (t) => {
+  test('the subject\'s path has no query string and fits a subject', async (t) => {
     const { url, tracer, staff } = await startLab(t);
     const office = browser(url);
     await office.post('/api/admin/login?next=%2Fadmin%2F&x=1', { staffId: staff('smk-contoh', 'FINANCE').id });
@@ -174,10 +173,6 @@ describe('request traces', () => {
     const { path } = tracer.runs.at(-1).meta.subject;
     assert.equal(path.length, 120);
     assert.equal(path, `${deep.slice(0, 119)}…`);
-
-    const plain = await startLab(t, { takesSubject: false });
-    await browser(plain.url).post('/api/operator/login');
-    assert.deepEqual(plain.tracer.runs.map((r) => r.meta), [{ kind: 'request', title: 'Operator console: POST /api/operator/login' }]);
   });
 
   test('a refused request is still the person\'s action and gets its trace; a switched-off server answers before any', async (t) => {
