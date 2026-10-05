@@ -18,6 +18,7 @@ import { hhmm, prefs, reconcile, reducedMotion, setAttr, setHidden, setText, set
 const MAX_ROWS = 200; // rows in the list at once; "show earlier" and "show later" add more
 const MAX_EVENTS = 1500; // events kept for the chosen flow (the lab keeps 500 per trace)
 const MAX_TRACES = 200; // the lab keeps the most recent 200
+const LIST_LIMIT = 50; // flows asked for at once (GET /api/lab/sim?limit=)
 const SPEEDS = [0.5, 1, 2];
 const DWELL_MS = 600; // how long a step stays before the next one plays, at 1×
 const TRACE_LIST_STALE_MS = 15_000;
@@ -129,6 +130,12 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   // ---- small helpers ----------------------------------------------------------------------------
 
   const currentTrace = () => s.traces.find((x) => x.id === s.traceId) ?? null;
+  /** The chosen flow's summary when the list does not have it (yet): from its sim.trace event. */
+  function chosenSummary() {
+    const e = s.events.find((x) => x.type === 'sim.trace');
+    const d = e?.data ?? {};
+    return { id: s.traceId, n: d.n ?? '?', kind: d.kind ?? '', title: d.title ?? '', school: e?.school ?? null, device: d.device ?? null, at: e ? Date.parse(e.at) : NaN };
+  }
   const stepAt = (seq) => s.steps.find((x) => x.seq === seq) ?? null;
   const visibleIndex = (seq) => s.visible.findIndex((x) => x.seq === seq);
   const isRealtime = () => s.mode !== 'simulation';
@@ -148,7 +155,8 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   // ---- the chosen flow: its steps --------------------------------------------------------------
 
   function rebuild() {
-    s.steps = buildSteps(s.events, { t, lang: app.i18n.lang, trace: currentTrace(), isHeld: (id) => s.held.some((x) => x.id === id) });
+    const trace = currentTrace() ?? (s.traceId ? chosenSummary() : null);
+    s.steps = buildSteps(s.events, { t, lang: app.i18n.lang, trace, isHeld: (id) => s.held.some((x) => x.id === id) });
     s.visible = s.steps.filter(isVisible);
     // the current step may be filtered out: keep the nearest visible one before it
     if (s.cursor !== null && visibleIndex(s.cursor) < 0) {
@@ -199,13 +207,15 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     if (first) addEvents([first]);
     rebuild();
     render();
-    if (!id) {
-      anim.show(null);
-      return;
-    }
+    // the previous flow's envelope goes at once (this flow's shows when its first step does)
+    anim.show(null);
+    if (!id) return;
     if (!first) await load(id, { toEnd });
     else kick();
   }
+
+  /** Nothing is chosen, or the chosen flow is gone: a flow that starts or waits is the one to show. */
+  const wantsNewest = () => s.followTrace || !s.traceId || s.gone;
 
   async function load(id, { toEnd = false } = {}) {
     const token = ++loadToken;
@@ -240,14 +250,31 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       render();
       kick();
     } catch (err) {
-      if (token !== loadToken) return;
+      if (token !== loadToken || s.traceId !== id) return;
       s.loading = false;
       if (err?.code === 'TRACE_NOT_FOUND') {
-        s.gone = true;
-        s.traces = s.traces.filter((x) => x.id !== id);
-      } else if (err?.code !== 'NETWORK') toast(errorText(err, t), 'bad');
+        forgetFlow();
+        render();
+        if (s.followTrace) refresh({ choose: true });
+        return;
+      }
+      if (err?.code !== 'NETWORK') toast(errorText(err, t), 'bad');
       render();
     }
+  }
+
+  /** The lab no longer keeps the chosen flow (newer flows, a reset, a restart): what was shown of it goes too. */
+  function forgetFlow() {
+    stopTimer();
+    s.gone = true;
+    s.traces = s.traces.filter((x) => x.id !== s.traceId);
+    s.events = [];
+    s.seqs = new Set();
+    s.cursor = null;
+    s.running = false;
+    s.replay = false;
+    rebuild();
+    anim.show(null);
   }
 
   /** The step where a held item was let go (else where it waited), or the next visible one. */
@@ -275,19 +302,22 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   async function refresh({ choose: pick = false } = {}) {
     try {
       const requestedAt = performance.now();
-      const res = await get('/api/lab/sim?limit=50');
+      const res = await get(`/api/lab/sim?limit=${LIST_LIMIT}`);
       applySim(res, requestedAt);
       const fresh = Array.isArray(res.traces) ? res.traces : [];
-      // a flow started meanwhile by the event stream stays in the list
+      // fewer flows than asked for: these are all the lab keeps
+      const complete = fresh.length < LIST_LIMIT;
       const known = new Map(fresh.map((x) => [x.id, x]));
-      for (const x of s.traces) if (!known.has(x.id) && x.at >= (fresh[0]?.at ?? 0)) known.set(x.id, x);
+      for (const x of s.traces) {
+        if (known.has(x.id)) continue;
+        // a flow the event stream announced after this list was asked for stays; so does the chosen
+        // flow when the list stops before it (anything else is gone: a reset, a restart of the lab)
+        if ((x.seenAt ?? 0) > requestedAt || (x.id === s.traceId && !complete)) known.set(x.id, x);
+      }
       s.traces = [...known.values()].sort((a, b) => b.n - a.n || b.at - a.at).slice(0, MAX_TRACES);
       s.tracesAt = performance.now();
-      if (s.traceId && !s.traces.some((x) => x.id === s.traceId) && fresh.length < 50) {
-        // the chosen flow is gone (a reset): follow the newest again
-        s.gone = true;
-      }
-      if (pick || (!s.traceId && s.followTrace) || (s.gone && s.followTrace)) {
+      if (s.traceId && complete && !s.gone && !s.traces.some((x) => x.id === s.traceId)) forgetFlow();
+      if (pick || !s.traceId || (s.gone && s.followTrace)) {
         const newest = s.traces[0]?.id ?? null;
         // a flow that waits at a hop (the page was reloaded meanwhile): show where it waits
         const waits = s.held.find((x) => x.trace === newest) ?? null;
@@ -501,14 +531,18 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     setText(el.followText, t('sim.follow'));
     el.follow.checked = s.followTrace;
     const list = [...s.traces];
-    if (s.traceId && !list.some((x) => x.id === s.traceId) && !s.gone) list.push({ id: s.traceId, n: '?', kind: '', title: '', at: NaN });
-    const options = list.length ? list.map((x) => [x.id, traceLabel(x, t, hhmm, app.i18n.lang)]) : [['', t('sim.trace.none')]];
+    if (s.traceId && !list.some((x) => x.id === s.traceId) && !s.gone) list.push(chosenSummary());
+    const shown = s.traceId && !s.gone && list.some((x) => x.id === s.traceId);
+    const options = list.map((x) => [x.id, traceLabel(x, t, hhmm, app.i18n.lang)]);
+    // the picker never names another flow than the one shown: with none shown, it asks for one
+    if (!options.length) options.push(['', t('sim.trace.none')]);
+    else if (!shown) options.unshift(['', t('sim.trace.pick')]);
     const sig = JSON.stringify(options);
     if (el.traceSelect.dataset.sig !== sig) {
-      el.traceSelect.replaceChildren(...options.map(([value, text]) => h('option', { value }, text)));
+      el.traceSelect.replaceChildren(...options.map(([value, text]) => h('option', { value, disabled: value === '' && list.length > 0 }, text)));
       el.traceSelect.dataset.sig = sig;
     }
-    el.traceSelect.value = s.traceId && list.some((x) => x.id === s.traceId) ? s.traceId : (options[0]?.[0] ?? '');
+    el.traceSelect.value = shown ? s.traceId : '';
     el.traceSelect.disabled = !s.traces.length;
     const tr = currentTrace();
     let line = '';
@@ -524,13 +558,16 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     setAttr(el.hold, 'aria-checked', String(s.hold));
     el.hold.classList.toggle('is-on', s.hold);
     el.hold.disabled = s.busy;
-    setText(el.holdHint, t(s.hold ? 'sim.hold.on' : isRealtime() ? 'sim.hold.offRealtime' : 'sim.hold.off'));
     const n = s.held.length;
-    // while something waits, the notice and the list say what to do: the general hint gives way
-    setHidden(el.holdHint, n > 0);
-    if (!el.next.hasAttribute('aria-busy')) setText(el.next, n ? t('sim.next.count', { n }) : t('sim.next'));
     // what waits at the platform goes on only while the cloud server is on
     const releasable = s.held.filter((x) => x.where !== 'platform' || s.serverUp).length;
+    // everything that waits is at the platform and the server is off: the hint says why Next hop cannot be pressed
+    const stuck = n > 0 && releasable === 0;
+    setText(el.holdHint, t(stuck ? 'sim.next.stuck' : s.hold ? 'sim.hold.on' : isRealtime() ? 'sim.hold.offRealtime' : 'sim.hold.off'));
+    el.holdHint.classList.toggle('is-stuck', stuck);
+    // while something waits, the notice and the list say what to do: the general hint gives way
+    setHidden(el.holdHint, n > 0 && !stuck);
+    if (!el.next.hasAttribute('aria-busy')) setText(el.next, n ? t('sim.next.count', { n }) : t('sim.next'));
     el.next.disabled = releasable === 0 || s.busy;
     if (!el.release.hasAttribute('aria-busy')) setText(el.release, t('sim.release'));
     el.release.disabled = releasable === 0 || s.busy;
@@ -910,7 +947,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
         renderCursor();
         kick();
       }
-    } else if (s.followTrace) choose(item.trace, { live: true, at: item.id });
+    } else if (wantsNewest()) choose(item.trace, { live: true, at: item.id });
   }
 
   async function releaseAll() {
@@ -1106,8 +1143,9 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
         if (d.action === 'reset' && !e.trace) resetAll(true);
         break;
       case 'sim.trace':
-        upsertTrace({ id: d.id, n: d.n, kind: d.kind, title: d.title, school: e.school ?? null, device: d.device ?? null, at: Date.parse(e.at), lastAt: Date.parse(e.at), events: 1 });
-        if (s.followTrace) {
+        // seenAt: announced by the stream now (a list asked for earlier does not have it yet)
+        upsertTrace({ id: d.id, n: d.n, kind: d.kind, title: d.title, school: e.school ?? null, device: d.device ?? null, at: Date.parse(e.at), lastAt: Date.parse(e.at), events: 1, seenAt: performance.now() });
+        if (wantsNewest()) {
           choose(d.id, { live: true, first: e });
           return;
         }
@@ -1188,7 +1226,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       // (an item let go before its answer came is not news any more)
       if (!item || !s.released.has(item.id)) setNotice(heldWords(item), 'warn', item?.id ?? null);
       if (open) showTab('sim');
-      if (answer?.trace && answer.trace !== s.traceId && s.followTrace) choose(answer.trace, { live: true });
+      if (answer?.trace && answer.trace !== s.traceId && wantsNewest()) choose(answer.trace, { live: true });
     },
     /** Ask the lab what waits now; @returns the newest item of that machine ('<school>/<DEVICE>'), if any. */
     async syncHeld(key) {
@@ -1206,10 +1244,15 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
         return null;
       }
     },
-    /** The stream (re)connected: what happened meanwhile is fetched again. */
-    resync() {
-      refresh();
-      if (s.traceId) load(s.traceId, { toEnd: s.running });
+    /**
+     * The stream (re)connected: what happened meanwhile is fetched again. The list first: the
+     * chosen flow may be gone (the lab was reset or restarted meanwhile), and then the newest is
+     * shown instead; else the chosen flow's steps are fetched again.
+     */
+    async resync() {
+      const before = s.traceId;
+      await refresh();
+      if (s.traceId && s.traceId === before && !s.gone) load(s.traceId, { toEnd: s.running });
     },
     /** The person reset the demo from this page. */
     reset: () => resetAll(false),

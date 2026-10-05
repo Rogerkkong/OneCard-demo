@@ -353,9 +353,10 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
       toast(t('toast.consoleSaid', { code, output: output.replace(/^%\s*/, '') }), 'warn');
       return;
     }
-    if (/^Held at a hop:/m.test(output)) {
-      // Simulation mode, hold on: the console says what waits; the Simulation tab shows it
-      const item = await app.sim?.syncHeld(key);
+    if (res.held || /^Held at a hop:/m.test(output)) {
+      // Simulation mode, hold on: the console's answer names what waits (an older lab says it only in
+      // words: then the Simulation tab asks the lab); the Simulation tab shows it
+      const item = res.data.item ?? (await app.sim?.syncHeld(key));
       app.openSim?.();
       toast(item ? `${code}${t('colon')}${heldText(item, t, { serverUp: app.state?.server?.up !== false })}` : t('toast.heldSomewhere', { code }), 'info');
       return;

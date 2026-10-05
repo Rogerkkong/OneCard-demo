@@ -131,6 +131,14 @@ function recordResults(results, t) {
   return `${t('colon')}${t('ev.records', { n: results.length, list })}`;
 }
 
+// Why the lab stopped its broker (src/lab/lab.js, closeBroker): the known reasons in the page's language.
+const BROKER_REASONS = { 'server switched off': 'serverOff', restart: 'restart', reset: 'reset', 'lab stopped': 'labStopped' };
+
+/** The broker's stop reason in plain words (a reason this page does not know stays as the lab wrote it). */
+export function brokerReason(reason, t) {
+  return Object.hasOwn(BROKER_REASONS, reason ?? '') ? t(`st.broker.reason.${BROKER_REASONS[reason]}`) : String(reason ?? '');
+}
+
 /** How far the clock moved, in plain words. */
 export function duration(ms, t) {
   if (ms % DAY === 0) return ms === DAY ? t('dur.day') : t('dur.days', { n: ms / DAY });
@@ -283,7 +291,7 @@ export function summarize(e, t, lang) {
     case 'server.status':
       return t(d.up ? 'ev.server.up' : 'ev.server.down');
     case 'broker.status':
-      return d.up ? t('ev.broker.up', { url: d.url ?? '' }) : t('ev.broker.down', { reason: d.reason ?? '' });
+      return d.up ? t('ev.broker.up', { url: d.url ?? '' }) : t('ev.broker.down', { reason: brokerReason(d.reason, t) });
     default:
       return '';
   }

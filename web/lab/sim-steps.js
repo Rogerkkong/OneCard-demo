@@ -8,6 +8,7 @@
 import { formatRM, formatTimeKL } from '/shared/api.js';
 import {
   RECORD_TYPES,
+  brokerReason,
   callName,
   duration,
   errorText,
@@ -92,7 +93,9 @@ export function nodeName(n, t, { multiSchool = false } = {}) {
     case 'machine':
       return multiSchool ? `${n.school}/${n.device}` : n.device;
     case 'card':
-      return n.last4 || n.uid ? t('sim.node.card', { last4: n.last4 ?? chipUid(n.uid).slice(-4) }) : t('sim.node.cardAny');
+      if (!n.last4 && !n.uid) return t('sim.node.cardAny');
+      // a copy made by the lab's clone fault has the same chip UID as the card it copies
+      return t(/-copy\d*$/i.test(String(n.uid ?? '')) ? 'sim.node.cardCopy' : 'sim.node.card', { last4: n.last4 ?? chipUid(n.uid).slice(-4) });
     case 'admincard':
       return t('sim.node.admincard');
     case 'net':
@@ -235,6 +238,11 @@ export function traceContext(events, trace = null) {
         m.received = { result: d.result, reason: d.reason, kind: d.kind, version: d.version, device: d.device };
         m.type ??= d.type;
         break;
+      case 'mqtt.denied':
+        // the broker refused this publish (a login publishing on another machine's topic)
+        m.denied = { username: d.username, topic: d.topic };
+        m.topic ??= d.topic;
+        break;
       case 'sim.held':
         m.type ??= d.type;
         m.txn ??= d.txn;
@@ -255,6 +263,8 @@ export function traceContext(events, trace = null) {
     rereads,
     // the lab's forged-message fault: its message is not signed with the machine's secret
     forgedFlow: /^Fault: forged message as /.test(String(trace?.title ?? '')),
+    // the broker's own refusal is a step of this flow (mqtt.denied carries the message's id)
+    denied: events.some((e) => e.type === 'mqtt.denied'),
     // heartbeats are routine (hidden unless asked for) in a flow of many machines (the clock, the
     // server, the broker); in one machine's flow its heartbeat is part of what happens
     routineBeats: !trace?.device,
@@ -265,9 +275,6 @@ export function traceContext(events, trace = null) {
 
 const money = (sen) => (Number.isSafeInteger(sen) ? formatRM(sen) : '—');
 const tr = (t, key, fallback) => (hasKey(key) ? t(key) : fallback);
-// Why the lab stopped its broker (src/lab/lab.js, closeBroker): the known reasons in the page's language.
-const BROKER_REASONS = { 'server switched off': 'serverOff', restart: 'restart', reset: 'reset', 'lab stopped': 'labStopped' };
-const brokerReason = (reason, t) => (BROKER_REASONS[reason] ? t(`st.broker.reason.${BROKER_REASONS[reason]}`) : String(reason));
 const code = (v) => ({ text: String(v ?? '—'), mono: true });
 // A sentence keeps a space around each value for codes such as CANTEEN-01 ("{who} 离开 broker"),
 // but not between two Chinese characters (who = 平台): that space goes, only at a value's edge.
@@ -543,7 +550,13 @@ export function stepOf(e, ctx) {
       step.to = here;
       step.heartbeat = isBeat;
       const vars = { device: dev ?? '—', type: d.type ?? '—', seq: d.seq ?? '—', bytes: d.bytes ?? '—' };
-      if (isForged(d.msgId, ctx)) {
+      const p = parseTopic(d.topic);
+      if (p && dev && (p.device !== dev || (school && p.school !== school))) {
+        // the lab's cross-device fault: a copy of this machine's login publishes on another machine's topic
+        step.verdict = 'warn';
+        step.note = t('st.send.otherTopicNote');
+        say('st.send.otherTopic', { ...vars, target: school && p.school !== school ? `${p.school}/${p.device}` : p.device });
+      } else if (isForged(d.msgId, ctx)) {
         // the lab's forged-message fault goes out on the machine's own connection, unsigned by it
         step.verdict = 'warn';
         step.note = t('st.send.forgedNote');
@@ -611,7 +624,7 @@ export function stepOf(e, ctx) {
       step.drop = BROKER;
       step.verdict = 'bad';
       say(d.topic ? 'st.denied.topic' : 'st.denied', { action: tr(t, `ev.action.${d.action}`, d.action ?? ''), who: loginName(d.username, ctx, school), topic: d.topic ?? '' });
-      step.kinds = ['mqtt'];
+      step.kinds = [step.msgId ? 'message' : null, 'mqtt'];
       break;
     }
     case 'broker.status':
@@ -963,9 +976,15 @@ function labActionStep(step, e, ctx, say) {
     say('st.lab.failed', { why: why.charAt(0).toUpperCase() + why.slice(1) });
     return;
   }
+  if (d.action === 'fault' && d.type === 'cross-device-publish' && d.refused && ctx.denied) {
+    // the broker's refusal is a step of its own (mqtt.denied): this is the lab's word on it, at
+    // the broker, with nothing travelling or refused a second time
+    step.to = BROKER;
+    say('st.lab.crossDevice', { device: d.device ?? '—', topic: d.topic ?? '—' });
+    return;
+  }
   if (d.action === 'fault' && d.type === 'cross-device-publish') {
-    // the broker's refusal carries no trace (its client events lose the context): the lab's
-    // answer is where the flow shows it
+    // (a lab whose mqtt.denied carries no message id: the lab's answer is where the flow shows the refusal)
     step.from = step.to;
     step.to = BROKER;
     step.layer = 'mqtt';
@@ -1054,8 +1073,9 @@ function heldSection(e, ctx) {
   const { t } = ctx;
   const item = e.type === 'sim.held' ? e.data : ctx.held.get(e.data?.id);
   if (!item) return null;
+  const whereKey = `pd.held.where.${item.where}`;
   const rows = [
-    [t('pd.held.where'), t(`pd.held.where.${item.where}`, { device: item.device ?? '—' })],
+    [t('pd.held.where'), hasKey(whereKey) ? t(whereKey, { device: item.device ?? '—' }) : String(item.where ?? '—')],
     [t('pd.held.what'), code(heldSubject(item))],
     [t('pd.held.since'), formatTimeKL(item.at)],
     [t('pd.held.now'), ctx.isHeld?.(item.id) ? t('pd.held.waiting') : t('pd.held.gone')],
@@ -1237,7 +1257,7 @@ function securitySection(e, msg, ctx) {
     checks: [{
       state: !sig ? 'skip' : sig.ok ? 'ok' : 'bad',
       label: t('pd.sec.checkedPlatform'),
-      value: !sig ? t(m.intake ? 'pd.sec.notReached' : 'pd.sec.notYet') : sig.ok ? t('pd.sec.valid') : sig.code ?? 'SIGNATURE_INVALID',
+      value: !sig ? t(m.intake || m.denied ? 'pd.sec.notReached' : 'pd.sec.notYet') : sig.ok ? t('pd.sec.valid') : sig.code ?? 'SIGNATURE_INVALID',
     }],
   };
 }
@@ -1262,6 +1282,11 @@ function mqttSection(e, msg, ctx) {
   rows.push([t('pd.mqtt.rule'), t(down ? 'pd.mqtt.ruleDown' : 'pd.mqtt.ruleUp')]);
   const checks = [];
   if (m.passedAt || e.type === 'mqtt.publish') checks.push({ state: 'ok', label: t('pd.mqtt.allowed'), value: t('pd.mqtt.passed') });
+  else if (m.denied) {
+    // refused by the broker: no acknowledgement ever comes
+    checks.push({ state: 'bad', label: t('pd.mqtt.allowed'), value: t('pd.mqtt.refused') });
+    return { id: 'mqtt', rows, checks };
+  }
   if (!down && !m.byPlatform) {
     const a = m.acked ?? (e.type === 'device.acked' ? d : null);
     if (a) checks.push({ state: a.ok ? 'ok' : 'warn', label: t('pd.mqtt.puback'), value: a.ok ? t('pd.mqtt.pubackMs', { ms: a.ms ?? '—' }) : tr(t, `sim.ackReason.${a.reason}`, a.reason ?? '—') });
