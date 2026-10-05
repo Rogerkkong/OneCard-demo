@@ -709,6 +709,7 @@ export class Terminal {
   async #flushOnce() {
     let batches = 0;
     let records = 0;
+    if (!this.connected && this.#journal.some((e) => !e.sent && !e.inFlight)) this.#notSent('journal.batch');
     while (this.connected) {
       const pending = this.#journal.filter((e) => !e.sent && !e.inFlight).slice(0, MAX_BATCH_RECORDS);
       if (pending.length === 0) break;

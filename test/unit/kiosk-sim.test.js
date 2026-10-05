@@ -57,8 +57,9 @@ function fakeApi(cardKey) {
       async pending(args) {
         calls.push('pending');
         fail('pending');
-        const waiting = [...orders.values()].filter((o) => o.status === 'PAID');
-        return { member: { id: 'mem_1', name: 'Test Student' }, orders: waiting.map((o) => ({ orderId: o.orderId, kind: 'TOPUP', amountSen: o.amountSen })), mirrorBalanceSen: 0, waitingSen: 0, card: args.card };
+        const waiting = [...orders.values()].filter((o) => o.status === 'PAID' && args.card === digest);
+        const listed = waiting.map((o) => ({ orderId: o.orderId, kind: 'TOPUP', amountSen: o.amountSen }));
+        return { member: { id: 'mem_1', name: 'Test Student' }, orders: listed, mirrorBalanceSen: 0, waitingSen: 0 };
       },
       async confirm(args) {
         calls.push('confirm');

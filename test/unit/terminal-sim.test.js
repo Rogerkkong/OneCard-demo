@@ -313,7 +313,9 @@ describe('the steps of a tap', () => {
     assert.deepEqual([balance.ok, balance.amountSen, balance.checks.length, balance.checks.at(-1)], [false, 350, 7, { rule: 'balance', ok: false, balanceSen: 120 }]);
 
     ctx.clock.advance(9 * HOUR); // 19:00 KL: nothing else is even looked at
-    assert.deepEqual(await tap(poor, [{ code: 'BUAH' }], 'CLOSED'), { device: 'CANTEEN-01', step: 'rules', ok: false, amountSen: 100, checks: [{ rule: 'window', ok: false, open: false }] });
+    assert.deepEqual(await tap(poor, [{ code: 'BUAH' }], 'CLOSED'), {
+      device: 'CANTEEN-01', step: 'rules', ok: false, amountSen: 100, checks: [{ rule: 'window', ok: false, open: false }],
+    });
   });
 
   test('water: the rules step shows the capped pour and what it costs', async () => {
@@ -345,7 +347,8 @@ describe('the steps of a tap', () => {
     const refused = await water.tap(card, { ml: 30_000 });
     assert.equal(refused.reason, 'INSUFFICIENT_BALANCE');
     const rules = lastStep(ctx, 'rules');
-    assert.deepEqual([rules.ok, rules.ml, rules.amountSen, rules.checks.at(-1)], [false, 20_000, waterChargeSen(20_000, perLitreSen, minChargeSen), { rule: 'balance', ok: false, balanceSen: 0 }]);
+    const charge = waterChargeSen(20_000, perLitreSen, minChargeSen);
+    assert.deepEqual([rules.ok, rules.ml, rules.amountSen, rules.checks.at(-1)], [false, 20_000, charge, { rule: 'balance', ok: false, balanceSen: 0 }]);
   });
 
   test('offline: the record is journaled and the offline step says it waits; a heartbeat or envelope not sent says so too', NET, async (t) => {
@@ -365,6 +368,8 @@ describe('the steps of a tap', () => {
 
     assert.equal(await reader.heartbeat(), false);
     assert.deepEqual(lastStep(net.ctx, 'offline'), { device: 'CANTEEN-01', step: 'offline', ok: false, type: 'device.heartbeat' });
+    assert.deepEqual(await reader.flushJournal(), { batches: 0, records: 0, unsent: 1 });
+    assert.deepEqual(lastStep(net.ctx, 'offline'), { device: 'CANTEEN-01', step: 'offline', ok: false, type: 'journal.batch' });
     const envelope = net.envelope(READER, 'sale.recorded', { record: sale.record }, { fields: { txn: sale.record.txn } });
     assert.equal(await reader.publishEnvelope(envelope), false);
     assert.deepEqual(lastStep(net.ctx, 'offline'), { device: 'CANTEEN-01', step: 'offline', ok: false, type: 'sale.recorded', txn: sale.record.txn });
@@ -503,7 +508,8 @@ describe('gate', () => {
     assert.equal(net.ctx.events.since(mark).filter((e) => e.type === 'device.send').length, 1);
     assert.equal((await tapping).sent, true);
     const sale = await waitFor(() => net.from(READER, 'sale.recorded')[0], { message: 'the sale' });
-    assert.deepEqual(gate.calls[1], { kind: 'publish', device: 'CANTEEN-01', school: A, type: 'sale.recorded', msgId: sale.env.id, seq: 2, txn: 'CANTEEN-01-000001', topic: RECORDS });
+    const asked = { kind: 'publish', device: 'CANTEEN-01', school: A, type: 'sale.recorded', msgId: sale.env.id, seq: 2, txn: 'CANTEEN-01-000001', topic: RECORDS };
+    assert.deepEqual(gate.calls[1], asked);
   });
 
   test('a gate that throws or rejects is noted and passed: the machine carries on', NET, async (t) => {
@@ -586,10 +592,12 @@ describe('gate', () => {
     await reader.start();
     await net.nextBeat(READER, 0);
     // a lab fault: an old seq on purpose
-    const envelope = signEnvelope(READER.secret, buildEnvelope({ school: A, device: 'CANTEEN-01', seq: 1, at: net.ctx.clock.iso(), type: 'sale.recorded', txn: 'CANTEEN-01-000009', body: {} }));
+    const at = net.ctx.clock.iso();
+    const envelope = signEnvelope(READER.secret, buildEnvelope({ school: A, device: 'CANTEEN-01', seq: 1, at, type: 'sale.recorded', txn: 'CANTEEN-01-000009', body: {} }));
     const sending = reader.publishEnvelope(envelope);
     await waitFor(() => gate.waiting.length === 1, { message: 'the envelope to be held' });
-    assert.deepEqual(gate.waiting[0].info, { kind: 'publish', device: 'CANTEEN-01', school: A, type: 'sale.recorded', msgId: envelope.id, seq: 1, txn: 'CANTEEN-01-000009', topic: RECORDS });
+    const asked = { kind: 'publish', device: 'CANTEEN-01', school: A, type: 'sale.recorded', msgId: envelope.id, seq: 1, txn: 'CANTEEN-01-000009', topic: RECORDS };
+    assert.deepEqual(gate.waiting[0].info, asked);
     assert.equal(await reader.heartbeat(), true);
     gate.releaseAll();
     assert.equal(await sending, true);
