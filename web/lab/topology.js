@@ -494,10 +494,13 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setTimeout(() => el.classList.remove('is-acted'), 1600);
   }
 
-  /** Bring something just added into view and mark it for a moment (a machine or a whole site). */
-  function showAdded(el) {
+  /**
+   * Bring something just added into view and mark it for a moment: a machine in the middle of the
+   * window, a whole site (taller than the window) from its top, under the sticky bars.
+   */
+  function showAdded(el, block = 'center') {
     if (!el) return false;
-    el.scrollIntoView({ block: 'center', behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+    el.scrollIntoView({ block, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
     el.classList.remove('is-added');
     void el.offsetWidth; // restart the mark
     el.classList.add('is-added');
@@ -514,7 +517,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     /** A machine just added: scrolled into view and marked. @returns whether it is on the page yet */
     showMachine: (key) => showAdded(machineEls.get(key)),
     /** A school just added: its site, scrolled into view and marked. @returns whether it is on the page yet */
-    showSite: (code) => showAdded(document.getElementById(`site-${code}`)),
+    showSite: (code) => showAdded(document.getElementById(`site-${code}`), 'start'),
     /** A school being added on this page: its site appears without the "new school" toast (the page says more). */
     expectSchool: (code) => quiet.add(code),
     /** ...after all not added. */

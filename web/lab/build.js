@@ -104,7 +104,6 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
   function relabelBar() {
     setText(titleEl, t('build.title'));
     setText(hintEl, t('build.hint'));
-    setAttr(bar, 'aria-label', t('build.bar'));
     for (const b of items) {
       const { type } = b._item;
       setText(b.lastChild, t(type ? `type.${type}` : 'build.school'));

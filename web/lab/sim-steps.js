@@ -174,7 +174,7 @@ function cardOfFlow(trace) {
   if (trace?.kind !== 'tap' && trace?.kind !== 'fault') return null;
   const s = subjectOf(trace);
   const uid = word(s.uid);
-  // a card of another school tapped on a machine named apart (toSchool): school is the card's
+  // a tap names the card's own school (cardSchool); a card fault names the card's school (school)
   const school = word(s.cardSchool) ?? word(s.school) ?? word(trace.school);
   return uid && school ? { school, uid } : null;
 }
@@ -491,11 +491,9 @@ function faultWords(s, trace, t) {
       break;
     }
     case 'cross-school-card': {
-      // the card's school and the machine of the other school it is tapped on
-      const other = machineName(word(s.toSchool), word(s.toDevice) ?? device);
-      const cardSchool = word(s.cardSchool) ?? (other ? school : null);
-      const at = other ?? machine;
-      if (uid && cardSchool && at) title = t('tt.crossSchool', { school: cardSchool, uid, machine: at });
+      // a card of one school (cardSchool) tapped on a machine of another (school, device)
+      const cardSchool = word(s.cardSchool);
+      if (uid && cardSchool && machine) title = t('tt.crossSchool', { school: cardSchool, uid, machine });
       break;
     }
     case 'server-down':
@@ -515,8 +513,9 @@ function faultWords(s, trace, t) {
   // a fault this page knows by name but not by its fields: still named in the page's words
   title ??= hasKey(`fault.${fault}.title`) ? t('tt.fault', { name }) : null;
   if (!title) return null;
-  const at = word(s.toDevice) && fault === 'cross-school-card' ? s.toDevice : device;
-  return { title, kind: t('sim.kind.fault'), short: at ? t('sim.subject.faultAt', { name, device: at }) : name };
+  // named in the picker by where it happens: the machine, or the card a card fault is about
+  const where = device ?? (uid ? `··${chipUid(uid).slice(-4)}` : null);
+  return { title, kind: t('sim.kind.fault'), short: where ? t('sim.subject.faultAt', { name, device: where }) : name };
 }
 
 /**
@@ -1533,7 +1532,7 @@ function securitySection(e, msg, ctx) {
     id: 'security',
     rows: [
       [t('pd.sec.signature'), t(signs, { device: m.copied ? m.device ?? device : device })],
-      [t('pd.sec.secret'), t('pd.sec.secretHow', { device })],
+      [t('pd.sec.secret'), t(m.copied ? 'pd.sec.secretCopied' : 'pd.sec.secretHow', { device: m.copied ? m.device ?? device : device })],
     ],
     checks: [{
       state: !sig ? 'skip' : sig.ok ? 'ok' : 'bad',

@@ -1,8 +1,9 @@
 // Dragging with pointer events (DESIGN §12): mouse, pen and touch alike, never HTML5 drag and
 // drop (which does not work on touch). A press waits for a small move before a drag starts, so a
-// short press without moving stays a click and a touch can still scroll the page. While dragging
-// the element keeps the pointer (pointer capture), the page scrolls by itself near the top and
-// bottom of the window, and Escape, or the browser taking the gesture over, cancels the drag.
+// short press without moving stays a click (on the element pressed: the pointer is captured only
+// once the drag starts) and a touch can still scroll the page. While dragging the element keeps
+// the pointer (pointer capture), the page scrolls by itself near the top and bottom of the
+// window, and Escape, or the browser taking the gesture over, cancels the drag.
 // Also the one overlay every drag draws on: a ghost under the pointer and a rubber-band line.
 
 import { h } from '/shared/api.js';
@@ -99,7 +100,48 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     document.removeEventListener('keydown', onKey, true);
     document.documentElement.classList.remove('is-dragging');
     session = null;
+    unwatch();
+  }
+
+  // A press that is not a drag yet is followed on the window: its click must still go to what
+  // was pressed, which capturing the pointer this early would change (to the capturing element).
+  function watch() {
+    window.addEventListener('pointermove', onPendingMove, true);
+    window.addEventListener('pointerup', onPendingEnd, true);
+    window.addEventListener('pointercancel', onPendingEnd, true);
+  }
+  function unwatch() {
     pending = null;
+    window.removeEventListener('pointermove', onPendingMove, true);
+    window.removeEventListener('pointerup', onPendingEnd, true);
+    window.removeEventListener('pointercancel', onPendingEnd, true);
+  }
+  function onPendingEnd(ev) {
+    // a short press without moving: the click that follows does what a click does
+    if (pending && ev.pointerId === pending.id) unwatch();
+  }
+  function onPendingMove(ev) {
+    if (!pending || ev.pointerId !== pending.id) return;
+    const p = point(ev);
+    const far = Math.hypot(p.x - pending.x, p.y - pending.y) >= (p.type === 'touch' ? MOVE_TOUCH : MOVE_MOUSE);
+    if (!far) return;
+    const { id, x, y, target } = pending;
+    unwatch();
+    const begun = start({ ...p, startX: x, startY: y, target });
+    if (!begun) return;
+    session = begun;
+    session.pointerId = id;
+    try {
+      el.setPointerCapture(id);
+    } catch {
+      // the pointer is already gone: the drag ends with the events that still come
+    }
+    last = p;
+    armed = false;
+    document.documentElement.classList.add('is-dragging');
+    document.addEventListener('keydown', onKey, true);
+    move(session, p);
+    frame = requestAnimationFrame(edgeScroll);
   }
 
   function onKey(ev) {
@@ -143,48 +185,17 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
     if (!target || !el.contains(target)) return;
     if (target.disabled || (canStart && !canStart(ev, target))) return;
     pending = { id: ev.pointerId, ...point(ev), target };
-    try {
-      el.setPointerCapture(ev.pointerId);
-    } catch {
-      // some browsers refuse capture for a pointer that is already up
-    }
+    watch();
   });
 
   el.addEventListener('pointermove', (ev) => {
-    if (session && ev.pointerId === session.pointerId) {
-      last = point(ev);
-      ev.preventDefault();
-      move(session, last);
-      return;
-    }
-    if (!pending || ev.pointerId !== pending.id) return;
-    const p = point(ev);
-    const far = Math.hypot(p.x - pending.x, p.y - pending.y) >= (p.type === 'touch' ? MOVE_TOUCH : MOVE_MOUSE);
-    if (!far) return;
-    const begun = start({ ...p, startX: pending.x, startY: pending.y, target: pending.target });
-    const id = pending.id;
-    pending = null;
-    if (!begun) {
-      release(id);
-      return;
-    }
-    session = begun;
-    session.pointerId = id;
-    last = p;
-    armed = false;
-    document.documentElement.classList.add('is-dragging');
-    document.addEventListener('keydown', onKey, true);
-    move(session, p);
-    frame = requestAnimationFrame(edgeScroll);
+    if (!session || ev.pointerId !== session.pointerId) return;
+    last = point(ev);
+    ev.preventDefault();
+    move(session, last);
   });
 
   el.addEventListener('pointerup', (ev) => {
-    if (pending && ev.pointerId === pending.id) {
-      // a short press without moving: the click that follows does what a click does
-      pending = null;
-      release(ev.pointerId);
-      return;
-    }
     if (!session || ev.pointerId !== session.pointerId) return;
     const s = session;
     const p = point(ev);
@@ -196,7 +207,6 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
   });
 
   const lost = (ev) => {
-    if (pending && ev.pointerId === pending.id) pending = null;
     if (!session || ev.pointerId !== session.pointerId) return;
     const s = session;
     end();
@@ -204,8 +214,9 @@ export function draggable(el, { canStart, start, move, drop, cancel }, { selecto
   };
   el.addEventListener('pointercancel', lost);
   el.addEventListener('lostpointercapture', (ev) => {
-    // capture also ends after pointerup, when the drag has already ended
-    if (session && ev.pointerId === session.pointerId) lost(ev);
+    // only this element's own capture: a touched child loses its implicit capture to it when the
+    // drag starts (and capture also ends after pointerup, when the drag has already ended)
+    if (ev.target === el && session && ev.pointerId === session.pointerId) lost(ev);
   });
 
   return {
