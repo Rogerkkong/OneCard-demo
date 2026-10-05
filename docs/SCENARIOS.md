@@ -207,7 +207,9 @@ things in between.
 5. **Plug it back.** Plug `CANTEEN-01` in. Reconnecting is a flow of its own, and it waits too:
    press **Next hop** until its heartbeat and its `journal.batch` have passed the reader and the
    platform. The record arrives once (purchase **POSTED**, via the journal batch) and the school
-   office shows RM 23.50, like the card.
+   office shows RM 23.50, like the card. (The broker also hands the machine its retained prices,
+   settings and block list again. Those belong to the flow that published them, such as an
+   earlier price change, so their acknowledgements show up, and wait, in that flow's trace.)
 6. **Hold at the platform, then switch the server off.** Tap Arjun's card on `CANTEEN-01` and
    press **Next hop** once: the broker takes the record (for the reader it is sent) and it waits
    at the platform's door. Switch the cloud server off: **Next hop** cannot let it go, the
