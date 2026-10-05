@@ -861,14 +861,20 @@ export class Terminal {
   #applyDelta(envelope) {
     const { fromVersion, toVersion, added, removed } = envelope.body;
     const current = this.#config.blocklist;
-    if (fromVersion !== current.version || !Number.isSafeInteger(toVersion) || toVersion <= fromVersion) return null;
-    if (!Array.isArray(added) || !Array.isArray(removed) || !removed.every((d) => typeof d === 'string' && DIGEST_RE.test(d))) {
+    const ignore = (reason) => {
+      this.#received(envelope, 'IGNORED', { kind: 'blocklist', version: toVersion, reason });
       return null;
+    };
+    if (fromVersion !== current.version) return ignore('VERSION_MISMATCH');
+    if (!Number.isSafeInteger(toVersion) || toVersion <= fromVersion) return ignore('CONFIG_INVALID');
+    if (!Array.isArray(added) || !Array.isArray(removed) || !removed.every((d) => typeof d === 'string' && DIGEST_RE.test(d))) {
+      return ignore('CONFIG_INVALID');
     }
     const gone = new Set(removed);
     const next = cleanBlocklist({ entries: [...current.content.entries.filter((e) => !gone.has(e.card)), ...added] });
-    if (!next) return null;
+    if (!next) return ignore('CONFIG_INVALID');
     this.#install('blocklist', toVersion, next);
+    this.#received(envelope, 'APPLIED', { kind: 'blocklist', version: toVersion });
     return this.#ack(envelope, 'blocklist', 'APPLIED');
   }
 
