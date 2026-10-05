@@ -58,7 +58,7 @@ const netNode = (school) => (school ? { kind: 'net', school } : null);
 const chipUid = (uid) => String(uid ?? '').replace(/-copy\d*$/i, '').toUpperCase();
 
 /**
- * The card a step is about, on the topology: the card the flow names (its title, its lab.action)
+ * The card a step is about, on the topology: the card the flow names (its subject, its lab.action)
  * when the event matches it, so a copy of a card or another school's card is found in the right
  * tray; else the card the event itself names (its UID or the last 4 characters of it).
  */
@@ -616,6 +616,7 @@ export function traceLabel(summary, t, hhmm, { names = null } = {}) {
  * @property {string} titleKey its i18n key
  * @property {boolean} heartbeat  a routine heartbeat (hidden unless asked for)
  * @property {boolean} parked  the step is a hold: the envelope waits here
+ * @property {boolean} [still]  it names where it comes from, but nothing travels (a broker login ending)
  * @property {string|null} msgId  the message the step is about
  * @property {object[]} sections  the packet-detail sections that apply (built when first read)
  */
