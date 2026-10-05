@@ -215,10 +215,14 @@ export async function startBroker(ctx, {
   const sessionOwners = new Map();
   let aedes = null;
 
-  /** Emit mqtt.denied (its school from the topic, else from a device username) and log why. */
-  function refuse({ username, action, topic, reason, clientId }) {
+  /**
+   * Emit mqtt.denied (its school from the topic, else from a device username) and log why. A
+   * refused publish of an envelope names its id (msgId), so the refusal joins the sender's flow.
+   */
+  function refuse({ username, action, topic, reason, clientId, msgId }) {
     const data = { username, action };
     if (topic !== undefined) data.topic = topic;
+    if (typeof msgId === 'string') data.msgId = msgId;
     events.emit('mqtt.denied', data, schoolOfTopic(topic) ?? parseDeviceUsername(username)?.schoolCode ?? null);
     log('warn', `broker refused ${action}`, { username, clientId, topic, reason });
   }
@@ -332,7 +336,7 @@ export async function startBroker(ctx, {
       return;
     }
     const username = account?.username ?? null;
-    refuse({ username, action: 'publish', topic: packet.topic, reason: 'topic not allowed', clientId: client?.id });
+    refuse({ username, action: 'publish', topic: packet.topic, reason: 'topic not allowed', clientId: client?.id, msgId: peekEnvelope(packet.payload).id });
     callback(new Error(`not allowed to publish to ${packet.topic}`));
   }
 

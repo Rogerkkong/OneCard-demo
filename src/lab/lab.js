@@ -1768,19 +1768,22 @@ export function createLab(options = {}) {
       const username = `${machine.schoolCode}.${machine.deviceCode}`;
       const topic = topicFor(targetSchool, targetDevice, 'records');
       const wasConnected = machine.connected;
-      const payload = JSON.stringify(
-        signEnvelope(
-          from.secret,
-          buildEnvelope({
-            school: targetSchool,
-            device: targetDevice,
-            seq: 1,
-            at: clock.iso(),
-            type: 'device.heartbeat',
-            body: { fw: FIRMWARE_VERSION, health: 'OK', listVersions: {}, journalUnsent: 0 },
-          }),
-        ),
+      const envelope = signEnvelope(
+        from.secret,
+        buildEnvelope({
+          school: targetSchool,
+          device: targetDevice,
+          seq: 1,
+          at: clock.iso(),
+          type: 'device.heartbeat',
+          body: { fw: FIRMWARE_VERSION, health: 'OK', listVersions: {}, journalUnsent: 0 },
+        }),
       );
+      const payload = JSON.stringify(envelope);
+      // the copied login's send, announced in this fault's flow as a machine announces its own:
+      // the broker's refusal names the message (mqtt.denied msgId) and joins the flow by it
+      const sending = { device: machine.deviceCode, msgId: envelope.id, type: envelope.type, seq: envelope.seq, topic, bytes: Buffer.byteLength(payload) };
+      const flow = events.context()?.trace ?? null;
       const mark = events.lastSeq();
       const throwaway = await new Promise((resolve) => {
         const outcome = { loggedIn: false, published: false, closedByBroker: false, error: null, loggedInAt: null };
@@ -1806,6 +1809,8 @@ export function createLab(options = {}) {
         client.on('connect', () => {
           outcome.loggedIn = true;
           outcome.loggedInAt = Date.now();
+          if (flow) emitInTrace(flow, 'device.send', sending, machine.schoolCode);
+          else emit('device.send', sending, machine.schoolCode);
           client.publish(topic, payload, { qos: 0 });
           outcome.published = true;
           timer = setTimeout(finish, THROWAWAY_WAIT_MS);

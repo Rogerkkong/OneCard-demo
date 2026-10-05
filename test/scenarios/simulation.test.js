@@ -475,3 +475,37 @@ test('16.9 no leakage: the timer\'s heartbeats belong to no flow, even right aft
   assert.ok(accepted().every((e) => e.trace === undefined));
   assert.deepEqual(errors, []);
 });
+
+test('16.10 the Console tab: a held action answers what is held, as the lab API does', NET, async () => {
+  await lab.reset();
+  const b = browser();
+  ok(await b.post('/api/lab/sim', { mode: 'simulation', hold: true }));
+  const answer = ok(await b.post('/api/lab/console', { line: `tap ${LEE} ROTI-CANAI`, target: `${SMK}/CANTEEN-01` }));
+  assert.match(answer.output, /^Screen: Paid RM 1\.50 · Balance RM 23\.50\nHeld at a hop: sale\.recorded in the outbox of smk-contoh\/CANTEEN-01 \(trace #\d+\)\./);
+  assert.equal(answer.held, true);
+  assert.equal(answer.item.trace, answer.trace);
+  assert.deepEqual(ok(await b.get('/api/lab/sim')).held, [answer.item]);
+  assert.equal(answer.target, `${SMK}/CANTEEN-01`);
+  // a line that holds nothing answers as before
+  const plain = ok(await b.post('/api/lab/console', { line: 'show held', target: null }));
+  assert.deepEqual(Object.keys(plain).sort(), ['output', 'prompt', 'target']);
+  ok(await b.post('/api/lab/sim', { mode: 'realtime' }));
+  await booksBalance();
+});
+
+test('16.11 a copied login publishing on another machine\'s topic: its send and the broker\'s refusal are in the fault\'s trace', NET, async () => {
+  await lab.reset();
+  const cross = await lab.fault({ type: 'cross-device-publish', schoolCode: SMK, deviceCode: 'CANTEEN-01' });
+  assert.equal(cross.ok, true, cross.summary);
+  const topic = `lab/v1/${SMK}/CANTEEN-02/records`;
+  const sent = inTrace(cross.trace, 'device.send');
+  assert.deepEqual(sent.map((e) => [e.data.device, e.data.type, e.data.seq, e.data.topic]), [['CANTEEN-01', 'device.heartbeat', 1, topic]]);
+  assert.deepEqual(inTrace(cross.trace, 'mqtt.denied').map((e) => [e.data.username, e.data.action, e.data.topic, e.data.msgId]), [
+    [`${SMK}.CANTEEN-01`, 'publish', topic, sent[0].data.msgId],
+  ]);
+  // in the order of the hops: the send, the refusal, then the fault's verdict
+  const order = kinds(cross.trace).filter((k) => ['device.send', 'mqtt.denied', 'lab.action'].includes(k));
+  assert.deepEqual(order, ['device.send', 'mqtt.denied', 'lab.action']);
+  await waitFor(() => machine('CANTEEN-01').connected, { timeout: 15_000, message: 'the real CANTEEN-01 back on the broker' });
+  await booksBalance();
+});

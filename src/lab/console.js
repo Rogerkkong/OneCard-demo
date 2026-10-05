@@ -44,6 +44,8 @@ const SIM_HELP = Object.freeze([
 ]);
 // Where a held hop waits, in a word for show held.
 const WHERE_WORDS = Object.freeze({ machine: 'outbox', 'kiosk-http': 'kiosk call', platform: 'platform' });
+// The early answer of a held action, riding on the lines that describe it (heldLines -> run).
+const HELD = Symbol('held');
 
 // ---- text helpers ---------------------------------------------------------------------
 
@@ -609,13 +611,17 @@ export function createConsole(lab) {
     return `${item?.type ?? 'a message'} in the outbox of ${machine}`;
   }
 
-  /** What an action answers when its flow is held at a hop: it goes on with next. */
+  /**
+   * What an action answers when its flow is held at a hop: it goes on with next. The lines carry
+   * the action's early answer ({ trace, item }) for run(), which adds it to the console's answer.
+   */
   function heldLines(result, first) {
-    return [
+    const lines = [
       ...(first ? [first] : []),
       `Held at a hop: ${describeHeld(result.item)} (trace ${traceNumber(result.trace)}).`,
       'Type next to let it go on (show held lists what waits); the rest of the flow follows.',
     ];
+    return Object.defineProperty(lines, HELD, { value: { trace: result.trace, item: result.item } });
   }
 
   /** After hold off or realtime: what still waits (the platform's hops, while the server is off). */
@@ -935,7 +941,7 @@ export function createConsole(lab) {
 
   function saleLines(result) {
     // paid on the card already; the record waits at a hop on its way to the platform
-    if (result.held) return [`Screen: ${result.screen}`, ...heldLines(result)];
+    if (result.held) return heldLines(result, `Screen: ${result.screen}`);
     const lines = [`Screen: ${result.screen}`];
     if (result.ok && result.record) {
       lines.push(lastBalance(result));
@@ -1095,7 +1101,8 @@ export function createConsole(lab) {
    * Run one command line.
    * @param {{ target: string|null }} session  updated by connect / disconnect / exit
    * @param {string} line
-   * @returns {Promise<{ output: string, prompt: string, exit?: boolean }>}
+   * @returns {Promise<{ output: string, prompt: string, exit?: boolean, held?: true, trace?: string, item?: object }>}
+   *   held, trace, item: the line's action was held at a hop (Simulation mode), as its early answer said
    */
   async function run(session, line) {
     const s = session ?? { target: null };
@@ -1115,7 +1122,10 @@ export function createConsole(lab) {
     }
     try {
       const output = await dispatch(s, words);
-      return { output: finish(output), prompt: prompt(s) };
+      const answer = { output: finish(output), prompt: prompt(s) };
+      // a held action: the web page reads what waits from the answer, not from the text
+      if (output?.[HELD]) Object.assign(answer, { held: true, ...output[HELD] });
+      return answer;
     } catch (err) {
       if (isLabError(err)) return { output: finish(`% ${capital(err.message)}${err.message.endsWith('.') ? '' : '.'}`), prompt: prompt(s) };
       try {

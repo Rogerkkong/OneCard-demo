@@ -873,6 +873,14 @@ As built (additions to the above):
 - `device.acked` is emitted untraced and joins its flow by `data.msgId`. Commands are handled inside
   `withContext({ msgId: <command id> })`.
 - `createLab` gains option `reconnectMs` (the machines' first broker retry; tests use 200).
+- `mqtt.denied` for a refused publish carries `msgId` (the envelope id, when the payload is one), so the
+  refusal joins the sender's flow. The cross-device-publish fault announces its copied login's publish as
+  `device.send` in the fault's trace.
+- `POST /api/lab/console`: a line whose action was held at a hop also answers `held: true`, `trace` and
+  `item` (the action's early answer), next to `output`, `target` and `prompt`.
+- Hold off or realtime while the server is off: what waits at the platform goes on by itself once the
+  server is back (with whatever reached the platform while it came up). Switching the server off or
+  restarting the broker passes on every message the broker already acknowledged before it closes.
 
 ### 11.5 Lab API
 

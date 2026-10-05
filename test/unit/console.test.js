@@ -459,11 +459,15 @@ test('Simulation mode: hold a sale at each hop, let it go with next, and read th
   assert.equal(await top.out('hold on'), 'Hold at each hop is already on.');
 
   // the reader charges the card and answers at once; the record waits in its outbox
-  const sale = lines(await canteen.out(`tap ${AHMAD} BUAH`));
+  const tapped = await canteen.run(`tap ${AHMAD} BUAH`);
+  const sale = lines(tapped.output);
   assert.match(sale[0], /^Screen: Paid RM 1\.00 · Balance RM \d+\.\d{2}$/);
   const held = /^Held at a hop: sale\.recorded in the outbox of smk-contoh\/CANTEEN-01 \(trace #(\d+)\)\.$/.exec(sale[1]);
   assert.ok(held, sale[1]);
   const n = held[1];
+  // the answer says it too, for the web page: the action's trace and the held item
+  assert.deepEqual([tapped.held, lab.tracer.get(tapped.trace).trace.n, tapped.item], [true, Number(n), lab.simState().held[0]]);
+  assert.equal((await top.run('show held')).held, undefined, 'a line that holds nothing says nothing of it');
   assert.equal(sale[2], 'Type next to let it go on (show held lists what waits); the rest of the flow follows.');
   const waiting = lines(await top.out('show held'));
   assert.equal(waiting[0], '1 hop waiting, oldest first: next lets the oldest go on. Mode simulation, hold on.');

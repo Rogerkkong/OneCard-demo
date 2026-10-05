@@ -94,7 +94,8 @@ export function routes({ lab }) {
       return found;
     }),
 
-    // the web Console tab: { line, target } -> { output, target, prompt } (the page keeps the target)
+    // the web Console tab: { line, target } -> { output, target, prompt, exit? } (the page keeps the
+    // target); a line whose action was held at a hop also answers held: true, trace and item
     route('POST', '/api/lab/console', async (req) => {
       const { line, target = null } = bodyOf(req);
       if (typeof line !== 'string' || line.length > MAX_INPUT) {
@@ -107,6 +108,7 @@ export function routes({ lab }) {
       const answer = await shell.run(session, line);
       const out = { output: answer.output, target: session.target, prompt: answer.prompt };
       if (answer.exit) out.exit = true;
+      if (answer.held) Object.assign(out, { held: true, trace: answer.trace, item: answer.item });
       return out;
     }),
   ];
