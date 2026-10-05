@@ -193,6 +193,38 @@ test('hold switched on while the server comes up: the machines\' first heartbeat
   assert.deepEqual(verdicts(mark, txn), [['POSTED', 'JOURNAL_BATCH']], 'counted once');
 });
 
+test('hold switched off while the server comes up: nothing stays held, and the sale kept offline reaches the books', NET, async () => {
+  await lab.reset();
+  const mark = lab.ctx.events.lastSeq();
+  lab.setSim({ mode: 'simulation', hold: true });
+  await lab.setServer({ up: false });
+  const offline = await tap('CANTEEN-01', LEE, { items: items('TEH-TARIK') });
+  assert.deepEqual([offline.ok, offline.sent], [true, false]);
+
+  // The platform is back on the broker, but the switch has not finished: the machines log in and
+  // answer the settings it republished, and their acks wait at its door. Hold goes off right then.
+  const connect = lab.platform.connectMqtt;
+  lab.platform.connectMqtt = async (...args) => {
+    lab.platform.connectMqtt = connect;
+    const done = await connect(...args);
+    await waitFor(() => heldNow((h) => h.where === 'platform').length > 0, {
+      timeout: 15_000,
+      message: 'an ack held at the platform while the server comes up',
+    });
+    lab.setSim({ hold: false });
+    return done;
+  };
+  try {
+    await lab.setServer({ up: true });
+  } finally {
+    lab.platform.connectMqtt = connect;
+  }
+  // hold is off: nothing may wait for a Next nobody is going to press, nor the sale behind it
+  await waitFor(() => heldNow().length === 0, { message: 'nothing held once hold is off' });
+  await booksBalance();
+  assert.deepEqual(verdicts(mark, offline.record.txn), [['POSTED', 'JOURNAL_BATCH']]);
+});
+
 // ---- two machines at once ----------------------------------------------------------------------
 
 test('two machines held at once: one loses its cable, the other goes on through the platform; both sales counted once', NET, async () => {

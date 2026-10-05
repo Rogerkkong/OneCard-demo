@@ -1500,6 +1500,9 @@ export function createLab(options = {}) {
         serverUp = true;
         emit('server.status', { up: true });
         for (const entry of parked) letGo(entry);
+        // Hold may have gone off while the server came up. What reached the platform's door
+        // meanwhile could not go on then (the server was not on yet); it goes on now.
+        if (!holding()) releaseReleasable();
       }
       emit('lab.action', { action: up ? 'server-up' : 'server-down', changed });
       return { changed, server: { up: serverUp }, broker: brokerStatus() };
