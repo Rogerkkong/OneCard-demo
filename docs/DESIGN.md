@@ -975,16 +975,21 @@ Console, at `onecard>` and `server#`:
   1. the copied login of a running cross-device-publish fault (its throwaway client uses a real machine's
      username) → the fault's flow;
   2. the machine's own `linkContext(event)`;
-  3. the server-off, server-on or broker-restart action that is opening or closing the broker right now;
-  4. anyone else (the viewer) → `null`.
+  3. for the lab's own machines and the platform only: the server-off, server-on or broker-restart action that is
+     opening or closing the broker right now;
+  4. anyone else (the viewer, a made-up machine name) → `null`.
 
   Only a trace the tracer still knows is returned.
 - **`linkContext('disconnect')`** also ends as soon as the machine is connected again. So pull, plug and then
   server off within 5 s puts the server-off logout in the server-off flow, not in the pull's.
-- **`linkContext('connect')`** is no longer used up by the post-connect routine; it stays until `connectTraceMs`
-  runs out.
+- **`linkContext('connect')`** is no longer used up by the post-connect routine. It stays until `connectTraceMs`
+  runs out, or until the connection it was kept for is lost (a failed attempt keeps it). So a machine thrown off
+  and let back in soon after a plug has its new login in no old flow.
+- **`linkContext('denied')`** is `null`, as the contract says. So a plugged machine that the broker refuses (its
+  school is suspended) has its `mqtt.denied` in no flow; mapping it to the connect flow is a possible follow-up.
 - **The copied login's flow** replays as: the real machine is knocked off → the copied login comes in → it sends
-  (`copiedLogin: true`) → the platform refuses → the copied login leaves → the real machine is back.
+  (`copiedLogin: true`) → the broker refuses it (`mqtt.denied`: the topic is not allowed; the platform never gets
+  the message) → the copied login leaves → the real machine is back.
 - **`broker.status` codes** (`BROKER_STATUS_CODES` in lab.js; every event has one, `up: true` too):
 
   | code | reason |
@@ -1060,6 +1065,8 @@ The page (`web/lab/`):
     `DEVICE_CODE_TAKEN` (409).
   - Add school: `INPUT_INVALID` (400), `SCHOOL_CODE_INVALID` (400), `NAME_INVALID` (400), `SERVER_DOWN` (409),
     `SCHOOL_CODE_TAKEN` (409).
+  - Both: `LAB_BUSY` (503) when a reset overtakes the add between registering and installing, and
+    `LAB_NOT_RUNNING` while the lab stops.
   - The platform's other refusals pass through as they are.
 - **Input.**
   - `type` and `code` are accepted in any case; add-school lower-cases its code.
