@@ -927,3 +927,116 @@ Console, at `onecard>` and `server#`:
   motion: no travel, only highlights.
 - **Text.** Event → step mapping (layer, from, to, verdict, text) lives in `web/lab/sim-steps.js`. Every string is
   in EN and 中文.
+
+### 11.7 Follow-ups: broker logins, reason codes, flow subjects
+
+- **Broker logins join their flow.** `startBroker(ctx, { …, contextFor })`: `contextFor(username, event)` with event
+  `'connect'`, `'disconnect'` or `'denied'` returns `{ trace }` or `null`. The broker emits `mqtt.connect`,
+  `mqtt.disconnect` and `mqtt.denied` inside `events.withContext(...)` of that answer. Without the hook it behaves
+  as before.
+- `Terminal#linkContext(kind)`:
+  - `'connect'`: the context the machine keeps for its next connect (set by a cable plug or `traceNextConnect()`).
+    It is not used up and stays until it expires.
+  - `'disconnect'`: the context in which `setCable(false)` or `stop()` was called, kept 5 s.
+  - Otherwise `null`.
+- The lab's `contextFor`:
+  - the platform account: the context of the server or broker action running at that moment;
+  - a machine: `machine.linkContext(event)`, else, while the lab is closing or opening the broker, the server-off /
+    server-on / broker-restart action's context;
+  - anything else: `null`.
+- `broker.status` gains `code`, a stable reason code next to the English `reason`, e.g. `SERVER_OFF`, `SERVER_ON`,
+  `RESTARTING`, `RESTARTED`, `LAB_STOP`, `LAB_RESET`. The exact list is in lab.js and documented there.
+- `sim.trace` data and the trace summaries (`tracer.list()`, `GET /api/lab/sim`) gain `subject`: a flat object
+  (≤ 12 keys; values are short strings, numbers or booleans) naming what the flow is about, so the page never has
+  to read it out of the English title:
+
+  | kind | subject |
+  |---|---|
+  | tap | `{ uid, cardSchool, school, device, items?, ml?, fault? }` |
+  | cable | `{ school, device, plugged }` |
+  | admin-card | `{ school, device, op }` |
+  | usb, heartbeat, upload, reboot | `{ school, device }` |
+  | clock | `{ ms }` |
+  | jobs | `{}` |
+  | server | `{ up }` |
+  | broker | `{}` |
+  | fault | `{ fault, school?, device?, uid?, toSchool?, toDevice? }` |
+  | request | `{ area, method, path, school? }` |
+  | add-device | `{ school, type, code }` (§12) |
+  | add-school | `{ code }` (§12) |
+
+  `tracer.begin({ …, subject })` validates it (a TypeError for anything else).
+- The cross-device-publish fault's `device.send` carries `copiedLogin: true`.
+
+---
+
+## 12. Building by drag and drop (lab console)
+
+Packet Tracer's way of building a network, for OneCard: drag a machine onto a school and draw its cable.
+
+Lab API (auth `none`, inside a trace):
+- `POST /api/lab/devices { schoolCode, type, code?, location?, cablePlugged? }` adds a machine.
+  - It registers the machine on the platform (the facade's `registerDevice`, actor `lab`) and installs the virtual
+    machine with its cable **unplugged** unless `cablePlugged: true`.
+  - Trace kind `add-device`, title e.g. "Add a canteen reader CANTEEN-03 to smk-contoh".
+  - `type` is CANTEEN, WATER or KIOSK. `code` defaults to the next free `<CANTEEN|WATER|KIOSK>-NN` of that school.
+  - Answer `{ machine, trace }`, where `machine` is the same view as in `state()`. The machine's secret never leaves
+    the lab.
+  - Codes: `INPUT_INVALID` (400), `SCHOOL_NOT_FOUND` (404), `DEVICE_CODE_TAKEN` (409),
+    `SCHOOL_SUSPENDED` (409).
+- `POST /api/lab/schools { name, code, machines?, students? }` onboards a school.
+  - `machines` is `[{ type, code?, location? }]`, default canteen reader, water machine and kiosk. `students` is
+    0–50, default 5.
+  - It uses the facade's `createTenant` (actor `lab`; three fictional staff, one per role). The machines are
+    installed with their cables unplugged.
+  - Trace kind `add-school`.
+  - Answer `{ school: { code, name }, machines: [machine…], trace }`.
+  - Codes: `INPUT_INVALID` (400), `SCHOOL_CODE_TAKEN` (409).
+- `GET /api/lab/devices/next-code?schoolCode&type` → `{ code }`, the suggestion the add dialog fills in.
+
+The page (`web/lab/`):
+- **Device palette**, like Packet Tracer's device bar: canteen reader, water machine, top-up kiosk, school.
+- **Dragging.** Pointer events (mouse, pen and touch; not HTML5 drag and drop, which does not work on touch). Drag a
+  machine onto a school's site, or a school onto the internet line or the cloud. Drop zones highlight. Dropping opens
+  a small dialog (code pre-filled, location; for a school: name, code, number of demo students, machines). **Add**
+  calls the API.
+- **Cables.** A new machine shows a dangling cable. Press its end and drag it to the school network line to plug it
+  in (`POST /api/lab/cable { plugged: true }`); drag a plugged cable's end off the line to pull it. A rubber-band
+  line follows the pointer, and the line highlights when the end is over it.
+- **Without dragging.** Every drag has a button that does the same: "Add machine" on each site, "Add school" by the
+  palette, and the existing Plug/Pull buttons. The keyboard reaches all of them; Escape cancels a drag.
+- **In Simulation.** The new machine's registration, cable plug, broker login and first heartbeat are a flow the
+  Simulation tab can replay.
+
+---
+
+## 13. Desktop app (double-click to start)
+
+- **Launchers** in the repository root:
+  - `Start OneCard Lab.command` (macOS; Finder opens it in Terminal)
+  - `Start OneCard Lab.bat` (Windows)
+  - `start-onecard-lab.sh` (Linux)
+
+  Each one goes to its own folder and checks Node.js ≥ 22.13. If Node is missing it says so plainly and opens the
+  nodejs.org download page. It runs `npm install` the first time (no `node_modules` yet), then starts the lab with
+  `--open`. Closing the window, or Ctrl+C, stops the lab.
+- **`--open`.** `npm start -- --open` opens the lab console in the default browser once the lab is up (`open`,
+  `start` / `explorer`, `xdg-open`). A missing browser never fails the start.
+- **Single-file app** (no Node.js needed):
+  - **Build.** `npm run build:app` (`scripts/build-sea.mjs`) bundles the lab into one CommonJS file with esbuild (a
+    dev dependency), with the web apps as Node single-executable-application assets. It then injects that into a
+    copy of the running Node binary (postject, a dev dependency; on macOS, ad-hoc `codesign`). Output:
+    `dist/onecard-lab-<os>-<arch>[.exe]`.
+  - **Start.** At start it unpacks the web apps once per version into the OS temp folder, passes `webRoot` and
+    `labRoutes`, then runs like `npm start -- --open`.
+  - **Self-test.** `--self-test` starts the lab on free ports, fetches `/lab/` and `/api/lab/state`, stops, and
+    exits 0 or 1.
+- **GitHub Actions** (`.github/workflows/desktop.yml`):
+  - Triggers: pull requests (paths `src/**`, `web/**`, `scripts/**`, `package*.json`, the workflow itself), manual
+    dispatch, and tags `v*`.
+  - Matrix: ubuntu-latest, windows-latest, macos-14 (arm64), macos-13 (x64).
+  - Steps: `npm ci`, `npm test` (ubuntu only), `npm run build:app`, `--self-test`, upload the file.
+  - A tag, or a dispatch with `release: true`, publishes a GitHub Release with the zipped apps.
+- **Unsigned.** The downloads are not code-signed:
+  - macOS: open the first time with right-click → Open
+  - Windows SmartScreen: More info → Run anyway

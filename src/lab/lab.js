@@ -21,6 +21,7 @@ import { DAY, HOUR, MINUTE, formatKL } from '../shared/time.js';
 import { START_PLAN, seedDemo } from './seed.js';
 import { startConsoleServer } from './telnet.js';
 import { createTracer } from './trace.js';
+import { routes as labRoutes } from '../http/routes/lab.js';
 
 // The lab (docs/DESIGN.md §8). One process holds the whole virtual system: the virtual cloud
 // server (MQTT broker, platform with its database, the web apps) and every school's site (its
@@ -173,6 +174,7 @@ function labOptions(options) {
     throw new TypeError('reconnectMs must be a whole number of milliseconds, 1 to 60000');
   }
   if (o.tls != null && (!isPlainObject(o.tls) || !o.tls.key || !o.tls.cert)) throw new TypeError('tls needs { key, cert } (PEM) and optionally port');
+  if (o.webRoot != null && (typeof o.webRoot !== 'string' || o.webRoot === '')) throw new TypeError('webRoot must be the folder of the web apps');
   return {
     httpPort: port('httpPort', o.httpPort, 8080),
     mqttPort: port('mqttPort', o.mqttPort, 1883),
@@ -184,6 +186,8 @@ function labOptions(options) {
     jobsMs,
     reconnectMs,
     tls: o.tls ?? null,
+    // the web apps' folder; null: web/ next to the source (a single-file build passes its own)
+    webRoot: o.webRoot ?? null,
     log: typeof o.log === 'function' ? o.log : defaultLog,
   };
 }
@@ -1010,7 +1014,7 @@ export function createLab(options = {}) {
           emit('server.status', { up: true });
           // loaded here, so the lab's modules load (and the console tests run) on their own
           const { createHttpServer } = await import('../http/server.js');
-          http = createHttpServer({ lab });
+          http = createHttpServer({ lab, labRoutes, ...(config.webRoot ? { webRoot: config.webRoot } : {}) });
           const listening = await http.listen(config.httpPort, config.host);
           httpUrl = `http://${loopback}:${listening.port}`;
           if (config.consolePort !== 0) consoleServer = await startConsoleServer(lab, { host: config.host, port: config.consolePort });
