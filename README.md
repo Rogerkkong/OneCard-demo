@@ -101,6 +101,25 @@ this on a network you trust.
 **PuTTY and the real server.** When the real system goes onto a cloud server, PuTTY (SSH) is
 how you log in to that server. In the lab the server is virtual, so you use its console above.
 
+## Simulation mode (like Packet Tracer)
+
+Click **Simulation** at the top of the lab console. The **Simulation** tab shows each flow as a list of steps, like
+Packet Tracer's event list:
+
+1. the card is read
+2. every rule is checked
+3. the message is signed and sent over MQTT
+4. the broker checks the machine's topic
+5. the platform checks the signature, duplicates and order
+6. the money is booked
+
+Step through it with ◀ ▶ and watch the envelope travel on the topology. Click any step for its packet details, layer
+by layer.
+
+Turn on **Hold at each hop (live)** and a flow really waits: inside the machine, before each kiosk call, and in the
+platform's inbox. Each **Next hop** moves it on. Pull a cable or switch the server off in between and watch what
+the system does about it. In the consoles, use `simulation on`, `hold on`, `next` and `show trace 1`.
+
 ## Watch the device messages
 
 The broker listens on port 1883 with a read-only login (`viewer` / `viewer`; the terminal
@@ -116,11 +135,11 @@ broker refuses everything else.
 
 ## Exercises
 
-[docs/SCENARIOS.md](docs/SCENARIOS.md) has 15 guided exercises with expected results:
+[docs/SCENARIOS.md](docs/SCENARIOS.md) has 16 guided exercises with expected results:
 online and offline canteen sales, water by the litre, parent top-ups, refunds of money
 never added, lost cards and the window before offline machines know, replacement cards,
 new prices, device security, kiosk power cuts, copied cards, reconciliation, onboarding
-more schools (SaaS tenants) and switching the whole cloud server off.
+more schools (SaaS tenants), switching the whole cloud server off, and Simulation mode.
 
 ## What is simulated, and what is not
 
@@ -226,9 +245,14 @@ OneCard Lab 是一个**虚拟测试环境**：在任何硬件到货之前，就�
   *专用网络*。实验室没有密码，只在信任的网络里这样做。
 - **PuTTY 和真服务器：** 等真系统上了云端服务器，PuTTY（SSH）是用来登录那台服务器的；实验室里服务器是虚拟的，用上面的控制台就行。
 
+**模拟模式（像 Packet Tracer）：** 在实验室控制台最上面点 **模拟**，**模拟** 页签会把每一个流程列成一步一步：读卡、检查每条规则、
+签名后用 MQTT 发出、broker 检查机器的 topic、平台检查签名、重复和顺序、记账。用 ◀ ▶ 一步一步看，信封会在拓扑图上移动；
+点任何一步就能一层一层看封包详情。打开 **每一跳都停（实时）**，流程会真的停在机器里、每次找平台之前、和平台的收件箱，
+每按一次 **下一跳** 才往前走一步。可以在中间拔网线或关掉服务器，看系统怎么处理。控制台里也有 `simulation on`、`hold on`、`next`、`show trace 1`。
+
 **看设备消息：** 用 MQTT Explorer 或 `mosquitto_sub`，只读账号 `viewer` / `viewer`，订阅 `lab/v1/#`。
 
-**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 15 个带预期结果的练习，从在线、离线消费，到挂失窗口、
+**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 16 个带预期结果的练习，从在线、离线消费，到挂失窗口、
 充值机断电、复制卡、对账、新增学校（多租户）和整台云端服务器停机。
 
 **安全须知：** 实验室只适合在你自己的电脑或信任的网络里用：它**没有密码**，登录页会列出所有示范人物，实验室控制台可以关掉任何东西或整个重置。默认只听 `127.0.0.1`；`npm run start:lan` 才开放给局域网。它只回应 `localhost` 和 IP 地址，所以你浏览的网站没法把自己的域名指到你的电脑来操控实验室（DNS rebinding）；要用别的名字就设 `LAB_ALLOWED_HOSTS`。不要放到公网上。

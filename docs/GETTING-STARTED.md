@@ -115,7 +115,53 @@ onboard a third school there and watch it appear in the lab console.
 Changed something you did not mean to? **Reset the demo…** (in the lab clock box) starts again from
 the fresh demo.
 
-## Step 5 — Log in to a machine like a switch (PuTTY)
+## Step 5 — Simulation mode: follow one sale hop by hop (like Packet Tracer)
+
+In Packet Tracer you switch from *Realtime* to *Simulation* and watch each packet move. The lab console does the
+same for OneCard.
+
+**Watch a sale, step by step**
+1. At the top of the lab console, click **Simulation** (next to **Realtime**). The **Simulation** tab opens on the right.
+2. On **CANTEEN-01**, press **Tap card**, choose *Ahmad Faiz bin Rahman*, add *Nasi lemak*, and pay.
+3. The Simulation tab now shows the whole sale as a list of steps, one per row:
+
+   | # | What happens |
+   |---|---|
+   | 1 | You tap the card on CANTEEN-01 |
+   | 2 | The reader reads the card: RM 30.00 on the chip |
+   | 3 | It checks the rules: meal time ✓, daily limit ✓, balance ✓ … |
+   | 4 | It writes the new balance onto the card |
+   | 5 | It saves the sale in its journal |
+   | 6 | It sends `sale.recorded` to the MQTT broker, signed with its own key |
+   | 7 | The broker checks this machine may use this topic, and passes it on |
+   | 8 | The platform checks it: signature ✓, not a repeat ✓, in order ✓ … |
+   | 9 | The money is booked: student wallet −RM 3.50, owed to the canteen +RM 3.50 |
+   | 10 | The broker confirms delivery to the reader (PUBACK) |
+
+4. Use **◀ / ▶** to step through it, or **▶ Play** to watch it run. The envelope moves on the topology from the card
+   to the machine, up the cable to the cloud server, and into the books.
+5. Click any step to open its **packet details**, layer by layer: what was on the card, the machine's checks, the
+   message itself, its signature, the MQTT topic and delivery, the platform's checks, and the money entries.
+
+**Break it half-way (live)**
+1. In the Simulation tab, turn on **Hold at each hop (live)**.
+2. Tap a card on **CANTEEN-01** again. The sale stops *inside the machine*, before it is sent. The envelope waits
+   there with a pause sign.
+3. Now press **Pull cable** on CANTEEN-01, then **Next hop**. The machine has no network: the sale stays in its
+   journal ("kept, not sent").
+4. Press **Plug cable in**. Watch the stored sale upload and get booked, exactly once.
+5. Try the other hold points:
+   - Release the message from the machine. It then waits *at the platform*, already received and stored.
+   - Switch the server off and press **Next hop**: nothing happens, because the platform is down.
+   - Switch the server back on: the message is processed, once.
+   - At the kiosk, the top-up waits before each call to the platform. Switch the server off in between and see the
+     kiosk refuse ("Cannot reach the platform") without losing anything.
+
+Press **Release all**, turn **Hold at each hop (live)** off, or click **Realtime** to let everything waiting continue.
+
+The console does the same with `simulation on`, `hold on`, `next`, `show held`, `show traces` and `show trace 1`.
+
+## Step 6 — Log in to a machine like a switch (PuTTY)
 
 Every virtual machine, and the server itself, has a text console — just like a switch's CLI.
 
@@ -159,7 +205,7 @@ onecard> exit
 - Type `?` or `help` at any prompt to see what works there. The lab console's **Console** tab has
   the same console in the browser.
 
-## Step 6 — Watch the machine messages (MQTT Explorer)
+## Step 7 — Watch the machine messages (MQTT Explorer)
 
 Like Wireshark, but for the messages between the machines and the server.
 
@@ -172,7 +218,7 @@ Like Wireshark, but for the messages between the machines and the server.
 The `viewer` login can only watch. The machines each have their own login and may only use their
 own topics; the server refuses everything else (exercise 10 in [SCENARIOS.md](SCENARIOS.md) shows it).
 
-## Step 7 — The parent app on your phone
+## Step 8 — The parent app on your phone
 
 1. Stop the lab (Ctrl+C) and start it with `npm run start:lan` instead.
 2. It prints a line like `On a phone on the same Wi-Fi: http://192.168.1.20:8080/parent/`.
@@ -181,9 +227,9 @@ own topics; the server refuses everything else (exercise 10 in [SCENARIOS.md](SC
 
 Only do this on a network you trust: the lab has no passwords.
 
-## Step 8 — The exercises
+## Step 9 — The exercises
 
-[SCENARIOS.md](SCENARIOS.md) has 15 guided exercises with the expected result for each: offline
+[SCENARIOS.md](SCENARIOS.md) has 16 guided exercises with the expected result for each: offline
 sales, lost cards, kiosk power cuts, copied cards, onboarding a third school, switching the whole
 cloud server off, and more.
 

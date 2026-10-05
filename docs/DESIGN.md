@@ -714,7 +714,8 @@ Plain HTML, CSS and JavaScript modules, no build step, served by the lab server.
 (中文) available. `web/shared/` holds the API helper, i18n helper and base styles; each app keeps its own strings.
 - `web/lab/` — the lab console: the whole virtual topology — the cloud server node (switch it off, restart the
   broker) and every school's site with its machines — plus the card tray, tap with item/volume choice, cable
-  switches, admin-card loading and tapping, faults, lab clock and the live message inspector (filter by school).
+  switches, admin-card loading and tapping, faults, lab clock and the live message inspector (filter by school),
+  and the Simulation tab (§11.6): step-by-step replay of every flow with packet details, and live hold at each hop.
 - `web/operator/` — the SaaS operator console: every tenant with its status and health, onboard a new school
   (staff, machines, demo members), suspend or reactivate a school, broker connections per school.
 - `web/admin/` — school office: overview, members and cards, parents, devices, prices and settings, top-ups,
