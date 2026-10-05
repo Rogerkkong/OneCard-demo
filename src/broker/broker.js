@@ -28,11 +28,11 @@ const UNAVAILABLE = 3;
 const BAD_LOGIN = 4;
 const NOT_AUTHORIZED = 5;
 
-// Payloads up to this size are parsed for the type/txn the lab console shows. A journal
+// Payloads up to this size are parsed for the type/txn/id the lab console shows. A journal
 // batch of 200 records stays well below it.
 const PEEK_MAX_BYTES = 1024 * 1024;
-// Longest type/txn copied into an event. Real ones are short (an envelope txn is at most
-// 64 characters); a longer one is shown as null, so one message cannot copy up to a
+// Longest type/txn/id copied into an event. Real ones are short (an envelope txn or id is at
+// most 64 characters); a longer one is shown as null, so one message cannot copy up to a
 // megabyte into the kept events and out to every lab console.
 const PEEK_MAX_CHARS = 64;
 
@@ -127,9 +127,12 @@ function byteLength(payload) {
   return Buffer.isBuffer(payload) ? payload.length : 0;
 }
 
-/** `type` and `txn` of a protocol envelope, for the lab console; null for anything else. */
+/**
+ * `type`, `txn` and `id` of a protocol envelope, for the lab console; null for anything else.
+ * The id is what Simulation mode follows a message by (docs/DESIGN.md §11.2).
+ */
 function peekEnvelope(payload) {
-  const none = { type: null, txn: null };
+  const none = { type: null, txn: null, id: null };
   const size = byteLength(payload);
   if (size === 0 || size > PEEK_MAX_BYTES) return none;
   let value;
@@ -140,7 +143,7 @@ function peekEnvelope(payload) {
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return none;
   const short = (v) => (typeof v === 'string' && v.length <= PEEK_MAX_CHARS ? v : null);
-  return { type: short(value.type), txn: short(value.txn) };
+  return { type: short(value.type), txn: short(value.txn), id: short(value.id) };
 }
 
 /** Address clients should use: a wildcard listen address is reachable on loopback. */
@@ -312,7 +315,7 @@ export async function startBroker(ctx, {
   aedes.on('publish', (packet, client) => {
     if (typeof packet.topic !== 'string' || packet.topic.startsWith('$')) return; // the broker's own $SYS chatter
     const account = client ? accounts.get(client) : undefined;
-    const { type, txn } = peekEnvelope(packet.payload);
+    const { type, txn, id } = peekEnvelope(packet.payload);
     events.emit(
       'mqtt.publish',
       {
@@ -320,6 +323,9 @@ export async function startBroker(ctx, {
         topic: packet.topic,
         type,
         txn,
+        // the envelope id links this hop to the flow that sent the message (Simulation mode)
+        msgId: id,
+        qos: Number.isInteger(packet.qos) ? packet.qos : 0,
         retained: Boolean(packet.retain),
         bytes: byteLength(packet.payload),
       },

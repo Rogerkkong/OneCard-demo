@@ -9,7 +9,7 @@ import { createDifferences } from '../../src/platform/differences.js';
 import { createTopups } from '../../src/platform/topups.js';
 import { createSettlement } from '../../src/platform/settlement.js';
 import { createReconcile } from '../../src/platform/reconcile.js';
-import { createIntake, MAX_MESSAGE_BYTES } from '../../src/platform/intake.js';
+import { createIntake, INTAKE_STEPS, MAX_MESSAGE_BYTES } from '../../src/platform/intake.js';
 import { signEnvelope } from '../../src/shared/crypto.js';
 import { buildEnvelope, deviceTxnNo, topicFor, UP_TYPES } from '../../src/shared/protocol.js';
 import { waterChargeSen } from '../../src/shared/money.js';
@@ -190,6 +190,16 @@ function assertRefused(res, code, m, { before } = {}) {
 
 const snapshotOf = (m) => ({ seq: lastSeq(m), inbound: inbound(m.school) });
 
+// The pipeline steps an intake event lists (`checks`, DESIGN §11.2), spelled out here on purpose.
+const STEPS = ['topic', 'device', 'envelope', 'topicMatch', 'signature', 'duplicate', 'sequence', 'gates', 'typeRules', 'recorded'];
+const ALL_PASSED = STEPS.map((step) => ({ step, ok: true }));
+/** `checks` of a message that passed every step before `step` and stopped there with `code`. */
+function stoppedAt(step, code) {
+  const i = STEPS.indexOf(step);
+  assert.ok(i >= 0, `no step ${step}`);
+  return [...STEPS.slice(0, i).map((s) => ({ step: s, ok: true })), { step, ok: false, code }];
+}
+
 // ---- tests ------------------------------------------------------------------------------------
 
 describe('createIntake', () => {
@@ -246,10 +256,11 @@ describe('refusals, one step of the pipeline at a time', () => {
     assert.deepEqual(t.devices.listLog(t.a.id), []);
     assert.deepEqual(t.devices.listLog(t.b.id), []);
     // the lab console files the event under the school the topic names, as the broker does
+    const checks = stoppedAt('device', 'UNKNOWN_DEVICE');
     assert.deepEqual(refusedEvents().map((e) => [e.school, e.data]), [
-      ['smk-gamma', { device: 'CANTEEN-01', type: null, code: 'UNKNOWN_DEVICE' }],
-      ['smk-alpha', { device: 'CANTEEN-09', type: null, code: 'UNKNOWN_DEVICE' }],
-      ['smk-beta', { device: 'WATER-01', type: null, code: 'UNKNOWN_DEVICE' }],
+      ['smk-gamma', { device: 'CANTEEN-01', type: null, code: 'UNKNOWN_DEVICE', checks }],
+      ['smk-alpha', { device: 'CANTEEN-09', type: null, code: 'UNKNOWN_DEVICE', checks }],
+      ['smk-beta', { device: 'WATER-01', type: null, code: 'UNKNOWN_DEVICE', checks }],
     ]);
   });
 
@@ -351,7 +362,9 @@ describe('refusals, one step of the pipeline at a time', () => {
     assert.deepEqual(logOf(canteen), []);
     assert.equal(purchases(t.a).length, 1);
     assert.equal(wallet(t.a, 'aina'), 1000 - PRICE['NASI-LEMAK']);
-    assert.deepEqual(eventsOf(t.ctx, 'intake.duplicate').map((e) => [e.school, e.data]), [['smk-alpha', { device: 'CANTEEN-01', type: 'sale.recorded' }]]);
+    assert.deepEqual(eventsOf(t.ctx, 'intake.duplicate').map((e) => [e.school, e.data]), [
+      ['smk-alpha', { device: 'CANTEEN-01', type: 'sale.recorded', msgId: env.id, checks: stoppedAt('duplicate', 'DUPLICATE') }],
+    ]);
     // a duplicate is found before the gates: the machine is not told off for repeating itself
     t.schools.setSchoolStatus(t.a.id, 'SUSPENDED', 'test');
     assert.equal(deliver(canteen, env).result, 'DUPLICATE');
@@ -487,7 +500,8 @@ describe('accepted messages', () => {
     const canteen = t.a.m['CANTEEN-01'];
     t.ctx.clock.advance(MINUTE);
     const at = t.ctx.clock.iso();
-    const res = send(canteen, 'device.heartbeat', { fw: '1.0.0-lab', health: 'WARN', listVersions: { prices: 1, settings: 0, blocklist: 1 }, journalUnsent: 4 }, { at });
+    const env = envelope(canteen, 'device.heartbeat', { fw: '1.0.0-lab', health: 'WARN', listVersions: { prices: 1, settings: 0, blocklist: 1 }, journalUnsent: 4 }, { at });
+    const res = deliver(canteen, env);
     assert.deepEqual(res, {
       result: 'ACCEPTED',
       type: 'device.heartbeat',
