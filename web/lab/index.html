@@ -77,6 +77,14 @@
     </nav>
 
     <section class="topology" id="topology" tabindex="-1">
+      <section class="build" id="build" aria-labelledby="build-title">
+        <div class="build__head">
+          <h2 class="build__title" id="build-title" data-i18n="build.title">Add to the lab</h2>
+          <p class="build__hint" id="build-hint" data-i18n="build.hint">Drag one onto the map, or press it.</p>
+        </div>
+        <div class="build__bar" role="toolbar" aria-labelledby="build-title" aria-describedby="build-hint"></div>
+        <p class="sr-only" id="build-live" aria-live="polite"></p>
+      </section>
       <div class="top-row">
         <article class="cloud" id="cloud" aria-labelledby="cloud-title"></article>
         <section class="panel clock" id="clock" aria-labelledby="clock-title">
@@ -287,6 +295,36 @@
     <footer class="dialog__foot">
       <button type="button" class="btn" data-role="cancel">Cancel</button>
       <button type="submit" class="btn btn--primary" data-role="submit">Tap card</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="dialog" id="addm-dialog" aria-labelledby="addm-title" aria-describedby="addm-sub">
+  <form class="dialog__form" novalidate>
+    <header class="dialog__head">
+      <h2 id="addm-title"></h2>
+      <p id="addm-sub" class="muted"></p>
+    </header>
+    <div class="dialog__body"></div>
+    <p class="dialog__error" role="alert" hidden></p>
+    <footer class="dialog__foot">
+      <button type="button" class="btn" data-role="cancel">Cancel</button>
+      <button type="submit" class="btn btn--primary" data-role="submit">Add machine</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="dialog" id="adds-dialog" aria-labelledby="adds-title" aria-describedby="adds-sub">
+  <form class="dialog__form" novalidate>
+    <header class="dialog__head">
+      <h2 id="adds-title"></h2>
+      <p id="adds-sub" class="muted"></p>
+    </header>
+    <div class="dialog__body"></div>
+    <p class="dialog__error" role="alert" hidden></p>
+    <footer class="dialog__foot">
+      <button type="button" class="btn" data-role="cancel">Cancel</button>
+      <button type="submit" class="btn btn--primary" data-role="submit">Add school</button>
     </footer>
   </form>
 </dialog>

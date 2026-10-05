@@ -134,7 +134,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
   function chosenSummary() {
     const e = s.events.find((x) => x.type === 'sim.trace');
     const d = e?.data ?? {};
-    return { id: s.traceId, n: d.n ?? '?', kind: d.kind ?? '', title: d.title ?? '', school: e?.school ?? null, device: d.device ?? null, at: e ? Date.parse(e.at) : NaN };
+    return { id: s.traceId, n: d.n ?? '?', kind: d.kind ?? '', title: d.title ?? '', subject: d.subject ?? {}, school: e?.school ?? null, device: d.device ?? null, at: e ? Date.parse(e.at) : NaN };
   }
   const stepAt = (seq) => s.steps.find((x) => x.seq === seq) ?? null;
   const visibleIndex = (seq) => s.visible.findIndex((x) => x.seq === seq);
@@ -533,7 +533,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     const list = [...s.traces];
     if (s.traceId && !list.some((x) => x.id === s.traceId) && !s.gone) list.push(chosenSummary());
     const shown = s.traceId && !s.gone && list.some((x) => x.id === s.traceId);
-    const options = list.map((x) => [x.id, traceLabel(x, t, hhmm, app.i18n.lang)]);
+    const options = list.map((x) => [x.id, traceLabel(x, t, hhmm)]);
     // the picker never names another flow than the one shown: with none shown, it asks for one
     if (!options.length) options.push(['', t('sim.trace.none')]);
     else if (!shown) options.unshift(['', t('sim.trace.pick')]);
@@ -547,7 +547,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     const tr = currentTrace() ?? (shown ? chosenSummary() : null);
     let line = '';
     if (s.gone) line = t('sim.trace.gone');
-    else if (tr) line = t('sim.trace.line', { title: traceTitle(tr.title, t, app.i18n.lang), n: s.steps.length });
+    else if (tr) line = t('sim.trace.line', { title: traceTitle(tr, t), n: s.steps.length });
     setText(el.traceTitle, line);
     el.traceTitle.classList.toggle('is-gone', s.gone);
   }
@@ -1155,7 +1155,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
         break;
       case 'sim.trace':
         // seenAt: announced by the stream now (a list asked for earlier does not have it yet)
-        upsertTrace({ id: d.id, n: d.n, kind: d.kind, title: d.title, school: e.school ?? null, device: d.device ?? null, at: Date.parse(e.at), lastAt: Date.parse(e.at), events: 1, seenAt: performance.now() });
+        upsertTrace({ id: d.id, n: d.n, kind: d.kind, title: d.title, subject: d.subject ?? {}, school: e.school ?? null, device: d.device ?? null, at: Date.parse(e.at), lastAt: Date.parse(e.at), events: 1, seenAt: performance.now() });
         if (wantsNewest()) {
           choose(d.id, { live: true, first: e });
           return;

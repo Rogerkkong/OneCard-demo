@@ -2,7 +2,9 @@
 // site per school (tenant) with its machines, card tray and admin card. Each machine hangs on its
 // school's network by its own cable; the cable's line shows the link (up, trying, pulled out)
 // and, in realtime mode, lights up briefly when a message passes (in Simulation mode the
-// Simulation tab's envelope shows the hops instead). Elements are patched in place on every refresh.
+// Simulation tab's envelope shows the hops instead). The cable's end can be dragged onto the
+// school network line or off it (cables.js); each site can get a new machine (build.js).
+// Elements are patched in place on every refresh.
 
 import { formatRM, formatTimeKL, h, toast } from '/shared/api.js';
 import { directionOf, heldText, parseTopic, reasonText, screenCaption, sentences } from './describe.js';
@@ -34,6 +36,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
   const machineEls = new Map(); // '<school>/<DEVICE>' -> element
   const lastMessage = new Map(); // '<school>/<DEVICE>' -> { dir, type, at }
   const known = new Set(); // school codes seen, so a new tenant can be pointed out
+  const quiet = new Set(); // schools added on this page: no second toast when their site appears
   let firstRender = true;
 
   // ---- the cloud server node -------------------------------------------------------------
@@ -115,7 +118,10 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     const key = `${m.school}/${m.code}`;
     const id = `m-${m.school}-${m.code}`;
     const r = {};
-    r.cable = h('span', { class: 'machine__cable', 'aria-hidden': 'true' }, h('span', { class: 'machine__plug' }));
+    r.cable = h('span', { class: 'machine__cable', 'aria-hidden': 'true' });
+    // the cable's end: seated on the school network line, or dangling when pulled out. Pressed and
+    // dragged, it plugs the cable in or pulls it out (cables.js); the Plug/Pull button does the same.
+    r.end = h('span', { class: 'machine__end', 'aria-hidden': 'true', dataset: { machine: key } }, h('span', { class: 'machine__plug' }));
     r.status = h('span', { class: 'pill machine__status' });
     r.type = h('p', { class: 'machine__type' });
     r.screenLabel = h('span', { class: 'sr-only' });
@@ -158,6 +164,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
       'article',
       { class: `machine machine--${String(m.type).toLowerCase()}`, id, 'aria-labelledby': `${id}-title` },
       r.cable,
+      r.end,
       h('header', { class: 'machine__head' }, icon(m.type, 'machine__icon'), r.title, r.status),
       r.type,
       r.lcd,
@@ -226,6 +233,9 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
       setText(r.cableBtn, m.cablePlugged ? t('m.pull') : t('m.plug'));
       r.cableBtn.disabled = !installed;
     }
+    // the cable end is for the pointer (the button above is the keyboard's way): a hint on hover
+    setHidden(r.end, !installed);
+    setAttr(r.end, 'title', t(m.cablePlugged ? 'cable.grabPull' : 'cable.grabPlug'));
     setText(r.moreSummary, t('m.more'));
     setAttr(r.moreSummary, 'aria-label', t('m.moreLabel', { code: m.code }));
     for (const b of r.menuItems) setText(b, t(b.dataset.label));
@@ -242,14 +252,17 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     r.status = h('span', { class: 'pill site__status' });
     r.newPill = h('span', { class: 'pill pill--info site__new', hidden: true });
     r.gw = h('span', { class: 'site__gw' }, icon('router', 'site__gwicon'), h('span', { class: 'site__gwlabel' }));
+    // the way to add a machine without dragging one from the device bar (build.js)
+    r.add = h('button', { type: 'button', class: 'btn btn--small site__add' }, icon('plus', 'site__addicon'), h('span', { class: 'site__addtext' }));
+    r.add.addEventListener('click', () => app.openAddMachine?.(s.code, r.add));
     r.note = h('p', { class: 'site__note', hidden: true });
-    r.net = h('div', { class: 'site__net' });
+    r.net = h('div', { class: 'site__net', dataset: { school: s.code } });
     r.empty = h('p', { class: 'site__empty muted', hidden: true });
     r.tray = trays.createTray(s.code);
     r.admin = trays.createAdmin(s.code);
     const el = h(
       'article',
-      { class: 'site', id: `site-${s.code}`, 'aria-labelledby': `site-${s.code}-title`, tabindex: '-1' },
+      { class: 'site', id: `site-${s.code}`, 'aria-labelledby': `site-${s.code}-title`, tabindex: '-1', dataset: { school: s.code } },
       h(
         'header',
         { class: 'site__head' },
@@ -258,7 +271,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
         h('div', { class: 'site__pills' }, r.newPill, r.status),
       ),
       r.note,
-      r.gw,
+      h('div', { class: 'site__gwrow' }, r.gw, r.add),
       r.net,
       r.empty,
       r.tray,
@@ -268,7 +281,8 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     if (!firstRender && !known.has(s.code)) {
       el.classList.add('site--new');
       setHidden(r.newPill, false);
-      toast(t('ev.tenant', { name: s.name, code: s.code }), 'info');
+      // a school added on this page says so itself (build.js), with more to say
+      if (!quiet.delete(s.code)) toast(t('ev.tenant', { name: s.name, code: s.code }), 'info');
       setTimeout(() => {
         el.classList.remove('site--new');
         setHidden(r.newPill, true);
@@ -287,6 +301,8 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setTone(r.status, 'pill--', s.status === 'ACTIVE' ? 'good' : 'bad');
     setText(r.newPill, t('site.new'));
     setText(r.gw.lastChild, t('site.network'));
+    setText(r.add.lastChild, t('build.addMachine'));
+    setAttr(r.add, 'aria-label', t('build.addMachineTo', { school: s.name }));
     setText(r.note, s.status === 'SUSPENDED' ? t('site.suspended') : '');
     setHidden(r.note, s.status !== 'SUSPENDED');
     el.classList.toggle('is-suspended', s.status === 'SUSPENDED');
@@ -315,17 +331,33 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     return { school, code, m: s?.devices.find((d) => d.code === code) ?? null };
   };
 
-  async function toggleCable(key, button) {
+  /**
+   * Plug a machine's cable in or pull it out: its button, or its cable end dragged onto the school
+   * network line or off it (cables.js). The button shows that it is working meanwhile.
+   * @returns {Promise<boolean>} whether the lab did it
+   */
+  async function setCable(key, plugged, button = machineEls.get(key)?._r.cableBtn ?? null) {
     const { school, code, m } = machineOfKey(key);
-    if (!m) return;
-    const plugged = !m.cablePlugged;
+    if (!m) return false;
     const res = await app.call('/api/lab/cable', { schoolCode: school, deviceCode: code, plugged }, button);
-    if (!res.ok) return app.fail(res.error);
+    if (!res.ok) {
+      app.fail(res.error);
+      return false;
+    }
     // Simulation mode, hold on: the plug's first heartbeat (then its upload) waits at a hop
-    if (res.held) return toast(sentences(t(plugged ? 'toast.cablePlugHeld' : 'toast.cableOut', { code }), heldText(res.data.item, t, { serverUp: app.state?.server?.up !== false })), 'info');
+    if (res.held) {
+      toast(sentences(t(plugged ? 'toast.cablePlugHeld' : 'toast.cableOut', { code }), heldText(res.data.item, t, { serverUp: app.state?.server?.up !== false })), 'info');
+      return true;
+    }
     const after = res.data.machine;
     if (!plugged) toast(t('toast.cableOut', { code }), 'info');
     else toast(t(after?.connected ? 'toast.cableIn' : 'toast.cableInWait', { code }), after?.connected ? 'good' : 'warn');
+    return true;
+  }
+
+  async function toggleCable(key, button) {
+    const { m } = machineOfKey(key);
+    if (m) await setCable(key, !m.cablePlugged, button);
   }
 
   async function exportUsb(key) {
@@ -462,10 +494,31 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     setTimeout(() => el.classList.remove('is-acted'), 1600);
   }
 
+  /** Bring something just added into view and mark it for a moment (a machine or a whole site). */
+  function showAdded(el) {
+    if (!el) return false;
+    el.scrollIntoView({ block: 'center', behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+    el.classList.remove('is-added');
+    void el.offsetWidth; // restart the mark
+    el.classList.add('is-added');
+    clearTimeout(el._addedTimer);
+    el._addedTimer = setTimeout(() => el.classList.remove('is-added'), 3200);
+    return true;
+  }
+
   return {
     render,
     onEvent,
     highlight,
+    setCable,
+    /** A machine just added: scrolled into view and marked. @returns whether it is on the page yet */
+    showMachine: (key) => showAdded(machineEls.get(key)),
+    /** A school just added: its site, scrolled into view and marked. @returns whether it is on the page yet */
+    showSite: (code) => showAdded(document.getElementById(`site-${code}`)),
+    /** A school being added on this page: its site appears without the "new school" toast (the page says more). */
+    expectSchool: (code) => quiet.add(code),
+    /** ...after all not added. */
+    unexpectSchool: (code) => quiet.delete(code),
     /** A machine's element ('<school>/<DEVICE>'), for the Simulation envelope. */
     machineEl: (key) => machineEls.get(key),
     /** A part of the cloud server ('broker', 'platform', 'db'), for the Simulation envelope. */

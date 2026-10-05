@@ -10,6 +10,7 @@
 import { h } from '/shared/api.js';
 import { reducedMotion } from './util.js';
 import { sameNode } from './sim-steps.js';
+import { viewTop } from './drag.js';
 
 const wide = window.matchMedia('(min-width: 1024px)');
 const ENV_W = 28;
@@ -211,8 +212,8 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
       if (!wide.matches || performance.now() - userScrolledAt < USER_SCROLL_QUIET_MS) return;
       if (document.querySelector('dialog[open]')) return;
     }
-    const header = document.getElementById('lab-header');
-    const top = (header && getComputedStyle(header).position === 'sticky' ? header.offsetHeight : 0) + 24;
+    // below the sticky header and device bar
+    const top = viewTop() + 24;
     const bottom = window.innerHeight - 24;
     const ys = points.map((p) => b.top + p.y);
     const end = ys[ys.length - 1];
@@ -285,7 +286,8 @@ export function createSimAnim(app, { topologyEl, topology, onOpen }) {
     renderParks();
 
     const travels = step.from && !sameNode(step.from, target);
-    const still = reducedMotion.matches || !animate;
+    // a step that names where it comes from but sends nothing (a broker login ending) does not travel
+    const still = reducedMotion.matches || !animate || step.still === true;
     light(target, 'sim-at', step.layer);
     if (still && travels) light(step.from, 'sim-from', step.layer);
     if (scroll) reveal(travels ? [step.from, target] : [target]);
