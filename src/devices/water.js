@@ -17,6 +17,8 @@ export class WaterMachine extends Terminal {
    * A student taps a card for `ml` millilitres. Same rules as a canteen sale (DESIGN §3), in
    * the same order, except that the per-purchase limit, the daily total and the balance cap
    * the pour instead of refusing it, unless not even the minimum charge fits.
+   * The rules step (DESIGN §11.2) shows the pour as capped where the checks stopped (`ml`)
+   * and what it costs (`amountSen`).
    * @param {import('./card.js').VirtualCard} card
    * @param {{ ml: number }} request  whole millilitres, 1 or more (more than MAX_POUR_ML pours MAX_POUR_ML)
    * @returns {Promise<{ ok: boolean, screen: string, record?: object, pouredMl: number, sent?: boolean, reason?: string }>}
@@ -34,21 +36,24 @@ export class WaterMachine extends Terminal {
     const s = settings.content;
     const affordable = (sen) => (sen > 0 ? maxAffordableMl(sen, perLitreSen, minChargeSen) : 0);
 
-    const early = this._checkWindowAndGroup(memory);
-    if (early) return none(early);
+    const rules = this._tapRules(memory);
     let pour = Math.min(ml, MAX_POUR_ML);
+    const verdict = () => rules.finish(waterChargeSen(pour, perLitreSen, minChargeSen), { ml: pour });
+    if (!this._checkWindowAndGroup(memory, rules)) return none(verdict());
     const perPurchase = affordable(s.perPurchaseMaxSen);
-    if (perPurchase === 0) return none(this._refuseRule('PER_PURCHASE_LIMIT'));
+    if (!rules.check('perPurchase', perPurchase > 0, { limitSen: s.perPurchaseMaxSen })) return none(verdict());
     pour = Math.min(pour, perPurchase);
     const day = this._dayStats(memory);
     const today = affordable(s.dailyMaxSen - day.totalSen);
-    if (today === 0) return none(this._refuseRule('DAILY_LIMIT'));
+    if (!rules.check('dailyTotal', today > 0, { usedSen: day.totalSen, limitSen: s.dailyMaxSen })) return none(verdict());
     pour = Math.min(pour, today);
-    if (day.count >= s.dailyMaxCount) return none(this._refuseRule('DAILY_COUNT'));
-    if (this._tapGapLeftMs(day) > 0) return none(this._refuseRule('TAP_GAP', { day }));
+    if (!rules.check('dailyCount', day.count < s.dailyMaxCount, { count: day.count, limit: s.dailyMaxCount })) return none(verdict());
+    const waitMs = this._tapGapLeftMs(day);
+    if (!rules.check('tapGap', waitMs === 0, { waitMs })) return none(verdict());
     const balance = affordable(memory.balanceSen);
-    if (balance === 0) return none(this._refuseRule('INSUFFICIENT_BALANCE', { memory }));
+    if (!rules.check('balance', balance > 0, { balanceSen: memory.balanceSen })) return none(verdict());
     pour = Math.min(pour, balance);
+    verdict(); // every rule passed: the step shows the pour as it will be
 
     const amountSen = waterChargeSen(pour, perLitreSen, minChargeSen);
     const poured = pour === ml ? `Poured ${pour} ml` : `Poured ${pour} of ${ml} ml`;

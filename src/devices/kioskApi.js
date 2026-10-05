@@ -13,6 +13,10 @@ import { DEVICE_CODE_RE, SCHOOL_CODE_RE } from '../shared/protocol.js';
 // Errors are KioskApiError: the platform's own error code for an answer that is not 2xx,
 // NETWORK when there was no answer in time. The kiosk decides what that means (with no
 // network it writes nothing; a lost confirm is looked up by the same kiosk txn).
+//
+// The lab can say the network is down (`online`, e.g. the kiosk's cable is out or the cloud
+// server is switched off) and add headers of its own (`headers`, e.g. x-lab-trace for
+// Simulation mode, DESIGN §11.3); those never replace the signed ones.
 
 const NONCE_BYTES = 16; // 32 hex characters, inside the 16-64 the platform accepts
 const MAX_TXN_LENGTH = 64;
@@ -23,6 +27,35 @@ const BAD_ANSWER_STATUS = 502;
 // Node timers hold whole milliseconds up to 2^31 - 1: AbortSignal.timeout() refuses a
 // fraction, and a longer delay fires after 1 ms, so either would turn every call into NETWORK.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** Method and path of each kiosk call (DESIGN §3); lookup adds the kiosk txn to the path. */
+const ROUTES = Object.freeze({
+  pending: Object.freeze({ method: 'POST', path: '/api/kiosk/pending' }),
+  confirm: Object.freeze({ method: 'POST', path: '/api/kiosk/confirm' }),
+  lookup: Object.freeze({ method: 'GET', path: '/api/kiosk/confirm' }),
+  packs: Object.freeze({ method: 'GET', path: '/api/kiosk/packs' }),
+  receipts: Object.freeze({ method: 'POST', path: '/api/kiosk/admin-card/receipts' }),
+});
+/** The calls of the kiosk API, as the kiosk names them in its events. */
+export const KIOSK_CALLS = Object.freeze(Object.keys(ROUTES));
+
+// Headers the lab's own may never set: what is signed or describes the signed body, and what
+// frames the request on the wire.
+const RESERVED_HEADERS = new Set([
+  'accept',
+  'content-type',
+  'x-lab-school',
+  'x-lab-device',
+  'x-lab-timestamp',
+  'x-lab-nonce',
+  'x-lab-signature',
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+]);
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/; // an HTTP token
+const HEADER_VALUE_RE = /^[\t\x20-\x7e\x80-\xff]{0,1024}$/; // no line breaks or NUL, Latin-1 only (fetch)
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const matches = (re) => (v) => typeof v === 'string' && re.test(v);
@@ -86,12 +119,53 @@ function parseJson(text) {
 }
 
 /**
+ * Method and path of a kiosk API call as the kiosk sends it (without a baseUrl prefix).
+ * @param {'pending'|'confirm'|'lookup'|'packs'|'receipts'} call
+ * @param {string} [kioskTxn]  lookup only
+ * @returns {{ method: string, path: string }}
+ * @throws {TypeError} for an unknown call, or a kiosk txn that cannot be one path segment
+ */
+export function kioskRoute(call, kioskTxn) {
+  const route = typeof call === 'string' && Object.hasOwn(ROUTES, call) ? ROUTES[call] : null;
+  if (!route) throw new TypeError(`${call} is not a kiosk API call`);
+  return { method: route.method, path: call === 'lookup' ? `${route.path}/${txnSegment(kioskTxn)}` : route.path };
+}
+
+/**
+ * The extra headers the lab asks for: string values with a valid name, never one of the
+ * reserved headers, names in lower case (so two spellings cannot both go out). A function that
+ * throws or answers something else adds nothing: these headers are hints, never a reason for
+ * a top-up to fail.
+ */
+function extraHeaders(headers) {
+  if (!headers) return {};
+  let given;
+  try {
+    given = headers();
+  } catch {
+    return {};
+  }
+  const out = {};
+  if (!isPlainObject(given)) return out;
+  for (const [name, value] of Object.entries(given)) {
+    if (typeof value !== 'string' || !HEADER_NAME_RE.test(name) || !HEADER_VALUE_RE.test(value)) continue;
+    const key = name.toLowerCase();
+    if (!RESERVED_HEADERS.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+/**
  * Signed client for one kiosk.
  * @param {{ baseUrl: string, schoolCode: string, deviceCode: string, secret: string,
- *   clock: { now(): number }, timeoutMs?: number }} options
+ *   clock: { now(): number }, timeoutMs?: number, online?: () => boolean,
+ *   headers?: () => Record<string, string> }} options
  *   baseUrl: the platform's HTTP address; secret: the kiosk's device secret (hex);
  *   clock: the lab clock (timestamps); timeoutMs: real time allowed per request, a whole
- *   number of milliseconds from 1 to 2^31 - 1. Malformed options are a TypeError.
+ *   number of milliseconds from 1 to 2^31 - 1; online: asked before every request, false
+ *   fails it at once as NETWORK (nothing is sent); headers: extra headers for every request
+ *   (string values only; the signing headers, accept and content-type stay the kiosk's own).
+ *   Malformed options are a TypeError.
  * @returns {{
  *   pending(args: { card: string, max?: number }): Promise<{ member: { id: string, name: string },
  *     orders: Array<{ orderId: string, kind: string, amountSen: number }>, mirrorBalanceSen: number, waitingSen: number }>,
@@ -105,7 +179,7 @@ function parseJson(text) {
  * }}
  *   Every method rejects with KioskApiError (see above).
  */
-export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock, timeoutMs = 5000 } = {}) {
+export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock, timeoutMs = 5000, online, headers } = {}) {
   const base = baseOf(baseUrl);
   if (!isSchoolCode(schoolCode)) throw new TypeError('schoolCode must be a school code such as smk-contoh');
   if (!isDeviceCode(deviceCode)) throw new TypeError('deviceCode must be a device code such as KIOSK-01');
@@ -114,18 +188,25 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new TypeError(`timeoutMs must be a whole number of milliseconds, 1 to ${MAX_TIMEOUT_MS}`);
   }
+  if (online !== undefined && typeof online !== 'function') throw new TypeError('online must be a function answering true or false');
+  if (headers !== undefined && typeof headers !== 'function') throw new TypeError('headers must be a function answering extra headers');
 
   async function send(method, path, body, { nullOn404 = false } = {}) {
     const verb = String(method).toUpperCase();
     if (typeof path !== 'string' || !path.startsWith('/')) throw new TypeError('path must start with /');
     if ((verb === 'GET' || verb === 'HEAD') && body !== undefined) throw new TypeError(`${verb} requests have no body`);
+    // No network (the kiosk's cable is out, the server is off): nothing goes out, as with no answer.
+    if (online && online() === false) {
+      throw new KioskApiError('NETWORK', NO_ANSWER_STATUS, 'cannot reach the platform (no network)', { timedOut: false, offline: true });
+    }
     const url = new URL(base + path);
     // Sign exactly what goes on the wire: the URL parser may re-encode the path.
     const signedPath = url.pathname + url.search;
     const text = body === undefined ? '' : JSON.stringify(body);
     const timestamp = String(Math.floor(clock.now()));
     const nonce = randomBytes(NONCE_BYTES).toString('hex');
-    const headers = {
+    const sent = {
+      ...extraHeaders(headers),
       accept: 'application/json',
       'x-lab-school': schoolCode,
       'x-lab-device': deviceCode,
@@ -133,7 +214,7 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
       'x-lab-nonce': nonce,
       'x-lab-signature': signRequest({ secretHex: secret, method: verb, path: signedPath, timestamp, nonce, body: text }),
     };
-    if (body !== undefined) headers['content-type'] = 'application/json';
+    if (body !== undefined) sent['content-type'] = 'application/json';
     // Real time, not the lab clock: it bounds how long the kiosk waits for the network,
     // and covers the whole answer (a confirm cut off half-way is not an answer).
     const signal = AbortSignal.timeout(timeoutMs);
@@ -144,7 +225,7 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
     try {
       res = await fetch(url, {
         method: verb,
-        headers,
+        headers: sent,
         body: body === undefined ? undefined : text,
         signal,
         // Following a redirect would send this signed request somewhere it was not signed for.
@@ -176,30 +257,36 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
     throw new KioskApiError(code, res.status, message, error.detail);
   }
 
+  /** One of the kiosk calls, on its route. */
+  function call(name, body, { kioskTxn, nullOn404 } = {}) {
+    const { method, path } = kioskRoute(name, kioskTxn);
+    return send(method, path, body, { nullOn404 });
+  }
+
   return {
     /** POST /api/kiosk/pending: the member and the orders waiting to be added to this card (digest). */
     async pending({ card, max } = {}) {
-      return send('POST', '/api/kiosk/pending', { card, max });
+      return call('pending', { card, max });
     },
 
     /** POST /api/kiosk/confirm: report one write (ADDED or FAILED) under its kiosk txn number. */
     async confirm({ orderId, result, amountSen, card, balanceAfterOnCardSen, kioskTxn } = {}) {
-      return send('POST', '/api/kiosk/confirm', { orderId, result, amountSen, card, balanceAfterOnCardSen, kioskTxn });
+      return call('confirm', { orderId, result, amountSen, card, balanceAfterOnCardSen, kioskTxn });
     },
 
     /** GET /api/kiosk/confirm/<kioskTxn>: what the platform recorded for a confirm; null if nothing (404). */
     async lookup(kioskTxn) {
-      return send('GET', `/api/kiosk/confirm/${txnSegment(kioskTxn)}`, undefined, { nullOn404: true });
+      return call('lookup', undefined, { kioskTxn, nullOn404: true });
     },
 
     /** GET /api/kiosk/packs: a new admin-card token and the school's current packs. */
     async packs() {
-      return send('GET', '/api/kiosk/packs');
+      return call('packs');
     },
 
     /** POST /api/kiosk/admin-card/receipts: upload the receipts the offline machines wrote on the admin card. */
     async receipts({ token, receipts } = {}) {
-      return send('POST', '/api/kiosk/admin-card/receipts', { token, receipts });
+      return call('receipts', { token, receipts });
     },
 
     /** Any signed request (path from the API root, query included); the methods above use it. */

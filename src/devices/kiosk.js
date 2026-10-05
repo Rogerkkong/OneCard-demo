@@ -3,6 +3,7 @@ import { last4 } from '../shared/crypto.js';
 import { formatRM } from '../shared/money.js';
 import { SCREEN_CARD_UNAVAILABLE, parseDeviceTxnNo } from '../shared/protocol.js';
 import { CardError, PowerCutError } from './card.js';
+import { kioskRoute } from './kioskApi.js';
 import { Terminal } from './terminal.js';
 
 // The top-up kiosk (docs/DESIGN.md §6, rules in §3 "Kiosk HTTP"): the only machine that puts
@@ -14,6 +15,9 @@ import { Terminal } from './terminal.js';
 // The order of a write and its report is what keeps money from being added twice: a write
 // whose report got lost is looked up and re-sent under the same kiosk txn, and found again on
 // the card at the next tap; it is never written again under a new number.
+//
+// Simulation mode (DESIGN §11): each API call passes the machine's hold point first and is
+// reported as device.http; every read of the card is a card.read step.
 
 /** Lab faults a tap can simulate (on the first order of the tap only). */
 export const KIOSK_FAULTS = Object.freeze(['power-cut-before-commit', 'power-cut-after-commit', 'confirm-timeout']);
@@ -107,14 +111,19 @@ export class TopupKiosk extends Terminal {
     let readback = null;
     const refuse = (reason, text, extra = {}) => ({ ...this._refuse(reason, text, 'error'), ...extra, added, readback, reconfirmed });
 
-    if (!this.connected) return refuse('OFFLINE', SCREEN_NO_PLATFORM);
+    if (!this.connected) {
+      this._offlineStep({ type: 'card.readback' });
+      return refuse('OFFLINE', SCREEN_NO_PLATFORM);
+    }
     let memory;
     try {
       memory = this._readCard(card);
     } catch (err) {
-      if (err instanceof CardError) return refuse(err.code, SCREEN_CARD_UNAVAILABLE);
-      throw err;
+      if (!(err instanceof CardError)) throw err;
+      this._cardReadStep(null, err.code);
+      return refuse(err.code, SCREEN_CARD_UNAVAILABLE);
     }
+    this._cardReadStep(memory);
     const digest = this._digestOf(memory.uid);
     // What the card carries goes up first: purchases made on offline machines come home this
     // way, and the platform can check its mirror against the balance on the chip.
@@ -147,7 +156,7 @@ export class TopupKiosk extends Terminal {
 
     let pending;
     try {
-      pending = await this.#api.pending({ card: digest, max: PENDING_MAX });
+      pending = await this.#request('pending', { card: digest, max: PENDING_MAX });
     } catch (err) {
       if (!(err instanceof LabError)) throw err;
       // A lost or retired card (CARD_NOT_ACTIVE), or one the platform does not know.
@@ -198,9 +207,11 @@ export class TopupKiosk extends Terminal {
     try {
       current = this._readCard(card);
     } catch (err) {
-      if (err instanceof CardError) return { stop: 'CARD', reason: err.code };
-      throw err;
+      if (!(err instanceof CardError)) throw err;
+      this._cardReadStep(null, err.code);
+      return { stop: 'CARD', reason: err.code };
     }
+    this._cardReadStep(current);
     const balanceSen = current.balanceSen;
     const onCard = current.writes.find((w) => isPlainObject(w) && w.orderId === orderId);
     if (onCard) return { ...(await this.#alreadyOnCard(onCard, { digest, balanceSen })), balanceSen };
@@ -222,7 +233,7 @@ export class TopupKiosk extends Terminal {
           this.#cardWrite(current.uid, amountSen, balanceSen + amountSen);
         } else {
           // Nothing reached the card; once the power is back the kiosk reports the failure.
-          await this.#call(() => this.#api.confirm({ ...report, result: 'FAILED', balanceAfterOnCardSen: balanceSen }));
+          await this.#call('confirm', { ...report, result: 'FAILED', balanceAfterOnCardSen: balanceSen });
         }
         return { stop: 'POWER_CUT', interrupted: { orderId, amountSen, kioskTxn, committed: err.committed } };
       }
@@ -268,26 +279,70 @@ export class TopupKiosk extends Terminal {
    * @returns {Promise<'CONFIRMED'|'REFUSED'|'UNREACHABLE'>}
    */
   async #reportAdded(args, { firstLost = false } = {}) {
-    const confirm = () => this.#api.confirm({ ...args, result: 'ADDED' });
-    const first = firstLost ? { ok: false, final: false } : await this.#call(confirm);
+    const confirm = () => this.#call('confirm', { ...args, result: 'ADDED' });
+    const first = firstLost ? await this.#lost('confirm') : await confirm();
     if (first.ok) return this.#settle(args.kioskTxn, CONFIRMED);
     if (first.final) return this.#settle(args.kioskTxn, REFUSED);
-    const found = await this.#call(() => this.#api.lookup(args.kioskTxn));
+    const found = await this.#call('lookup', args.kioskTxn);
     if (!found.ok) return found.final ? this.#settle(args.kioskTxn, REFUSED) : UNREACHABLE;
     if (found.value) return this.#settle(args.kioskTxn, CONFIRMED);
-    const again = await this.#call(confirm);
+    const again = await confirm();
     if (again.ok) return this.#settle(args.kioskTxn, CONFIRMED);
     return again.final ? this.#settle(args.kioskTxn, REFUSED) : UNREACHABLE;
   }
 
   /** One API call: { ok: true, value } or { ok: false, final, error } for an expected failure. */
-  async #call(fn) {
+  async #call(call, args) {
     try {
-      return { ok: true, value: await fn() };
+      return { ok: true, value: await this.#request(call, args) };
     } catch (err) {
       if (!(err instanceof LabError)) throw err;
       return { ok: false, final: isFinalRefusal(err), error: err };
     }
+  }
+
+  /**
+   * One API call (api[call](args)) through the machine's hold point (DESIGN §11.4), then
+   * reported as device.http (§11.2). Rejects as the API does.
+   * @param {'pending'|'confirm'|'lookup'|'packs'|'receipts'} call
+   * @param {unknown} [args]  the call's argument (lookup: the kiosk txn)
+   */
+  async #request(call, args) {
+    const route = kioskRoute(call, call === 'lookup' ? args : undefined);
+    const held = this._hold({ kind: 'http', call, ...route });
+    if (held) await held;
+    const started = performance.now();
+    try {
+      const value = await this.#api[call](args);
+      // a lookup answers null for the platform's 404: "never recorded"
+      this.#http(call, route, started, { status: call === 'lookup' && value === null ? 404 : 200, ok: true });
+      return value;
+    } catch (err) {
+      const status = err?.code === 'NETWORK' || !Number.isSafeInteger(err?.status) ? 0 : err.status;
+      this.#http(call, route, started, { status, ok: false, code: typeof err?.code === 'string' && err.code ? err.code : 'ERROR' });
+      throw err;
+    }
+  }
+
+  /**
+   * Lab fault confirm-timeout: the request passes the hold point like any other, then never
+   * reaches the platform; the kiosk sees no answer (NETWORK).
+   */
+  async #lost(call) {
+    const route = kioskRoute(call);
+    const held = this._hold({ kind: 'http', call, ...route });
+    if (held) await held;
+    this.#http(call, route, performance.now(), { status: 0, ok: false, code: 'NETWORK', fault: 'confirm-timeout' });
+    return { ok: false, final: false };
+  }
+
+  /** device.http: one kiosk API call and its answer (status 0: no answer). */
+  #http(call, { method, path }, started, { status, ok, code, fault }) {
+    const data = { device: this.deviceCode, call, method, path, status, ok };
+    if (code) data.code = code;
+    data.ms = Math.round(performance.now() - started);
+    if (fault) data.fault = fault;
+    this._emit('device.http', data);
   }
 
   #settle(kioskTxn, outcome) {
@@ -319,10 +374,13 @@ export class TopupKiosk extends Terminal {
     if (!adminCard || typeof adminCard.load !== 'function') throw new TypeError('adminCard must be an AdminCard');
     return this.#exclusive(async () => {
       if (adminCard.schoolCode !== this.schoolCode) return this._refuse('WRONG_SCHOOL', SCREEN_CARD_UNAVAILABLE, 'error');
-      if (!this.connected) return this._refuse('OFFLINE', SCREEN_NO_PLATFORM, 'error');
+      if (!this.connected) {
+        this._offlineStep({ call: 'packs' });
+        return this._refuse('OFFLINE', SCREEN_NO_PLATFORM, 'error');
+      }
       let answer;
       try {
-        answer = await this.#api.packs();
+        answer = await this.#request('packs');
       } catch (err) {
         if (err instanceof LabError) return { ...this._refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM, 'error'), error: err.code };
         throw err;
@@ -352,12 +410,15 @@ export class TopupKiosk extends Terminal {
     if (!adminCard || typeof adminCard.takeReceipts !== 'function') throw new TypeError('adminCard must be an AdminCard');
     return this.#exclusive(async () => {
       if (adminCard.schoolCode !== this.schoolCode) return this._refuse('WRONG_SCHOOL', SCREEN_CARD_UNAVAILABLE, 'error');
-      if (!this.connected) return this._refuse('OFFLINE', SCREEN_NO_PLATFORM, 'error');
+      if (!this.connected) {
+        this._offlineStep({ call: 'receipts' });
+        return this._refuse('OFFLINE', SCREEN_NO_PLATFORM, 'error');
+      }
       const receipts = adminCard.takeReceipts();
       if (receipts.length === 0) return { ok: true, screen: this.screen('No receipts on the admin card', 'info'), uploaded: 0, recorded: 0 };
       let answer;
       try {
-        answer = await this.#api.receipts({ token: adminCard.token, receipts });
+        answer = await this.#request('receipts', { token: adminCard.token, receipts });
       } catch (err) {
         for (const r of receipts) adminCard.addReceipt(r);
         if (err instanceof LabError) return { ...this._refuse('PLATFORM_UNREACHABLE', SCREEN_NO_PLATFORM, 'error'), error: err.code };

@@ -1045,6 +1045,82 @@ export class Terminal {
     }
   }
 
+  /** device.step (DESIGN §11.2): one step the machine took, e.g. card.read, rules, journal, offline. */
+  _step(step, ok, fields = {}) {
+    this._emit('device.step', { device: this.#device.code, step, ok, ...fields });
+  }
+
+  /**
+   * The card.read step: what the machine read from the chip, or why it cannot use the card
+   * (CARD_UNREADABLE, WRONG_SCHOOL, BLOCKED; a blocked card was read, so its chip data is
+   * shown too). The screen never says which.
+   * @param {object|null} memory  the verified memory, null when it could not be read
+   * @param {string} [reason]
+   */
+  _cardReadStep(memory, reason) {
+    const chip = memory
+      ? {
+          last4: last4(memory.uid),
+          balanceSen: memory.balanceSen,
+          cardSeq: memory.cardSeq,
+          records: memory.records.length,
+          listVersionOnCard: memory.listVersionOnCard,
+        }
+      : {};
+    this._step('card.read', !reason, reason ? { reason, ...chip } : chip);
+  }
+
+  /**
+   * The offline step: something not sent for lack of a broker link. `fields`: { type, txn? }
+   * for a message, or { call } for a kiosk API call the kiosk did not even try.
+   * @returns {false}
+   */
+  _offlineStep(fields) {
+    this._step('offline', false, fields);
+    return false;
+  }
+
+  /**
+   * A hold point of Simulation mode (DESIGN §11.4): ask the gate before a publish or a kiosk
+   * API call. Without a gate, or when it answers anything but a promise, the caller goes on at
+   * once (realtime code paths stay synchronous). A gate that throws or rejects is noted and
+   * passed: it must never stop the machine.
+   * @param {{ kind: 'publish'|'http' }} info  device and school are filled in
+   * @returns {Promise<void>|null}  what to wait for (it never rejects), or null
+   */
+  _hold(info) {
+    if (!this.#gate) return null;
+    const { kind, ...rest } = info;
+    try {
+      const answer = this.#gate({ kind, device: this.#device.code, school: this.#school.code, ...rest });
+      if (answer === null || (typeof answer !== 'object' && typeof answer !== 'function') || typeof answer.then !== 'function') return null;
+      return Promise.resolve(answer).then(
+        () => {},
+        (err) => this.#note('warn', 'gate failed', { kind, error: err?.message }),
+      );
+    } catch (err) {
+      this.#note('warn', 'gate failed', { kind, error: err?.message });
+      return null;
+    }
+  }
+
+  // The bus context (DESIGN §11.1). A machine with no bus, or an older one, just runs `fn`.
+  #context() {
+    try {
+      return typeof this.#events?.context === 'function' ? this.#events.context() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  #untraced(fn) {
+    return typeof this.#events?.untraced === 'function' ? this.#events.untraced(fn) : fn();
+  }
+
+  #withContext(patch, fn) {
+    return typeof this.#events?.withContext === 'function' ? this.#events.withContext(patch, fn) : fn();
+  }
+
   _iso() {
     return this.#clock.iso();
   }
@@ -1094,8 +1170,9 @@ export class Terminal {
   }
 
   /**
-   * Read the card and check it may be used here: MAC, school, block list. The screen never
-   * says which (SCREEN_CARD_UNAVAILABLE); `reason` is for the lab console.
+   * Read the card and check it may be used here: MAC, school, block list (the card.read
+   * step). The screen never says which (SCREEN_CARD_UNAVAILABLE); `reason` is for the lab
+   * console.
    * @returns {{ memory: object, digest: string, last4: string } | { refusal: object }}
    */
   _admitCard(card) {
@@ -1103,12 +1180,17 @@ export class Terminal {
     try {
       memory = this._readCard(card);
     } catch (err) {
-      if (err instanceof CardError) return { refusal: this._refuse(err.code, SCREEN_CARD_UNAVAILABLE, 'error') };
-      throw err;
+      if (!(err instanceof CardError)) throw err;
+      this._cardReadStep(null, err.code);
+      return { refusal: this._refuse(err.code, SCREEN_CARD_UNAVAILABLE, 'error') };
     }
     const digest = this._digestOf(memory.uid);
     // An old list still blocks: it is complete for every card it names.
-    if (this.#blocked.has(digest)) return { refusal: this._refuse('BLOCKED', SCREEN_CARD_UNAVAILABLE, 'error') };
+    if (this.#blocked.has(digest)) {
+      this._cardReadStep(memory, 'BLOCKED');
+      return { refusal: this._refuse('BLOCKED', SCREEN_CARD_UNAVAILABLE, 'error') };
+    }
+    this._cardReadStep(memory);
     return { memory, digest, last4: last4(memory.uid) };
   }
 
@@ -1142,9 +1224,10 @@ export class Terminal {
   /**
    * Refuse with the plain message of one tap rule.
    * @param {'CLOSED'|'GROUP_NOT_ALLOWED'|'PER_PURCHASE_LIMIT'|'DAILY_LIMIT'|'DAILY_COUNT'|'TAP_GAP'|'INSUFFICIENT_BALANCE'} reason
-   * @param {{ memory?: object, day?: object }} [context]
+   * @param {{ memory?: object, day?: object, waitMs?: number }} [context]  TAP_GAP takes the
+   *   wait its check measured, or works it out from `day`
    */
-  _refuseRule(reason, { memory, day } = {}) {
+  _refuseRule(reason, { memory, day, waitMs } = {}) {
     const s = this.#config.settings.content;
     let text;
     switch (reason) {
@@ -1164,7 +1247,7 @@ export class Terminal {
         text = `Daily limit of ${s.dailyMaxCount} purchases reached`;
         break;
       case 'TAP_GAP':
-        text = `Please wait ${Math.ceil(this._tapGapLeftMs(day) / 1000)} s and tap again`;
+        text = `Please wait ${Math.ceil((waitMs ?? this._tapGapLeftMs(day)) / 1000)} s and tap again`;
         break;
       case 'INSUFFICIENT_BALANCE':
         text = `${SCREEN_NOT_ENOUGH_BALANCE} · Balance ${formatRM(memory.balanceSen)}`;
@@ -1175,30 +1258,63 @@ export class Terminal {
     return this._refuse(reason, text, 'warn');
   }
 
-  /** Window and holder group, the rules that do not depend on the amount. */
-  _checkWindowAndGroup(memory) {
+  /**
+   * Start checking the tap rules for one card. Each rule checked is recorded for the rules
+   * step (DESIGN §11.2): `check(rule, ok, fields)` records one and says whether it passed (stop
+   * at the first that fails, like the machine); `finish(amountSen, extra)` emits the step and
+   * returns the refusal of the rule that failed, or null when every one passed.
+   * @param {object} memory  the memory _admitCard read
+   * @returns {{ check(rule: string, ok: boolean, fields?: object): boolean,
+   *   finish(amountSen: number, extra?: object): object|null }}
+   */
+  _tapRules(memory) {
+    const checks = [];
+    let failed = null;
+    return {
+      check: (rule, ok, fields = {}) => {
+        checks.push({ rule, ok, ...fields });
+        if (!ok && !failed) failed = checks.at(-1);
+        return ok;
+      },
+      finish: (amountSen, extra = {}) => {
+        this._step('rules', !failed, { amountSen, ...extra, checks });
+        return failed ? this._refuseRule(RULE_REFUSALS[failed.rule], { memory, waitMs: failed.waitMs }) : null;
+      },
+    };
+  }
+
+  /**
+   * Window and holder group, the rules that do not depend on the amount.
+   * @param {object} memory
+   * @param {ReturnType<Terminal['_tapRules']>} rules
+   * @returns {boolean} both passed
+   */
+  _checkWindowAndGroup(memory, rules) {
     const s = this.#config.settings.content;
-    if (!inWindows(this.#clock.now(), s.mealWindows)) return this._refuseRule('CLOSED');
-    if (!s.allowedGroups.includes(memory.group)) return this._refuseRule('GROUP_NOT_ALLOWED', { memory });
-    return null;
+    const open = inWindows(this.#clock.now(), s.mealWindows);
+    return rules.check('window', open, { open }) && rules.check('group', s.allowedGroups.includes(memory.group), { group: memory.group });
   }
 
   /**
    * Every plain-message rule for a purchase of a known amount, in DESIGN order: window,
-   * group, per purchase, daily total, daily count, tap gap, balance.
+   * group, per purchase, daily total, daily count, tap gap, balance (the rules step).
    * @returns {object|null} the refusal, or null when the purchase may go ahead
    */
   _checkRules(memory, amountSen) {
     const s = this.#config.settings.content;
-    const early = this._checkWindowAndGroup(memory);
-    if (early) return early;
-    if (amountSen > s.perPurchaseMaxSen) return this._refuseRule('PER_PURCHASE_LIMIT');
+    const rules = this._tapRules(memory);
+    const verdict = () => rules.finish(amountSen);
+    if (!this._checkWindowAndGroup(memory, rules)) return verdict();
+    if (!rules.check('perPurchase', amountSen <= s.perPurchaseMaxSen, { limitSen: s.perPurchaseMaxSen })) return verdict();
     const day = this._dayStats(memory);
-    if (day.totalSen + amountSen > s.dailyMaxSen) return this._refuseRule('DAILY_LIMIT');
-    if (day.count >= s.dailyMaxCount) return this._refuseRule('DAILY_COUNT');
-    if (this._tapGapLeftMs(day) > 0) return this._refuseRule('TAP_GAP', { day });
-    if (memory.balanceSen < amountSen) return this._refuseRule('INSUFFICIENT_BALANCE', { memory });
-    return null;
+    if (!rules.check('dailyTotal', day.totalSen + amountSen <= s.dailyMaxSen, { usedSen: day.totalSen, limitSen: s.dailyMaxSen })) {
+      return verdict();
+    }
+    if (!rules.check('dailyCount', day.count < s.dailyMaxCount, { count: day.count, limit: s.dailyMaxCount })) return verdict();
+    const waitMs = this._tapGapLeftMs(day);
+    if (!rules.check('tapGap', waitMs === 0, { waitMs })) return verdict();
+    rules.check('balance', memory.balanceSen >= amountSen, { balanceSen: memory.balanceSen });
+    return verdict();
   }
 
   /**
@@ -1239,6 +1355,7 @@ export class Terminal {
       amountSen: purchase.amountSen,
       balanceAfterSen: debit.balanceAfterSen,
     });
+    this._step('journal', true, { txn: debit.record.txn, unsent: this.#unsentCount() });
     const text = this.screen(describe(debit.record), 'ok');
     const sent = await this.#deliver(entry);
     return { ok: true, screen: text, record: structuredClone(debit.record), sent };
@@ -1259,8 +1376,9 @@ export class Terminal {
   }
 
   async #deliver(entry) {
-    if (!this.connected) return false;
     const type = entry.record.kind === 'WATER' ? 'water.recorded' : 'sale.recorded';
+    // the record waits in the journal for the next connection
+    if (!this.connected) return this.#notSent(type, entry.record.txn);
     entry.inFlight = true;
     let sent = false;
     try {
