@@ -256,7 +256,7 @@ export function createTopology(app, { cloudEl, sitesEl, trays }) {
     r.add = h('button', { type: 'button', class: 'btn btn--small site__add' }, icon('plus', 'site__addicon'), h('span', { class: 'site__addtext' }));
     r.add.addEventListener('click', () => app.openAddMachine?.(s.code, r.add));
     r.note = h('p', { class: 'site__note', hidden: true });
-    r.net = h('div', { class: 'site__net', dataset: { school: s.code } });
+    r.net = h('div', { class: 'site__net' });
     r.empty = h('p', { class: 'site__empty muted', hidden: true });
     r.tray = trays.createTray(s.code);
     r.admin = trays.createAdmin(s.code);

@@ -210,8 +210,12 @@ function loginsOf(events, trace) {
   let down = null; // why every login of the flow ends: the server or the broker went down
   let up = null; // why every login of the flow starts: the server or the broker came back
   const s = subjectOf(trace);
-  const copiedUser = trace?.kind === 'fault' && s.fault === 'cross-device-publish' && machineName(word(s.school) ?? trace.school, word(s.device) ?? trace.device)?.replace('/', '.');
-  let copy = 'before'; // the copied login: before it, on, off (closed), the machine back
+  // the cross-device fault's copy logs in with the machine's own username ('<school>.<DEVICE>')
+  const copiedUser =
+    trace?.kind === 'fault' && s.fault === 'cross-device-publish'
+      ? (machineName(word(s.school) ?? trace.school, word(s.device) ?? trace.device)?.replace('/', '.') ?? null)
+      : null;
+  let copy = 'before'; // where the copied login is: not in yet, on, off (closed), the machine back
   for (const e of events) {
     const d = e.data ?? {};
     if (e.type === 'device.cable' && d.device) cable.set(`${e.school}/${d.device}`, d.plugged ? 'plugged' : 'cable');
@@ -228,15 +232,17 @@ function loginsOf(events, trace) {
     const info = {};
     const user = typeof d.username === 'string' ? d.username : null;
     if (copiedUser && user === copiedUser) {
-      if (copy === 'before' && e.type === 'mqtt.disconnect') info.role = 'knocked';
-      else if (copy === 'before') {
+      // in order: the real machine knocked off, the copy in (then refused), its connection
+      // closed, the real machine back
+      const off = e.type === 'mqtt.disconnect';
+      if (copy === 'before' && off) info.role = 'knocked';
+      else if ((copy === 'before' || copy === 'on') && !off) {
         info.role = 'copied';
         if (e.type === 'mqtt.connect') copy = 'on';
-      } else if (copy === 'on' && e.type === 'mqtt.disconnect') {
+      } else if (copy === 'on' && off) {
         info.role = 'copiedClosed';
         copy = 'off';
-      } else if (copy === 'on') info.role = 'copied';
-      else if (copy === 'off' && e.type === 'mqtt.connect') {
+      } else if (copy === 'off' && e.type === 'mqtt.connect') {
         info.role = 'back';
         copy = 'back';
       }
@@ -589,12 +595,17 @@ function flowWords(trace, t, names = null) {
  * A flow's title in the page's language, from its kind and subject; the lab's English title for
  * a kind or subject this page does not know.
  * @param {{ kind?: string, title?: string, subject?: object, school?: string|null, device?: string|null }} trace  a summary
+ * @param {Function} t  the page's i18n
+ * @param {{ names?: (code: string) => string|null }} [options]  names: a school's name by its code
  */
 export function traceTitle(trace, t, { names = null } = {}) {
   return flowWords(trace, t, names)?.title ?? String(trace?.title ?? '');
 }
 
-/** The trace picker's line: "#3 · Tap · CANTEEN-01 · 10:02". */
+/**
+ * The trace picker's line: "#3 · Tap · CANTEEN-01 · 10:02".
+ * @param {{ names?: (code: string) => string|null }} [options]  as for traceTitle()
+ */
 export function traceLabel(summary, t, hhmm, { names = null } = {}) {
   if (!summary) return '';
   const words = flowWords(summary, t, names);
@@ -1748,7 +1759,7 @@ export function eventSentence(e, { t, lang, trace = null, held = null }) {
 /**
  * Every step of a trace, in hop order, numbered from 1.
  * @param {object[]} events  the trace's events (any order; sorted by seq here)
- * @param {{ t: Function, lang: string, trace?: object, isHeld?: (id: string) => boolean }} options
+ * @param {{ t: Function, lang: string, trace?: object, isHeld?: (id: string) => boolean, names?: (code: string) => string|null }} options
  * @returns {Array<Step & { n: number, seq: number, e: object }>}
  */
 export function buildSteps(events, options) {

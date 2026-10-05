@@ -213,6 +213,7 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
         }
         if (zone.blocked) {
           toast(t('drag.suspended', { school: zone.name }), 'warn');
+          say(t('drag.suspended', { school: zone.name }));
           return;
         }
         if (s.item.kind === 'school') openAddSchool({ opener: s.button });
@@ -229,7 +230,7 @@ export function createBuild(app, { root, cloudEl, sitesEl, topology, live }) {
   // ---- dialogs: shared parts ----------------------------------------------------------------------
 
   let seq = 0;
-  /** A form field: label, control, hint; `mark()` shows a problem with it. */
+  /** A form field: its label, the control and a hint under it (showError() marks the control). */
   function field(labelText, control, hintText = null) {
     control.id ||= `bf${++seq}`;
     const label = h('label', { for: control.id, class: 'bfield__label' }, labelText);
