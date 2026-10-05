@@ -1125,3 +1125,50 @@ The page (`web/lab/`):
 - **Unsigned.** The downloads are not code-signed:
   - macOS: open the first time with right-click → Open
   - Windows SmartScreen: More info → Run anyway
+
+**As built:**
+- **Start code.** `src/main.js` only checks the Node.js version, without top-level await, so old Node versions
+  print the plain message. It then imports `src/cli.js`, which holds `run(argv, env, how)`. The single-file app's
+  entry (`src/app/sea-main.js`) calls the same `run()`.
+- **Options:** `--open`, `--no-open`, `--lan`, `--self-test` and `--help` (`-h`). An unknown option exits 2.
+  Without `--open`, the banners of `npm start` and `npm run start:lan` are unchanged.
+- **A busy port (EADDRINUSE):**
+  - **A lab is already running.** The lab first asks `GET /api/lab/state` on its own web port. If a OneCard Lab
+    answers, it says "OneCard Lab is already running". With `--open` it opens that lab and exits 0; without, it
+    exits 1.
+  - **With `--open` (a double-click):** a busy web, MQTT or console port moves to a free port, with a note in the
+    banner.
+  - **Without `--open`:** one plain line naming the setting to change (`LAB_HTTP_PORT`, `LAB_MQTT_PORT` — "often
+    another MQTT broker, such as Mosquitto" — `LAB_CONSOLE_PORT` or `LAB_MQTT_TLS_PORT`).
+  - **Other start failures.** Two settings with the same port, a port that needs administrator rights, an address
+    that is not this computer's, and unreadable TLS files each give one plain line too.
+- **Self-test.** It runs on free ports with the consoles off. It checks `/lab/` (200, HTML) and `/api/lab/state`
+  (200, at least one school), always exits, and gives up after 60 s.
+- **Launchers.** The three shell files are thin; `scripts/launch.cjs` does the work.
+  - It is written in Node 6 syntax, so an old Node prints its "too old" message in English and 中文.
+  - Finding Node: when `node` is not on PATH, the macOS and Linux launchers look in nvm, Volta, fnm, asdf,
+    `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`, and prefer a Node that is new enough. The Windows
+    launcher also looks in `%ProgramFiles%\nodejs` and `NVM_SYMLINK`.
+  - Installing: it runs `npm install --omit=dev --no-audit --no-fund` when `node_modules` or a dependency is
+    missing, or when `package-lock.json` is newer than `node_modules/.package-lock.json`. npm runs from the
+    `npm-cli.js` next to that Node, without a shell, so folder names with spaces or Chinese characters work.
+  - On failure the window stays open ("Press Enter to close"). Ctrl+C or closing the window stops the lab, and a
+    stop sent to the launcher alone is passed on to the lab.
+  - Line endings and modes: `.gitattributes` keeps the `.bat` CRLF and the `.command` / `.sh` LF; both of those
+    are stored as executable (100755).
+- **Single-file app.**
+  - The bundle leaves out three optional native helpers that the libraries only try to load
+    (`bufferutil`, `utf-8-validate`, `supports-color`).
+  - The build fails on any esbuild warning except the known lazy `import.meta` in `src/http/server.js`. It ends by
+    running the new app's `--self-test` and fails on any ExperimentalWarning.
+  - The assets are every file under `web/` plus a manifest (keys, sizes, a content hash). They are unpacked into a
+    private temporary folder and then renamed to `<temp>/onecard-lab-<version>-<hash>/web/`. A complete folder is
+    reused, and a damaged one is replaced. A folder other users can write to, or a leftover `.part-` folder, is
+    never used.
+- **Downloads.**
+  - Files downloaded from an Actions run lose their executable bit, so macOS and Linux need `chmod +x` once.
+  - The Release ZIPs keep the bit.
+  - A dispatch with `release: true` tags `desktop-<run number>`.
+  - Pull requests also run the workflow for changes under `test/**` and to the launchers.
+- **Unsigned apps on macOS 15 (Sequoia) and later.** Right-click → Open is gone. Open the file once, then System
+  Settings → Privacy & Security → **Open Anyway**, or in Terminal `xattr -d com.apple.quarantine <file>`.
