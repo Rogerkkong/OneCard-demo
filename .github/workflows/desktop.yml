@@ -70,7 +70,7 @@ jobs:
           ./"$APP" --self-test
           ls -l "$APP"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: onecard-lab-${{ matrix.target }}
           path: ${{ env.APP }}
@@ -84,7 +84,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: onecard-lab-*
           path: apps
