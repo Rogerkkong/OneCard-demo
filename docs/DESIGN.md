@@ -1135,24 +1135,25 @@ The page (`web/lab/`):
   nodejs.org download page. It runs `npm install` the first time (no `node_modules` yet), then starts the lab with
   `--open`. Closing the window, or Ctrl+C, stops the lab.
 - **`--open`.** `npm start -- --open` opens the lab console in the default browser once the lab is up (`open`,
-  `start` / `explorer`, `xdg-open`). A missing browser never fails the start.
+  `cmd /c start ""`, `xdg-open`). A missing browser never fails the start.
 - **Single-file app** (no Node.js needed):
   - **Build.** `npm run build:app` (`scripts/build-sea.mjs`) bundles the lab into one CommonJS file with esbuild (a
     dev dependency), with the web apps as Node single-executable-application assets. It then injects that into a
     copy of the running Node binary (postject, a dev dependency; on macOS, ad-hoc `codesign`). Output:
     `dist/onecard-lab-<os>-<arch>[.exe]`.
-  - **Start.** At start it unpacks the web apps once per version into the OS temp folder, passes `webRoot` and
-    `labRoutes`, then runs like `npm start -- --open`.
+  - **Start.** At start it unpacks the web apps once per version into the OS temp folder, passes `webRoot` (createLab
+    passes its own `labRoutes`), then runs like `npm start -- --open`.
   - **Self-test.** `--self-test` starts the lab on free ports, fetches `/lab/` and `/api/lab/state`, stops, and
     exits 0 or 1.
 - **GitHub Actions** (`.github/workflows/desktop.yml`):
   - Triggers: pull requests (paths `src/**`, `web/**`, `scripts/**`, `package*.json`, the workflow itself), manual
     dispatch, and tags `v*`.
   - Matrix: ubuntu-latest, windows-latest, macos-latest (arm64), macos-15-intel (x64; GitHub retired macos-13).
-  - Steps: `npm ci`, `npm test` (ubuntu only), `npm run build:app`, `--self-test`, upload the file.
+  - Steps: `npm ci`, `npm test` (ubuntu only), `npm run build:app`, `--self-test`, upload the file
+    (`actions/upload-artifact@v6`; the release job downloads with `actions/download-artifact@v7`).
   - A tag, or a dispatch with `release: true`, publishes a GitHub Release with the zipped apps.
 - **Unsigned.** The downloads are not code-signed:
-  - macOS: open the first time with right-click → Open
+  - macOS 14 and earlier: open the first time with right-click → Open; macOS 15 and later: see "As built" below
   - Windows SmartScreen: More info → Run anyway
 
 **As built:**
@@ -1161,7 +1162,8 @@ The page (`web/lab/`):
   entry (`src/app/sea-main.js`) calls the same `run()`.
 - **Options:** `--open`, `--no-open`, `--lan`, `--self-test` and `--help` (`-h`). An unknown option exits 2.
   Without `--open`, the banners of `npm start` and `npm run start:lan` are unchanged.
-- **A busy port (EADDRINUSE):**
+- **A busy port (EADDRINUSE; on Windows also EACCES for ports from 1024 up, which Hyper-V, WSL or Docker may
+  reserve, or another program may hold exclusively):**
   - **A lab is already running.** The lab first asks `GET /api/lab/state` on its own web port. If a OneCard Lab
     answers, it says "OneCard Lab is already running". With `--open` it opens that lab and exits 0; without, it
     exits 1.
@@ -1169,20 +1171,24 @@ The page (`web/lab/`):
     banner.
   - **Without `--open`:** one plain line naming the setting to change (`LAB_HTTP_PORT`, `LAB_MQTT_PORT` — "often
     another MQTT broker, such as Mosquitto" — `LAB_CONSOLE_PORT` or `LAB_MQTT_TLS_PORT`).
-  - **Other start failures.** Two settings with the same port, a port that needs administrator rights, an address
-    that is not this computer's, and unreadable TLS files each give one plain line too.
+  - **Other start failures.** Two settings with the same port, a port below 1024 that needs administrator rights, an
+    address that is not this computer's, and unreadable TLS files each give one plain line too.
 - **Self-test.** It runs on free ports with the consoles off. It checks `/lab/` (200, HTML) and `/api/lab/state`
   (200, at least one school), always exits, and gives up after 60 s.
 - **Launchers.** The three shell files are thin; `scripts/launch.cjs` does the work.
   - It is written in Node 6 syntax, so an old Node prints its "too old" message in English and 中文.
-  - Finding Node: when `node` is not on PATH, the macOS and Linux launchers look in nvm, Volta, fnm, asdf,
-    `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`, and prefer a Node that is new enough. The Windows
-    launcher also looks in `%ProgramFiles%\nodejs` and `NVM_SYMLINK`.
+  - Finding Node: when `node` is not on PATH, or the one on PATH is older than 22.13, the macOS and Linux launchers
+    look in nvm, Volta, fnm, asdf, `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`, and take the first
+    Node that is new enough (else the one on PATH, and the "too old" message). The Windows launcher also looks in
+    `%ProgramFiles%\nodejs` and `NVM_SYMLINK`.
   - Installing: it runs `npm install --omit=dev --no-audit --no-fund` when `node_modules` or a dependency is
     missing, or when `package-lock.json` is newer than `node_modules/.package-lock.json`. npm runs from the
     `npm-cli.js` next to that Node, without a shell, so folder names with spaces or Chinese characters work.
   - On failure the window stays open ("Press Enter to close"). Ctrl+C or closing the window stops the lab, and a
-    stop sent to the launcher alone is passed on to the lab.
+    stop sent to the launcher alone is passed on to the lab. Ctrl+C on Windows while the lab is still starting counts
+    as a stop, not a failure.
+  - The `.bat` goes to its folder with `pushd "%~dp0"` (it works in a network folder, `\\server\share`) and
+    `popd` on every exit.
   - Line endings and modes: `.gitattributes` keeps the `.bat` CRLF and the `.command` / `.sh` LF; both of those
     are stored as executable (100755).
 - **Single-file app.**
