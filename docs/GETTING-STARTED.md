@@ -190,7 +190,53 @@ Press **Release all**, turn **Hold at each hop (live)** off, or click **Realtime
 
 The console does the same with `simulation on`, `hold on`, `next`, `show held`, `show traces` and `show trace 1`.
 
-## Step 6 — Log in to a machine like a switch (PuTTY)
+## Step 6 — Build your own school by drag and drop (like Packet Tracer)
+
+In Packet Tracer you drag a switch from the device bar and draw its cables. The lab console's **Add to the lab**
+bar, just under the header, does the same for OneCard: **Canteen reader**, **Water machine**, **Top-up kiosk** and
+**School**.
+
+**Add a canteen reader**
+1. Drag **Canteen reader** from the bar onto **SMK Seri Contoh**. While you drag, the places you can drop it have a
+   dashed outline, and the one under the pointer turns solid. Let go over the school.
+2. A small window opens with the next free code filled in: **CANTEEN-03**. Type where it stands if you like
+   (*Canteen counter C*) and press **Add machine**.
+3. CANTEEN-03 appears on the school's site, scrolled into view, with **No network**: its cable is not plugged in
+   yet, and its cable end hangs under the school network line.
+
+Rather not drag? Press **Add machine** on the school's site, or press **Canteen reader** in the bar and choose the
+school in the window. On a phone, press the item and drag; a sideways swipe scrolls the bar instead. Escape, or
+letting go anywhere else, cancels.
+
+**Draw its cable**
+1. Press the cable end above CANTEEN-03 and drag it up onto the **school network line** (the grey line above the
+   machines). The line lights up when the end is over it; let go.
+2. CANTEEN-03 turns **Connected**. Tap a card on it with a *Nasi lemak*, as in Step 4: the screen shows **Paid
+   RM 3.50** and the new balance. A new machine works like the others: it got the school's prices and settings
+   when it was added.
+3. To pull the cable, drag the cable end off the line (or press **Pull cable**). **Plug cable in** still works too.
+
+**Add a school**
+1. Drag **School** onto the **internet** line (the line down the left side) or onto the cloud server. (Or press
+   **Add school** in the bar.)
+2. Type a name, for example *SMK Bukit Indah*: the school code, *smk-bukit-indah*, is made from it. Choose
+   **3** demo students and keep the three machines ticked. Press **Add school**.
+3. Its site appears: CANTEEN-01, KIOSK-01 and WATER-01 with their cables unplugged, three new cards in the card tray
+   (Aina Contoh, Boon Keat Contoh, Chitra Contoh, RM 0.00 each) and its own admin card. It also gets three made-up
+   staff: Puan Deepa a/p Murugan (office), Encik Lim Chee Keong (finance) and Cikgu Aminah binti Yusof (admin).
+4. Give a student some money: in the **School office**, sign in as **Encik Lim Chee Keong** (SMK Bukit Indah),
+   open **Top-ups** and grant Aina Contoh a subsidy of RM 5.00. Draw the cable of the new **KIOSK-01**, then tap
+   Aina's card on it: **Added RM 5.00 · Balance RM 5.00**. Draw the cable of the new **CANTEEN-01** and sell her a
+   Roti canai and a Teh tarik: **Paid RM 3.30 · Balance RM 1.70**.
+
+**Watch it in Simulation:** switch to **Simulation**, then add a water machine with **Plug its cable in now**
+ticked. The new flow shows the platform registering the machine and sending it its prices and settings, the cable
+going in, the machine logging in to the broker, and its first heartbeat.
+
+The console can do it too: `add machine smk-contoh water` and `add school smk-baru SMK Baru`. **Reset the demo…**
+removes everything you added.
+
+## Step 7 — Log in to a machine like a switch (PuTTY)
 
 Every virtual machine, and the server itself, has a text console — just like a switch's CLI.
 
@@ -234,7 +280,7 @@ onecard> exit
 - Type `?` or `help` at any prompt to see what works there. The lab console's **Console** tab has
   the same console in the browser.
 
-## Step 7 — Watch the machine messages (MQTT Explorer)
+## Step 8 — Watch the machine messages (MQTT Explorer)
 
 Like Wireshark, but for the messages between the machines and the server.
 
@@ -247,7 +293,7 @@ Like Wireshark, but for the messages between the machines and the server.
 The `viewer` login can only watch. The machines each have their own login and may only use their
 own topics; the server refuses everything else (exercise 10 in [SCENARIOS.md](SCENARIOS.md) shows it).
 
-## Step 8 — The parent app on your phone
+## Step 9 — The parent app on your phone
 
 1. Stop the lab (Ctrl+C) and start it with `npm run start:lan` instead.
 2. It prints a line like `On a phone on the same Wi-Fi: http://192.168.1.20:8080/parent/`.
@@ -256,11 +302,11 @@ own topics; the server refuses everything else (exercise 10 in [SCENARIOS.md](SC
 
 Only do this on a network you trust: the lab has no passwords.
 
-## Step 9 — The exercises
+## Step 10 — The exercises
 
-[SCENARIOS.md](SCENARIOS.md) has 16 guided exercises with the expected result for each: offline
+[SCENARIOS.md](SCENARIOS.md) has 17 guided exercises with the expected result for each: offline
 sales, lost cards, kiosk power cuts, copied cards, onboarding a third school, switching the whole
-cloud server off, and more.
+cloud server off, building a school by drag and drop, and more.
 
 ## Trouble?
 

@@ -141,6 +141,13 @@ canteen reader or a volume at a water machine; unplug or plug a machine's networ
 load the admin card at the kiosk and tap it on offline machines; switch the server off. Each
 machine shows its own screen, just like the real one would.
 
+**Build it like Packet Tracer.** The **Add to the lab** bar under the lab console's header holds a canteen
+reader, a water machine, a top-up kiosk and a school. Drag a machine onto a school, or a school onto the
+internet line, fill in the small window and press **Add machine** or **Add school**. The platform registers it as it would a real one,
+and it arrives with its cable unplugged. Then draw the cable: drag the machine's cable end onto the school
+network line. Every drag has a button too (**Add machine** on each school, **Add school** in the bar), and the
+text console has `add machine <school> canteen|water|kiosk` and `add school <code> <name>`.
+
 **Like PuTTY into a switch.** Every machine and the server has a text console on port 2323:
 
 1. PuTTY → *Host Name* `127.0.0.1`, *Port* `2323`, *Connection type* **Telnet** → *Open*
@@ -208,11 +215,12 @@ broker refuses everything else.
 
 ## Exercises
 
-[docs/SCENARIOS.md](docs/SCENARIOS.md) has 16 guided exercises with expected results:
+[docs/SCENARIOS.md](docs/SCENARIOS.md) has 17 guided exercises with expected results:
 online and offline canteen sales, water by the litre, parent top-ups, refunds of money
 never added, lost cards and the window before offline machines know, replacement cards,
 new prices, device security, kiosk power cuts, copied cards, reconciliation, onboarding
-more schools (SaaS tenants), switching the whole cloud server off, and Simulation mode.
+more schools (SaaS tenants), switching the whole cloud server off, Simulation mode, and
+building a school by drag and drop.
 
 ## What is simulated, and what is not
 
@@ -349,6 +357,10 @@ Windows（64 位）用 `onecard-lab-win-x64.exe`，Linux（64 位）用 `onecard
 - **浏览器（实验室控制台 `/lab/`）：** 每所学校的机器画成拓扑图，挂在云端服务器下面。从卡盒拿一张卡，在机器上刷；
   食堂机选食物、饮水机选水量；拔插机器的网线；在充值机装参数卡，再到离线机器上刷；也可以关掉服务器。
   每台机器都有自己的屏幕，跟真机器一样。
+- **像 Packet Tracer 一样搭建：** 实验室控制台标题下面的 **加到实验室** 栏里有食堂刷卡机、饮水机、充值机和学校。
+  把机器拖到一所学校上，或把学校拖到互联网线上，填好小窗口再按 **加机器** 或 **加学校**。平台会像登记真机器一样登记它，装好时网线是拔掉的；
+  再把机器的网线头拖到学校网络线上，就插上了。每个拖放都有按钮可以代替（每所学校的 **加机器**、栏里的 **加学校**），
+  文字控制台也有 `add machine <学校> canteen|water|kiosk` 和 `add school <代码> <名称>`。
 - **像用 PuTTY 登录交换机：** PuTTY → Host Name `127.0.0.1`，Port `2323`，Connection type 选 **Telnet** → Open
   （Mac：`telnet 127.0.0.1 2323`）。输入 `machines` 看所有机器，`connect smk-contoh/CANTEEN-01` 连到一台，
   `show status`、`tap <卡号> NASI-LEMAK`、`cable unplug`、`show journal`；`connect server` 再 `server down` 就是关服务器。
@@ -366,8 +378,8 @@ Windows（64 位）用 `onecard-lab-win-x64.exe`，Linux（64 位）用 `onecard
 
 **看设备消息：** 用 MQTT Explorer 或 `mosquitto_sub`，只读账号 `viewer` / `viewer`，订阅 `lab/v1/#`。
 
-**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 16 个带预期结果的练习，从在线、离线消费，到挂失窗口、
-充值机断电、复制卡、对账、新增学校（多租户）和整台云端服务器停机。
+**练习：** [docs/SCENARIOS.md](docs/SCENARIOS.md) 有 17 个带预期结果的练习，从在线、离线消费，到挂失窗口、
+充值机断电、复制卡、对账、新增学校（多租户）、整台云端服务器停机，还有用拖放建一所学校。
 
 **安全须知：** 实验室只适合在你自己的电脑或信任的网络里用：它**没有密码**，登录页会列出所有示范人物，实验室控制台可以关掉任何东西或整个重置。默认只听 `127.0.0.1`；`npm run start:lan` 才开放给局域网。它只回应 `localhost` 和 IP 地址，所以你浏览的网站没法把自己的域名指到你的电脑来操控实验室（DNS rebinding）；要用别的名字就设 `LAB_ALLOWED_HOSTS`。不要放到公网上。
 

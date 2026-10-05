@@ -229,3 +229,45 @@ step), `hold off`, `simulation off`. A machine's own prompt has `next` and `show
 *What it shows:* every hop is a separate step that can fail on its own, and the system is built
 for it: the card is the wallet, the machine's journal keeps what could not be sent, the platform
 keeps what it has acknowledged, and each record counts once whatever happens between the hops.
+
+## 17. Build a school by drag and drop (like Packet Tracer)
+
+Packet Tracer's way of building a network, for OneCard: take a machine from the device bar, drop it on a school,
+and draw its cable. The lab does what a technician and the operator would do: the platform registers the machine,
+gives it its own secret and the school's settings, and the lab installs it.
+
+1. **Add a reader.** Lab console: drag **Canteen reader** from the **Add to the lab** bar (under the header) onto
+   SMK Seri Contoh. The window suggests **CANTEEN-03**, the next free code. Press **Add machine**. CANTEEN-03
+   appears with **No network**, its cable end hanging under the school network line. The school office's
+   **Machines** page lists it too.
+2. **Draw its cable.** Drag CANTEEN-03's cable end onto the school network line. It connects, holds prices v1,
+   settings v1 and block list v1, and sells like CANTEEN-01: Lee Mei Ling's card with a Roti canai →
+   **Paid RM 1.50 · Balance RM 23.50**.
+3. **Pull it by dragging.** Drag the cable end off the line: **No network**. Wait 3 s and tap her card again (Teh
+   tarik): the sale works offline and waits in the journal (**1 unsent**). Press **Plug cable in**: the record
+   uploads and is booked once.
+4. **Codes are checked.** Press **Add machine** on SMK Seri Contoh and type `CANTEEN-01` as the code: the window
+   says the school already has it, and nothing is added. In the operator console, suspend SJK(C) Contoh: while you
+   drag a machine it is dimmed, and dropping there says it is suspended. Reactivate it.
+5. **Add a school.** Drag **School** onto the internet line. Name *SMK Bukit Indah* (the code *smk-bukit-indah* is
+   made from it), **3** demo students, all three machines → **Add school**. Its site shows CANTEEN-01, KIOSK-01 and
+   WATER-01 with their cables unplugged, three cards at RM 0.00 in the card tray (Aina Contoh D001, Boon Keat
+   Contoh D002, Chitra Contoh D003) and its admin card. The operator console lists the new school.
+6. **Make it work.** School office: sign in as **Encik Lim Chee Keong** (SMK Bukit Indah, finance) → **Top-ups**
+   → grant Aina Contoh a subsidy of RM 5.00. Draw the cable of the new KIOSK-01 and tap Aina's card: **Added
+   RM 5.00 · Balance RM 5.00**. Draw the cable of the new CANTEEN-01 and sell her a Roti canai and a Teh tarik:
+   **Paid RM 3.30 · Balance RM 1.70**. The new school's **Books** say *Balanced*.
+7. **Its own card key.** Tap an SMK Seri Contoh card on SMK Bukit Indah's CANTEEN-01 → **Card unavailable**: the
+   new school got its own card key.
+8. **Replay it.** Switch to **Simulation** and add a water machine to SMK Bukit Indah with **Plug its cable in
+   now** ticked. The newest flow, *Add a water machine WATER-02 …*, shows the platform registering it
+   (`device.registered`), publishing its prices, settings and block list, the cable going in, the machine logging in
+   to the broker (`mqtt.connect`) and its first heartbeat. Pull a cable, or switch the server off: the machines'
+   broker logouts are steps of those flows too.
+
+At `onecard>` (PuTTY or the Console tab) the same works with `add machine smk-contoh kiosk` and
+`add school smk-baru SMK Baru`. **Reset the demo…** removes everything you added.
+
+*What it shows:* a new machine or a new school goes through the same doors as the first ones: registered by the
+platform with its own secret, its own topics on the broker and, for a school, its own card key. It works the
+moment its cable is in, and nothing about the protocol changes as the network grows.

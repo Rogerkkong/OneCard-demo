@@ -1093,6 +1093,28 @@ The page (`web/lab/`):
   `show trace` also prints broker logins and logouts, registrations, onboarding, card issue, the broker's reason
   and the copied login in plain lines.
 
+**As built (page):**
+- **Files.** `web/lab/build.js` holds the device bar, the palette drags and the two dialogs; `cables.js` the cable
+  drawing; `drag.js` the pointer-drag helper and its overlay.
+- **The device bar** ("Add to the lab") sticks under the header. It is a `role=toolbar` (arrow keys, Home, End);
+  on a phone it is one row that scrolls sideways. Its items have `touch-action: pan-x`, so a sideways swipe scrolls
+  the bar and any other move drags.
+- **Drags.** Pointer capture starts only once the pointer has moved, so a short press stays a click. A click opens
+  the dialog with the school chosen last time, which the person can change.
+  - Near the top or bottom edge the page scrolls by itself.
+  - A suspended school is dimmed, and a drop there is refused in plain words.
+- **Dialogs** are `<dialog>` elements. The page fills in its own code guess, then the one from `next-code`. Input is
+  checked on the page first, and every server code is shown in plain words next to its field.
+- **The school network line** is drawn taller (34 px instead of 24) so an unplugged cable can visibly dangle below
+  it.
+- **Simulation steps.**
+  - The copied login of the cross-device fault is not a machine on the map, so its steps start from the school's
+    network.
+  - A broker logout names the machine as the last device, but nothing travels: often nothing is sent at all (the
+    cable is out, or the broker stopped). The envelope appears at the broker.
+  - `device.registered`, `tenant.created` and `card.issued` have their own steps, with an "On the platform"
+    section in the details.
+
 ---
 
 ## 13. Desktop app (double-click to start)
