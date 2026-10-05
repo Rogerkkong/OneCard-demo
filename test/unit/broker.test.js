@@ -899,6 +899,67 @@ test('mqtt.publish events carry the QoS each message was sent with', NET, async 
   assert.deepEqual(eventsOf(ctx, 'mqtt.publish').map((e) => [e.data.msgId, e.data.qos]), [['qos-test-0', 0], ['qos-test-1', 1], ['qos-test-2', 2]]);
 });
 
+test('mqtt.publish is announced when the broker accepts a message: before its PUBACK and before any subscriber has it', NET, async (t) => {
+  // Simulation mode replays a flow hop by hop (machine, broker, platform): the broker's hop
+  // must not come after the platform's handling of the same message.
+  const { ctx, as, connect } = await setup(t);
+  const platform = await connect(as.platform());
+  await grants(platform, ['lab/v1/+/+/records']);
+  platform.on('message', (topic, payload) => ctx.events.emit('test.delivered', { msgId: JSON.parse(payload.toString()).id }));
+  const device = await connect(as.device(CANTEEN_A));
+  const ids = [1, 2, 3, 4, 5].map((i) => `hop-order-${i}`);
+  for (const id of ids) {
+    await device.publishAsync(topicOf(CANTEEN_A, 'records'), JSON.stringify({ id, type: 'sale.recorded' }), { qos: 1 });
+    ctx.events.emit('test.acked', { msgId: id });
+  }
+  await waitFor(() => eventsOf(ctx, 'test.delivered').length === ids.length && eventsOf(ctx, 'mqtt.publish').length === ids.length, {
+    message: 'every message delivered and announced',
+  });
+  const seqOf = (type, id) => eventsOf(ctx, type).find((e) => e.data.msgId === id).seq;
+  for (const id of ids) {
+    assert.ok(seqOf('mqtt.publish', id) < seqOf('test.acked', id), `${id}: announced before the PUBACK reached the device`);
+    assert.ok(seqOf('mqtt.publish', id) < seqOf('test.delivered', id), `${id}: announced before the platform had it`);
+  }
+});
+
+test('a broker started inside a flow keeps none of it: logins, publishes, refusals and disconnects carry no trace', NET, async (t) => {
+  // The lab starts and restarts the broker inside an action's trace (server up, broker
+  // restart); every later event of the broker must belong to no flow (DESIGN §11.1).
+  const ctx = createTestCtx();
+  const devices = fakeDevices();
+  const broker = await ctx.events.withContext({ trace: 'tr_brokerstart01' }, () =>
+    startBroker(ctx, { port: 0, resolveDevice: (username) => devices.get(username) ?? null }),
+  );
+  const opened = [];
+  t.after(async () => {
+    await Promise.all(opened.map((client) => client.endAsync(true).catch(() => {})));
+    await broker.close();
+    ctx.db.close();
+  });
+  const login = (username, extra = {}) => ({
+    username, password: devices.get(username).password, clientId: username, reconnectPeriod: 0, connectTimeout: 3000, ...extra,
+  });
+  const connect = async (options) => {
+    const client = await mqtt.connectAsync(broker.url, options, false);
+    opened.push(client);
+    client.on('error', () => {});
+    return client;
+  };
+  const platform = await connect({ username: PLATFORM_USERNAME, password: ctx.settings.platformBrokerPassword, clientId: 'platform-trace', reconnectPeriod: 0 });
+  await grants(platform, ['lab/v1/+/+/records']);
+  const device = await connect(login(CANTEEN_A));
+  await device.publishAsync(topicOf(CANTEEN_A, 'records'), JSON.stringify({ id: newUuid(), type: 'sale.recorded' }), { qos: 1 });
+  assert.deepEqual(await grants(device, [topicOf(CANTEEN_A2, 'commands/#')]), [128]);
+  await assert.rejects(mqtt.connectAsync(broker.url, { ...login(CANTEEN_A2), password: 'wrong', reconnectPeriod: 0 }, false));
+  const gone = onClose(device);
+  broker.kick(CANTEEN_A);
+  await gone;
+  await waitFor(() => eventsOf(ctx, 'mqtt.disconnect').length === 1, { message: 'the kicked device to be gone' });
+  const types = new Set(ctx.events.since(0).map((e) => e.type));
+  for (const type of ['mqtt.connect', 'mqtt.publish', 'mqtt.denied', 'mqtt.disconnect']) assert.ok(types.has(type), type);
+  assert.deepEqual(ctx.events.since(0).filter((e) => 'trace' in e || 'msgId' in e), []);
+});
+
 // --- close and TLS --------------------------------------------------------------------------
 
 test('close() disconnects everyone, frees the port, does not wait for idle sockets and can repeat', { timeout: 10_000 }, async (t) => {

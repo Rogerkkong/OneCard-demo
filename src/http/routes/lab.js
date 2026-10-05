@@ -1,9 +1,11 @@
 import { LabError } from '../../shared/errors.js';
 import { createConsole, MAX_INPUT } from '../../lab/console.js';
 
-// The lab console's API (docs/DESIGN.md §7, Lab row; §8). These routes operate the virtual
-// hardware and the virtual cloud server, so they need no session (auth 'none') and stay up
-// while the cloud server is switched off: they are the lab, not the product. The live event
+// The lab console's API (docs/DESIGN.md §7, Lab row; §8; Simulation mode §11.5). These routes
+// operate the virtual hardware and the virtual cloud server, so they need no session (auth
+// 'none') and stay up while the cloud server is switched off: they are the lab, not the
+// product. Each action runs in its own trace (the lab starts it; server.js never wraps these
+// routes), and one held at a hop answers early with { held: true, trace, ... }. The live event
 // stream (GET /api/lab/events) belongs to server.js.
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -13,6 +15,16 @@ function bodyOf(req) {
   if (req.body === undefined || req.body === null || req.body === '') return {};
   if (!isPlainObject(req.body)) throw new LabError('BODY_INVALID', 'the request body must be a JSON object', 400);
   return req.body;
+}
+
+/** How many traces GET /api/lab/sim lists: ?limit=1..200, default 50. */
+function traceLimit(query) {
+  const text = query?.limit;
+  if (text === undefined || text === '') return 50;
+  if (typeof text !== 'string' || !/^\d{1,3}$/.test(text) || Number(text) < 1 || Number(text) > 200) {
+    throw new LabError('INPUT_INVALID', 'limit must be a whole number from 1 to 200', 400);
+  }
+  return Number(text);
 }
 
 /** A file name for the downloaded USB export: school, machine and lab time, safe characters only. */
@@ -64,6 +76,23 @@ export function routes({ lab }) {
     // the virtual cloud server: { up }
     route('POST', '/api/lab/server', (req) => lab.setServer({ up: bodyOf(req).up })),
     route('POST', '/api/lab/broker/restart', () => lab.restartBroker()),
+
+    // Simulation mode (DESIGN §11.5): the mode, what is held, the traces (newest first, ?limit=)
+    route('GET', '/api/lab/sim', (req) => ({ ...lab.simState(), traces: lab.tracer.list({ limit: traceLimit(req.query) }) })),
+    // { mode?: 'realtime'|'simulation', hold?: boolean } -> { mode, hold, held }
+    route('POST', '/api/lab/sim', (req) => lab.setSim(bodyOf(req))),
+    // let the oldest waiting hop go on -> { released: item|null, waiting }
+    route('POST', '/api/lab/sim/next', () => lab.simNext()),
+    // let every waiting hop go on -> { released: n }
+    route('POST', '/api/lab/sim/release', () => lab.simRelease()),
+    // one trace with its events, in the order they happened -> { trace, events }
+    route('GET', '/api/lab/sim/traces/:id', (req) => {
+      const found = lab.tracer.get(req.params.id);
+      if (!found) {
+        throw new LabError('TRACE_NOT_FOUND', 'there is no such trace (the lab keeps the most recent 200, and a reset clears them)', 404);
+      }
+      return found;
+    }),
 
     // the web Console tab: { line, target } -> { output, target, prompt } (the page keeps the target)
     route('POST', '/api/lab/console', async (req) => {

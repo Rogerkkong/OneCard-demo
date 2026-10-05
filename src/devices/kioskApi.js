@@ -156,6 +156,19 @@ function extraHeaders(headers) {
 }
 
 /**
+ * True only when the lab says there is no network (`online()` answers false). Like the extra
+ * headers, it is a hint: a function that throws says nothing, and the request goes.
+ */
+function saysOffline(online) {
+  if (!online) return false;
+  try {
+    return online() === false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Signed client for one kiosk.
  * @param {{ baseUrl: string, schoolCode: string, deviceCode: string, secret: string,
  *   clock: { now(): number }, timeoutMs?: number, online?: () => boolean,
@@ -163,7 +176,8 @@ function extraHeaders(headers) {
  *   baseUrl: the platform's HTTP address; secret: the kiosk's device secret (hex);
  *   clock: the lab clock (timestamps); timeoutMs: real time allowed per request, a whole
  *   number of milliseconds from 1 to 2^31 - 1; online: asked before every request, false
- *   fails it at once as NETWORK (nothing is sent); headers: extra headers for every request
+ *   fails it at once as NETWORK (nothing is sent; a function that throws counts as online);
+ *   headers: extra headers for every request
  *   (string values only; the signing headers, accept and content-type stay the kiosk's own).
  *   Malformed options are a TypeError.
  * @returns {{
@@ -196,7 +210,7 @@ export function createKioskApi({ baseUrl, schoolCode, deviceCode, secret, clock,
     if (typeof path !== 'string' || !path.startsWith('/')) throw new TypeError('path must start with /');
     if ((verb === 'GET' || verb === 'HEAD') && body !== undefined) throw new TypeError(`${verb} requests have no body`);
     // No network (the kiosk's cable is out, the server is off): nothing goes out, as with no answer.
-    if (online && online() === false) {
+    if (saysOffline(online)) {
       throw new KioskApiError('NETWORK', NO_ANSWER_STATUS, 'cannot reach the platform (no network)', { timedOut: false, offline: true });
     }
     const url = new URL(base + path);

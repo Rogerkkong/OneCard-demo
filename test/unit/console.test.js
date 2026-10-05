@@ -56,6 +56,16 @@ const lines = (text) => text.split('\n');
 const cardMatches = (uid) => lab.checkBooks().schools.flatMap((x) => x.cards).find((c) => c.uid === uid)?.match === true;
 /** The cells of an aligned table row (columns are two or more spaces apart). */
 const cells = (row) => row.trim().split(/\s{2,}/);
+/** Until no event came for a while: the flows of earlier tests (a broker restart's acks) are over. */
+async function quiet(ms = 300) {
+  let seq = -1;
+  let since = Date.now();
+  await waitFor(() => {
+    const now = lab.ctx.events.lastSeq();
+    if (now !== seq) [seq, since] = [now, Date.now()];
+    return Date.now() - since >= ms;
+  }, { timeout: 10_000, message: 'the lab to settle' });
+}
 
 test('the prompt follows connect, disconnect and exit, and exit at the top ends the session', NET, async () => {
   const { s, run } = session();
@@ -92,6 +102,9 @@ test('help and ? list what works at each prompt, and the top one names the MQTT 
   assert.equal(await out('?'), top);
   for (const cmd of ['machines', 'connect <school>/<DEVICE>', 'connect server', 'clock', 'help or ?', 'exit']) assert.ok(top.includes(cmd), cmd);
   assert.ok(!top.includes('show schools') && !top.includes('tap <uid>'));
+  // Simulation mode is worked from the top and from the server
+  const simCommands = ['simulation on|off', 'hold on|off', 'next', 'show held', 'show traces', 'show trace <n>'];
+  for (const cmd of simCommands) assert.ok(top.includes(cmd), cmd);
   const port = new URL(lab.broker.url).port;
   assert.ok(top.includes(`MQTT Explorer: 127.0.0.1:${port}, viewer / viewer`), top);
 
@@ -100,6 +113,7 @@ test('help and ? list what works at each prompt, and the top one names the MQTT 
   for (const cmd of ['show schools', 'show clients', 'show status', 'server down | server up', 'broker restart', 'clock advance <n>m|h|d', 'jobs run']) {
     assert.ok(serverHelp.includes(cmd), cmd);
   }
+  for (const cmd of simCommands) assert.ok(serverHelp.includes(cmd), cmd);
   assert.ok(!serverHelp.includes('cable plug'));
 
   const machineHelp = async (target) => session(target).out('?');
@@ -110,6 +124,9 @@ test('help and ? list what works at each prompt, and the top one names the MQTT 
     for (const cmd of ['show status | config | prices | blocklist', 'show journal [n]', 'show log [n]', 'cable plug | cable unplug', 'heartbeat', 'upload', 'export usb', 'reboot']) {
       assert.ok(help.includes(cmd), cmd);
     }
+    // a flow started at a machine can be stepped from its prompt
+    assert.ok(help.includes('next | show held'));
+    assert.ok(!help.includes('simulation on|off'));
   }
   assert.ok(canteen.includes('tap <uid> <ITEM>[*qty] ...') && canteen.includes('admin-card tap') && !canteen.includes('pour'));
   assert.ok(water.includes('pour <uid> <ml>') && water.includes('admin-card tap') && !water.includes('tap <uid>'));
@@ -128,11 +145,22 @@ test('unknown commands, commands of another prompt and bad arguments answer like
   assert.equal(await top.out('connect smk-contoh/NOPE-01'), '% No machine smk-contoh/NOPE-01. Type machines to list them.');
   assert.match(await top.out('clock advance 1h'), /^% The lab clock is moved from the server: connect server/);
   assert.equal(await top.out('help me'), '% Invalid input. Type help.');
+  assert.equal(await top.out('simulation'), '% Incomplete command. Usage: simulation on|off');
+  assert.equal(await top.out('simulation maybe'), '% Invalid input. Usage: simulation on|off');
+  assert.equal(await top.out('hold'), '% Incomplete command. Usage: hold on|off');
+  assert.equal(await top.out('hold on now'), '% Invalid input. Usage: hold on|off');
+  assert.equal(await top.out('next please'), '% Invalid input. Usage: next');
+  assert.equal(await top.out('show held now'), '% Invalid input. Usage: show held');
+  assert.equal(await top.out('show traces 5'), '% Invalid input. Usage: show traces');
+  assert.equal(await top.out('show trace'), '% Incomplete command. Usage: show trace <n>, e.g. show trace 3');
+  assert.equal(await top.out('show trace three'), '% Invalid input. Usage: show trace <n>, e.g. show trace 3');
+  assert.equal(await top.out('show trace 3 4'), '% Invalid input. Usage: show trace <n>, e.g. show trace 3');
+  assert.equal(await top.out('show trace 99999'), '% No trace #99999: show traces lists the ones the lab keeps.');
 
   const server = session('server');
   assert.equal(await server.out('tap 04A13B5C7D2E80'), UNKNOWN_COMMAND);
-  assert.equal(await server.out('show'), '% Incomplete command. Usage: show schools | clients | status');
-  assert.equal(await server.out('show money'), '% Invalid input. Usage: show schools | clients | status');
+  assert.equal(await server.out('show'), '% Incomplete command. Usage: show schools | clients | status | held | traces | trace <n>');
+  assert.equal(await server.out('show money'), '% Invalid input. Usage: show schools | clients | status | held | traces | trace <n>');
   assert.equal(await server.out('server'), '% Incomplete command. Usage: server down | server up');
   assert.equal(await server.out('server sideways'), '% Invalid input. Usage: server down | server up');
   assert.equal(await server.out('jobs'), '% Incomplete command. Usage: jobs run');
@@ -140,6 +168,8 @@ test('unknown commands, commands of another prompt and bad arguments answer like
 
   const canteen = session('smk-contoh/CANTEEN-01');
   assert.equal(await canteen.out('pour 04C35D2F8B1A82 650'), UNKNOWN_COMMAND);
+  assert.equal(await canteen.out('simulation on'), UNKNOWN_COMMAND, 'switched at onecard> or server#');
+  assert.equal(await canteen.out('next now'), '% Invalid input. Usage: next');
   assert.equal(await canteen.out('admin-card load'), UNKNOWN_COMMAND);
   assert.match(await canteen.out('show'), /^% Incomplete command\. Usage: show status/);
   assert.match(await canteen.out('show everything'), /^% Invalid input\. Usage: show status/);
@@ -413,6 +443,74 @@ test('server#: server down and up, and broker restart', NET, async () => {
     timeout: 15_000,
     message: 'every plugged machine back on the broker',
   });
+});
+
+test('Simulation mode: hold a sale at each hop, let it go with next, and read the flow back', NET, async () => {
+  const top = session();
+  const canteen = session('smk-contoh/CANTEEN-01');
+  // hold would catch what earlier flows still have on their way (the broker restart's acks)
+  await quiet();
+  assert.equal(await top.out('next'), 'Nothing waits at a hop (hold is off).');
+  assert.equal(await top.out('show held'), 'Nothing waits at a hop. Mode realtime, hold off.');
+  assert.equal(await top.out('hold on'), '% Hold works only in simulation mode: type simulation on first.');
+  assert.match(await top.out('simulation on'), /^Simulation mode on: every action and request is traced/);
+  assert.equal(await top.out('simulation on'), 'Simulation mode is already on.');
+  assert.match(await session('server').out('hold on'), /^Hold at each hop on: every traced flow waits at each hop/);
+  assert.equal(await top.out('hold on'), 'Hold at each hop is already on.');
+
+  // the reader charges the card and answers at once; the record waits in its outbox
+  const sale = lines(await canteen.out(`tap ${AHMAD} BUAH`));
+  assert.match(sale[0], /^Screen: Paid RM 1\.00 · Balance RM \d+\.\d{2}$/);
+  const held = /^Held at a hop: sale\.recorded in the outbox of smk-contoh\/CANTEEN-01 \(trace #(\d+)\)\.$/.exec(sale[1]);
+  assert.ok(held, sale[1]);
+  const n = held[1];
+  assert.equal(sale[2], 'Type next to let it go on (show held lists what waits); the rest of the flow follows.');
+  const waiting = lines(await top.out('show held'));
+  assert.equal(waiting[0], '1 hop waiting, oldest first: next lets the oldest go on. Mode simulation, hold on.');
+  assert.deepEqual(cells(waiting[1]), ['#', 'WHERE', 'MACHINE', 'WHAT', 'TRACE', 'SINCE']);
+  assert.deepEqual(cells(waiting[2]).slice(0, 5), ['1', 'outbox', 'smk-contoh/CANTEEN-01', 'sale.recorded', `#${n}`]);
+  assert.equal((await canteen.out('show held')).split('\n')[0], waiting[0], 'the same list at the machine');
+
+  // next, at the machine's own prompt: the broker takes it, and it waits at the platform's door
+  assert.deepEqual(lines(await canteen.out('next')), [`Let go: sale.recorded in the outbox of smk-contoh/CANTEEN-01 (trace #${n}).`, 'Nothing else waits.']);
+  await waitFor(() => lab.simState().held.some((h) => h.where === 'platform'), { message: 'the sale at the platform' });
+  assert.deepEqual(cells(lines(await top.out('show held'))[2]).slice(0, 5), ['1', 'platform', 'smk-contoh/CANTEEN-01', 'sale.recorded', `#${n}`]);
+  assert.equal(cardMatches(AHMAD), false, 'the books do not have it yet');
+  assert.deepEqual(lines(await top.out('next')), [`Let go: sale.recorded from smk-contoh/CANTEEN-01 at the platform's inbox (trace #${n}).`, 'Nothing else waits.']);
+  await waitFor(() => cardMatches(AHMAD), { message: 'the held sale in the books' });
+
+  // the flow, step by step: one aligned line per step
+  const listed = lines(await top.out('show traces'));
+  assert.equal(listed[0], 'The most recent flows, newest first (show trace <n> for the steps):');
+  assert.deepEqual(cells(listed[1]), ['#', 'KIND', 'TITLE', 'EVENTS', 'STARTED']);
+  assert.ok(listed.slice(2).some((row) => cells(row)[0] === `#${n}` && cells(row)[2] === `Tap ${AHMAD} on smk-contoh/CANTEEN-01`), listed.join('\n'));
+  const steps = lines(await top.out(`show trace ${n}`));
+  assert.equal(steps[0], `Trace #${n} (tap): Tap ${AHMAD} on smk-contoh/CANTEEN-01`);
+  assert.match(steps[1], /^\d+ events, started \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\. TIME is the lab clock \(KL\)\.$/);
+  assert.deepEqual(cells(steps[2]), ['#', 'TIME', 'TYPE', 'WHAT']);
+  const rows = steps.slice(3).map(cells);
+  rows.forEach((r, i) => assert.equal(r[0], String(i + 1)));
+  assert.ok(rows.every((r) => /^\d{2}:\d{2}:\d{2}$/.test(r[1])));
+  const types = rows.map((r) => r[2]);
+  const at = (type, from = 0) => types.indexOf(type, from);
+  assert.equal(types[0], 'sim.trace');
+  assert.equal(rows[0][3], `Tap ${AHMAD} on smk-contoh/CANTEEN-01`);
+  // the machine's steps, the hold at its outbox, the broker's pass right after the send, the hold at the platform, the books
+  const send = at('device.send');
+  assert.ok(at('card.write') < at('sim.held') && at('sim.held') < at('sim.released') && at('sim.released') < send);
+  assert.equal(types[send + 1], 'mqtt.publish', 'the broker passes the message right after it is sent');
+  assert.ok(at('sim.held', send) > send && at('purchase.received') > at('sim.released', send));
+  assert.ok(types.includes('intake.accepted') && types.includes('ledger.posting') && types.includes('lab.action'));
+  assert.match(rows[at('device.step')][3], new RegExp(`^CANTEEN-01 read card \\.\\.${AHMAD.slice(-4)}: RM \\d+\\.\\d{2}, counter \\d+, \\d+ records?$`));
+  assert.match(rows[at('sim.held')][3], /^waits at the outbox: sale\.recorded of CANTEEN-01$/);
+  assert.match(rows[send][3], /^CANTEEN-01 sends sale\.recorded \(seq \d+, CANTEEN-01-\d{6}\)$/);
+  assert.match(rows[at('purchase.received')][3], /^purchase CANTEEN-01-\d{6}: POSTED RM 1\.00$/);
+
+  assert.equal(await top.out('hold off'), 'Hold off: flows run through again.');
+  assert.equal(await top.out('hold off'), 'Hold is already off.');
+  assert.equal(await top.out('simulation off'), 'Realtime mode: nothing waits at the hops any more.');
+  assert.equal(await top.out('simulation off'), 'Already in realtime mode: nothing waits at the hops.');
+  assert.deepEqual(lab.simState(), { mode: 'realtime', hold: false, held: [] });
 });
 
 test('every line the console printed fits in 100 characters, with money as RM 0.00 and times as DD/MM/YYYY HH:MM', NET, () => {

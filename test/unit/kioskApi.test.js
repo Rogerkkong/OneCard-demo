@@ -564,6 +564,19 @@ describe('kiosk API errors', () => {
     await assert.rejects(cut.lookup('..'), TypeError);
   });
 
+  test('an online() that throws says nothing: the request goes, as with no online() at all', async () => {
+    // like headers(), it is the lab's hint; a bug in it must not make a top-up fail in a way the kiosk does not expect
+    const unsure = apiFor(platform.url, clock, {
+      online: () => {
+        throw new Error('lab bug');
+      },
+    });
+    platform.respond = () => ({ status: 200, json: { token: 1, school: SCHOOL, packs: [] } });
+    const before = platform.requests.length;
+    assert.deepEqual(await unsure.packs(), { token: 1, school: SCHOOL, packs: [] });
+    assert.equal(platform.requests.length, before + 1);
+  });
+
   test('KioskApiError(code, status, message) can be built directly', () => {
     const err = new KioskApiError('NETWORK', 503, 'cable unplugged');
     assert.equal(err.code, 'NETWORK');

@@ -271,10 +271,41 @@ export async function startBroker(ctx, {
       });
   }
 
+  // mqtt.publish is announced the moment the broker accepts a message. aedes's own 'publish'
+  // event comes only once the message is stored, acknowledged and passed on, often after the
+  // platform has handled it, which would put the broker's hop last in a Simulation-mode replay.
+  const announced = new WeakSet(); // packets announced on acceptance (the 'publish' event skips them)
+
+  function announcePublish(packet, client) {
+    const account = client ? accounts.get(client) : undefined;
+    const { type, txn, id } = peekEnvelope(packet.payload);
+    events.emit(
+      'mqtt.publish',
+      {
+        from: account?.username ?? client?.id ?? null,
+        topic: packet.topic,
+        type,
+        txn,
+        // the envelope id links this hop to the flow that sent the message (Simulation mode)
+        msgId: id,
+        qos: Number.isInteger(packet.qos) ? packet.qos : 0,
+        retained: Boolean(packet.retain),
+        bytes: byteLength(packet.payload),
+      },
+      schoolOfTopic(packet.topic) ?? account?.schoolCode ?? null,
+    );
+  }
+
   function authorizePublish(client, packet, callback) {
     // client is null only for a stored will of a broker that is gone; nobody vouches for it
     const account = client ? accounts.get(client) : undefined;
     if (account && mayPublish(account, packet.topic)) {
+      // A QoS 2 resend is published again only if the first copy never arrived: then the
+      // 'publish' event announces it.
+      if (!(packet.qos === 2 && packet.dup)) {
+        announced.add(packet);
+        announcePublish(packet, client);
+      }
       callback(null);
       return;
     }
@@ -311,26 +342,12 @@ export async function startBroker(ctx, {
     if (client.clean && sessionOwners.get(client.id) === account) sessionOwners.delete(client.id);
     events.emit('mqtt.disconnect', { username: account?.username ?? null, clientId: client.id }, account?.schoolCode ?? null);
   });
-  // Fires once per accepted publish, after authorizePublish, with the retain flag as sent.
+  // Fires once per published message, with the retain flag as sent. Messages from clients were
+  // announced when authorizePublish accepted them; this covers the ones the server sends itself.
   aedes.on('publish', (packet, client) => {
     if (typeof packet.topic !== 'string' || packet.topic.startsWith('$')) return; // the broker's own $SYS chatter
-    const account = client ? accounts.get(client) : undefined;
-    const { type, txn, id } = peekEnvelope(packet.payload);
-    events.emit(
-      'mqtt.publish',
-      {
-        from: account?.username ?? client?.id ?? null,
-        topic: packet.topic,
-        type,
-        txn,
-        // the envelope id links this hop to the flow that sent the message (Simulation mode)
-        msgId: id,
-        qos: Number.isInteger(packet.qos) ? packet.qos : 0,
-        retained: Boolean(packet.retain),
-        bytes: byteLength(packet.payload),
-      },
-      schoolOfTopic(packet.topic) ?? account?.schoolCode ?? null,
-    );
+    if (announced.has(packet)) return;
+    announcePublish(packet, client);
   });
   aedes.on('clientError', (client, err) => log('debug', 'mqtt client error', { clientId: client?.id, error: err?.message }));
   aedes.on('connectionError', (client, err) => log('debug', 'mqtt connection error', { error: err?.message }));
