@@ -543,13 +543,28 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
       el.traceSelect.dataset.sig = sig;
     }
     el.traceSelect.value = shown ? s.traceId : '';
-    el.traceSelect.disabled = !s.traces.length;
-    const tr = currentTrace();
+    el.traceSelect.disabled = !list.length;
+    const tr = currentTrace() ?? (shown ? chosenSummary() : null);
     let line = '';
     if (s.gone) line = t('sim.trace.gone');
     else if (tr) line = t('sim.trace.line', { title: traceTitle(tr.title, t, app.i18n.lang), n: s.steps.length });
     setText(el.traceTitle, line);
     el.traceTitle.classList.toggle('is-gone', s.gone);
+  }
+
+  /**
+   * The line under the hold switch: what hold does; while something waits the notice and the list
+   * say what to do, unless nothing can go on (only the platform's inbox waits and the server is
+   * off): then it says why Next hop is greyed, when the notice does not say so already.
+   */
+  function renderHint() {
+    const n = s.held.length;
+    const stuck = n > 0 && s.held.every((x) => x.where === 'platform') && !s.serverUp;
+    const said = !el.notice.hidden && el.notice.classList.contains('sim__notice--warn') && s.held.some((x) => x.id === el.notice.dataset.item && x.where === 'platform');
+    const show = stuck && !said;
+    setText(el.holdHint, t(show ? 'sim.next.stuck' : s.hold ? 'sim.hold.on' : isRealtime() ? 'sim.hold.offRealtime' : 'sim.hold.off'));
+    el.holdHint.classList.toggle('is-stuck', show);
+    setHidden(el.holdHint, n > 0 && !show);
   }
 
   function renderHold() {
@@ -561,12 +576,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     const n = s.held.length;
     // what waits at the platform goes on only while the cloud server is on
     const releasable = s.held.filter((x) => x.where !== 'platform' || s.serverUp).length;
-    // everything that waits is at the platform and the server is off: the hint says why Next hop cannot be pressed
-    const stuck = n > 0 && releasable === 0;
-    setText(el.holdHint, t(stuck ? 'sim.next.stuck' : s.hold ? 'sim.hold.on' : isRealtime() ? 'sim.hold.offRealtime' : 'sim.hold.off'));
-    el.holdHint.classList.toggle('is-stuck', stuck);
-    // while something waits, the notice and the list say what to do: the general hint gives way
-    setHidden(el.holdHint, n > 0 && !stuck);
+    renderHint();
     if (!el.next.hasAttribute('aria-busy')) setText(el.next, n ? t('sim.next.count', { n }) : t('sim.next'));
     el.next.disabled = releasable === 0 || s.busy;
     if (!el.release.hasAttribute('aria-busy')) setText(el.release, t('sim.release'));
@@ -736,7 +746,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     let empty = '';
     let showAll = false;
     if (s.loading && !s.events.length) empty = t('sim.empty.loading');
-    else if (s.gone) empty = t('sim.trace.gone');
+    else if (s.gone) empty = ''; // the line under the picker says so (once is enough)
     else if (!s.traceId) empty = t('sim.empty.none');
     else if (s.steps.length && !vis.length) {
       empty = s.steps.every((x) => x.heartbeat || !s.layers.has(x.layer)) && s.steps.some((x) => x.heartbeat) && !s.beats ? t('sim.empty.beats') : t('sim.empty.filtered');
@@ -898,6 +908,7 @@ export function createSim(app, { root, modeSwitch, topologyEl, topology, showTab
     setHidden(el.notice, !text);
     if (itemId) el.notice.dataset.item = itemId;
     else delete el.notice.dataset.item;
+    renderHint();
   }
 
   /** A waiting item was clicked: show its flow at the step where it waits. */

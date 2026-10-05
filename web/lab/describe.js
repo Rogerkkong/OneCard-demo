@@ -46,9 +46,13 @@ export function kindOf(e) {
   return KIND_OF[e.type] ?? 'lab';
 }
 
+// Every hop of a heartbeat: its passage through the broker and the platform's check, and (Simulation
+// mode's events) the machine sending it, the broker's acknowledgement, no network, a hold.
+const HEARTBEAT_HOPS = new Set(['mqtt.publish', 'intake.accepted', 'device.send', 'device.acked', 'device.step', 'sim.held']);
+
 /** Heartbeats a machine sends every few seconds (hidden unless asked for). */
 export function isHeartbeat(e) {
-  return (e.type === 'mqtt.publish' || e.type === 'intake.accepted') && e.data?.type === 'device.heartbeat';
+  return HEARTBEAT_HOPS.has(e.type) && e.data?.type === 'device.heartbeat';
 }
 
 /** Events that read as trouble get a red mark in the inspector. */

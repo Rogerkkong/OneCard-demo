@@ -310,7 +310,7 @@ function channelOf(topic) {
 
 /** What a held item is, in a few words ("the sale", "the call: what is waiting for the card"). */
 function heldWhat(item, t) {
-  if (!item) return t('msg.unknown');
+  if (!item) return t('held.msg', { what: t('msg.unknown') });
   if (item.where === 'kiosk-http') return t('held.call', { call: callName(item.call, t) });
   return t('held.msg', { what: messageName(item.type, t) });
 }
@@ -1383,6 +1383,18 @@ function booksSection(e, t) {
     };
   }
   return null;
+}
+
+/**
+ * The sentence of one event seen on its own (the Messages tab): what its step of a flow says.
+ * `trace`: its flow's summary when known (its sim.trace event); `held`: waiting items by id (from
+ * sim.held), so a sim.released can say what went on.
+ */
+export function eventSentence(e, { t, lang, trace = null, held = null }) {
+  const ctx = { t, lang, ...traceContext([e], trace) };
+  const item = e.type === 'sim.released' ? held?.get(e.data?.id) : null;
+  if (item) ctx.held.set(item.id, item);
+  return stepOf(e, ctx).title;
 }
 
 // ---- a whole trace ------------------------------------------------------------------------------
