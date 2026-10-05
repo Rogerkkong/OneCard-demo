@@ -17,6 +17,7 @@ import { VirtualCard } from '../../src/devices/card.js';
 // handled exactly once, the books balance and the card equals its mirror. The demo seed's
 // schools, people and cards are fictional; every secret is made per run.
 
+// A machine retries a lost broker after 50 ms here, doubling up to 10 s: back online waits allow for it.
 const NET = { timeout: 30_000 };
 const HOLD = 'tr_hold';
 
@@ -146,7 +147,7 @@ test('held at the platform while the server goes off and on: handled exactly onc
   const { msgId } = w.inbox.held[0].info;
   await w.serverOff();
   await w.serverOn();
-  await waitFor(() => w.reader.connected, { message: 'the reader back online' });
+  await waitFor(() => w.reader.connected, { timeout: 12_000, message: 'the reader back online' });
   assert.deepEqual(handled(w.ctx, msgId), []);
   w.inbox.held.shift().release();
   await waitFor(() => w.platform.inboxWaiting() === 0, { message: 'the inbox to empty' });
@@ -165,7 +166,7 @@ test('let go at the platform while its link is down: handled once, and not again
   w.inbox.held.shift().release();
   await waitFor(() => w.platform.inboxWaiting() === 0, { message: 'the inbox to empty' });
   await w.serverOn();
-  await waitFor(() => w.reader.connected, { message: 'the reader back online' });
+  await waitFor(() => w.reader.connected, { timeout: 12_000, message: 'the reader back online' });
   await settle();
   assert.deepEqual(handled(w.ctx, msgId), ['intake.accepted']);
   assert.deepEqual(w.books(), { balanced: true, card: 1650, mirror: 1650 });
@@ -220,7 +221,7 @@ test('a kiosk confirm held while the server goes off: the money waits on the car
   const tap = await tapping;
   assert.deepEqual([tap.ok, tap.added.map((a) => a.confirmed)], [true, [false]]);
   await w.serverOn();
-  await waitFor(() => w.kiosk.connected, { message: 'the kiosk back online' });
+  await waitFor(() => w.kiosk.connected, { timeout: 12_000, message: 'the kiosk back online' });
   const next = await w.kiosk.tap(w.card);
   assert.deepEqual(next.reconfirmed.map((r) => r.result), ['CONFIRMED']);
   await settle();

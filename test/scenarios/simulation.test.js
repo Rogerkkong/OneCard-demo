@@ -350,6 +350,10 @@ test('16.6 switching to realtime lets every held hop go on; a reset leaves nothi
   assert.equal(beat.machine.code, 'KIOSK-01');
   assert.deepEqual([reboot.item.type, reboot.machine.lastScreen.text], ['device.heartbeat', 'Starting…'], 'the reboot waits for its first heartbeat');
   assert.deepEqual(heldNow().map((h) => h.trace), [sale.trace, beat.trace, reboot.trace]);
+  // the clock moves at once; the connected machines' heartbeats at the new time wait at their outboxes
+  const moved = await lab.advanceClock(60_000);
+  assert.deepEqual([moved.held, moved.clock.kl, moved.item.type], [true, '05/10/2026 10:01', 'device.heartbeat']);
+  assert.equal(lab.tracer.get(moved.trace).trace.title, 'Move the lab clock forward 1 min');
 
   // realtime: everything goes on, and each action finishes in the background
   assert.deepEqual(ok(await b.post('/api/lab/sim', { mode: 'realtime' })), { mode: 'realtime', hold: false, held: [] });
@@ -358,6 +362,7 @@ test('16.6 switching to realtime lets every held hop go on; a reset leaves nothi
   await waitFor(() => inTrace(reboot.trace, 'lab.action').length === 1, { message: 'the reboot to finish' });
   assert.equal(lab.terminals.get('sjkc-contoh/CANTEEN-01').state.lastScreen.text, 'Ready');
   await waitFor(() => inTrace(beat.trace, 'intake.accepted').length === 1, { message: 'the heartbeat at the platform' });
+  await waitFor(() => inTrace(moved.trace, 'intake.accepted').length >= 4, { message: 'the clock move\'s heartbeats at the platform' });
 
   // the API checks what it is given
   for (const body of [{}, { mode: 'fast' }, { hold: 'yes' }, { mode: 'realtime', hold: true }, { hold: true }]) {
@@ -451,5 +456,13 @@ test('16.9 no leakage: the timer\'s heartbeats belong to no flow, even right aft
   const theirs = quick.ctx.events.since(mark).filter((e) => ids.has(e.data?.msgId) || ids.has(e.msgId));
   assert.ok(theirs.some((e) => e.type === 'intake.accepted') && theirs.some((e) => e.type === 'mqtt.publish'));
   for (const e of theirs) assert.equal(e.trace, undefined, `${e.type} of a timer heartbeat`);
+
+  // with hold on, what belongs to no flow never waits: the timer's heartbeats go on as in realtime
+  quick.setSim({ mode: 'simulation', hold: true });
+  const holdMark = quick.ctx.events.lastSeq();
+  const accepted = () => quick.ctx.events.since(holdMark).filter((e) => e.type === 'intake.accepted' && e.data.type === 'device.heartbeat');
+  await waitFor(() => accepted().length >= 5, { timeout: 5000, message: "the timer's heartbeats while hold is on" });
+  assert.deepEqual(quick.simState().held, []);
+  assert.ok(accepted().every((e) => e.trace === undefined));
   assert.deepEqual(errors, []);
 });

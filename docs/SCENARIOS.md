@@ -179,3 +179,51 @@ The whole server — broker, platform and database — is virtual too, so you ca
    platform sends every machine its current prices, settings and block list again.
 5. **Restart only the broker**: retained messages are lost with it, and the platform puts
    them back as soon as it reconnects — check a machine's versions in the school office.
+
+## 16. Simulation mode (step by step, like Packet Tracer)
+
+Every action you take in the lab, and every change made in the web apps, is kept as a *trace*:
+the whole flow, hop by hop — card → machine → broker → platform → books. The lab console replays
+a trace step by step, and in simulation mode it can hold a flow at each hop while you break
+things in between.
+
+1. **Replay a tap.** Lab console: open the **Simulation** tab and tap Ahmad Faiz's card on
+   `CANTEEN-01` (Nasi lemak). The newest trace, *Tap 04A13B5C7D2E80 on smk-contoh/CANTEEN-01*,
+   is followed by itself. Step through it (or press play): the card is read (balance, counter,
+   block list), the rules are checked one by one, the card is charged, the record goes into the
+   journal, the screen shows **Paid RM 3.50 · Balance RM 26.50**, the signed `sale.recorded` goes
+   to the broker, which acknowledges it, and the platform runs its ten checks and books it.
+2. **Open the packet details.** Click a step: *Card* shows the chip data, *Machine checks* the
+   rules ✓, *Message* the envelope, *Security* the signature (HMAC-SHA256 with the machine's own
+   secret, checked by the platform), *MQTT* the topic, QoS 1 and the acknowledgement, *Platform
+   checks* the pipeline steps ✓, *Books* the posting lines.
+3. **Hold at each hop.** Switch the header to **Simulation** and switch on *Hold at each hop
+   (live)*. Tap Lee Mei Ling's card on `CANTEEN-01` (Roti canai). The reader answers at once,
+   **Paid RM 1.50 · Balance RM 23.50** (the money is already off the card), but the record waits
+   in the reader's outbox with a pause badge.
+4. **Pull the cable while the sale is in the machine.** Unplug `CANTEEN-01`, then press **Next
+   hop**. The record finds no network: the trace shows the step *offline*, and `CANTEEN-01` has
+   **1 unsent** record in its journal. Nothing is lost.
+5. **Plug it back.** Plug `CANTEEN-01` in. Reconnecting is a flow of its own, and it waits too:
+   press **Next hop** until its heartbeat and its `journal.batch` have passed the reader and the
+   platform. The record arrives once (purchase **POSTED**, via the journal batch) and the school
+   office shows RM 23.50, like the card.
+6. **Hold at the platform, then switch the server off.** Tap Arjun's card on `CANTEEN-01` and
+   press **Next hop** once: the broker takes the record (for the reader it is sent) and it waits
+   at the platform's door. Switch the cloud server off: **Next hop** cannot let it go, the
+   platform is off. Switch the server on: the record goes on by itself and is booked exactly
+   once. The machines coming back belong to the server's own trace and wait at their outboxes
+   too; switch back to **Realtime** to let everything go.
+7. **The kiosk when the server goes off.** With hold on, tap Ahmad Faiz's card on `KIOSK-01` and
+   press **Next hop** until the kiosk's `pending` call waits. Switch the server off and press
+   **Next hop**: the call gets no answer, the kiosk writes nothing and shows *Cannot reach the
+   platform, please come back later*. Switch the server on and back to **Realtime**: the next
+   tap adds the **RM 20.00** waiting.
+
+The same from a text console (PuTTY or the Console tab), at `onecard>` or `server#`:
+`simulation on`, `hold on`, `show held`, `next`, `show traces`, `show trace <n>` (one line per
+step), `hold off`, `simulation off`. A machine's own prompt has `next` and `show held` too.
+
+*What it shows:* every hop is a separate step that can fail on its own, and the system is built
+for it: the card is the wallet, the machine's journal keeps what could not be sent, the platform
+keeps what it has acknowledged, and each record counts once whatever happens between the hops.

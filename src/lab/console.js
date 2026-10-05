@@ -607,6 +607,12 @@ export function createConsole(lab) {
     ];
   }
 
+  /** After hold off or realtime: what still waits (the platform's hops, while the server is off). */
+  function stillWaiting(state) {
+    const n = state.held.length;
+    return n > 0 ? [`${plural(n, 'message')} still ${n === 1 ? 'waits' : 'wait'} at the platform until the cloud server is on again.`] : [];
+  }
+
   function simulationSwitch(words) {
     const arg = words[1]?.toLowerCase();
     if (words.length !== 2 || (arg !== 'on' && arg !== 'off')) {
@@ -623,8 +629,8 @@ export function createConsole(lab) {
     }
     if (before.mode === 'realtime') return 'Already in realtime mode: nothing waits at the hops.';
     const after = lab.setSim({ mode: 'realtime' });
-    const let_ = before.held.length - after.held.length;
-    return `Realtime mode: nothing waits at the hops any more${let_ > 0 ? ` (${plural(let_, 'held hop')} let go)` : ''}.`;
+    const freed = before.held.length - after.held.length;
+    return [`Realtime mode: nothing waits at the hops any more${freed > 0 ? ` (${plural(freed, 'held hop')} let go)` : ''}.`, ...stillWaiting(after)];
   }
 
   function holdSwitch(words) {
@@ -644,8 +650,8 @@ export function createConsole(lab) {
     }
     if (!before.hold) return 'Hold is already off.';
     const after = lab.setSim({ hold: false });
-    const let_ = before.held.length - after.held.length;
-    return `Hold off: flows run through again${let_ > 0 ? `; ${plural(let_, 'held hop')} let go` : ''}.`;
+    const freed = before.held.length - after.held.length;
+    return [`Hold off: flows run through again${freed > 0 ? `; ${plural(freed, 'held hop')} let go` : ''}.`, ...stillWaiting(after)];
   }
 
   function nextHop() {
